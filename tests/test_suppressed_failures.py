@@ -83,7 +83,7 @@ def test_every_per_tick_reflex_routes_through_log_suppressed():
     and none of the old DEBUG-only lines is left."""
     src = pathlib.Path("wingman/tick_handlers.py").read_text()
     for name in ("detect_map_boundary", "note_incoming", "note_afterburner_cruise",
-                 "note_stall_prevention", "note_boundary", "detect_terrain_ahead",
+                 "note_stall_prevention", "detect_terrain_ahead",
                  "climb_emergency_update_fn"):
         assert f'log_suppressed(logger, "{name}", exc)' in src, name
     for old in ('"note_incoming failed"', '"note_stall_prevention failed"',

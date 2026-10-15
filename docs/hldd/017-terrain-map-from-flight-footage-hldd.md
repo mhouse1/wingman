@@ -18,6 +18,12 @@ stands" below is the place to start reading when this work is picked up again.
 
 ## Where this stands (2026-10-04, end of the day)
 
+**2026-10-14: the survey mission is removed** ([ADR 160](../adr/160-acs-mission-and-j20-are-the-only-missions.md),
+operator: "remove the other missions except mission j20"). `mission_survey`, `wingman/survey.py` and
+`make survey` are gone from the tree; `main` as of PR 82 still has them. The compass and the full-map reader
+stay in the analyzer, but nothing opens the full map now. Resuming this design starts by bringing the mission
+back from that history.
+
 Work stopped here on 2026-10-04 at 19:00, to be resumed the following week. Nothing since commit `88a29b3`
 is committed: the compass, the full-map reader, the survey mission, `make survey`, the desktop extension's
 version 4 and every document change of the day are in the working tree.

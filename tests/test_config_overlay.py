@@ -65,7 +65,7 @@ def test_a_non_mapping_overlay_is_rejected(tmp_path):
 
 
 def test_overlay_keys_name_every_leaf_for_the_startup_log():
-    assert overlay_keys({"accept_invite": True, "mission": {"default_mission": "su30"}}) == [
+    assert overlay_keys({"accept_invite": True, "mission": {"default_mission": "acs"}}) == [
         "accept_invite", "mission.default_mission"]
 
 

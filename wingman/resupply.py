@@ -26,9 +26,17 @@ class MissilePriority:
     missiles_spent: int
     empty: bool
     rearmed: bool = False
+    # The count read just now shows a rearm that is not confirmed yet: the
+    # first of the reads `rearmed` waits for.
+    rearm_seen: bool = False
 
 
 RESUPPLY_MIN_MISSILES_SPENT = 2
+# The largest count one read may show and still be taken as the first sign of a
+# rearm. No rack carries more, and the single reads that jumped up and straight
+# back in the sessions of 2026-10-11 and 10-13 showed 9, 10, 14, 18, 19 and 47
+# (35 of 37; the other two read 6 and 5).
+REARM_SIGN_MAX_COUNT = 8
 RESUPPLY_MARKER_HOLD_S = 0.5
 # Where a marker counts when the caller names no region: [x1, y1, x2, y2] in
 # frame fractions. The pursuit passes the tracker's acquisition region.
@@ -263,6 +271,94 @@ class ResupplyMarkerMemory:
         self._seen_at = None
 
 
+@dataclass(frozen=True)
+class ResupplyPass:
+    """The resupply marker was passed. Pixels are at 1200 px of frame height."""
+    off_centre_px: float      # its last sighting, from the frame centre
+    outward_px: float         # how far out it moved in the second before that
+    since_seen_s: float       # how long ago that sighting was
+
+
+class ResupplyPassWatch:
+    """Says when the resupply marker the pursuit was flying at has just been passed.
+
+    The marker going missing is not enough. In the session of 2026-10-13 08:00 to
+    18:15 the steered marker went missing for 0.9 s or more 162 times: 49 were
+    pickups, and 73 times it was back within 4 s, having sat a median 20 px from
+    the centre without moving (-2 px in its last second). At a pickup it was a
+    median 60 px out and had moved 28 px outward in its last second. So a pass
+    is the marker lost while it was off the centre and moving outward. On that
+    session the rule below fires on 36 of the 49 pickups and 5 of the 73
+    dropouts; of its 21 other firings, 15 came with the missile count already
+    at 4 or more (inferred: a full selected rack, where no count can show the
+    pickup).
+
+    The marker must also have been lined up before it moved out. First flight,
+    2026-10-13 19:51:52: the marker had just taken the steering 597 px from the
+    centre, blinked out for 0.6 s 5 px further out, and the rule above signed
+    a pass; the marker was back 0.9 s later and the climb-out had broken the
+    approach. The pickups the rule signs on the baseline had the marker a
+    median 33 px from the centre a second before (130 at most), so 120 px
+    costs one of the 36.
+
+    No I/O and no clock of its own: `update` is called once per steering tick.
+    """
+
+    _KEEP_S = 6.0             # sightings older than this are forgotten
+    _STEER_WINDOW_S = 2.0     # the marker must have had the steering over this long
+    _STEER_SHARE = 0.6
+    _BEFORE_S = (1.6, 0.6)    # the outward move is against the sightings this long before the last
+
+    def __init__(self, *, missing_s: float = 0.5, min_off_centre_px: float = 35.0,
+                 min_outward_px: float = 5.0, lined_up_px: float = 120.0,
+                 min_approach_s: float = 2.0) -> None:
+        self.missing_s = max(0.0, float(missing_s))
+        self.min_off_centre_px = float(min_off_centre_px)
+        self.min_outward_px = float(min_outward_px)
+        self.lined_up_px = float(lined_up_px)
+        self.min_approach_s = max(0.0, float(min_approach_s))
+        self._sightings: "list[tuple[float, float, bool]]" = []   # (time, px off centre, steering)
+        self._judged = False      # this loss has been judged, pass or not
+
+    def update(self, now: float, marker: "ResupplyMarker | None", *, steering: bool,
+               active: bool, frame_width: int, frame_height: int) -> "ResupplyPass | None":
+        """`marker` is this frame's own detection, or None. `steering`: the
+        marker has the steering. `active`: the pursuit is steering at all (no
+        dive recovery, no climb-out). Returns the pass once, on the tick the
+        marker has been missing `missing_s`."""
+        if marker is not None:
+            off = math.hypot(marker.x - frame_width / 2,
+                             marker.y - frame_height / 2) * 1200.0 / frame_height
+            self._sightings = [s for s in self._sightings if now - s[0] <= self._KEEP_S]
+            self._sightings.append((now, off, bool(steering and active)))
+            self._judged = False
+            return None
+        if not self._sightings or self._judged:
+            return None
+        last_t, last_off, last_steering = self._sightings[-1]
+        if now - last_t < self.missing_s:
+            return None
+        self._judged = True
+        if not (active and last_steering):
+            return None
+        if last_t - self._sightings[0][0] < self.min_approach_s:
+            return None
+        recent = [s for s in self._sightings if s[0] >= last_t - self._STEER_WINDOW_S]
+        if sum(1 for s in recent if s[2]) < self._STEER_SHARE * len(recent):
+            return None
+        before = sorted(s[1] for s in self._sightings
+                        if last_t - self._BEFORE_S[0] <= s[0] <= last_t - self._BEFORE_S[1])
+        if not before:
+            return None
+        was_at = before[len(before) // 2]
+        outward = last_off - was_at
+        if (last_off < self.min_off_centre_px or outward < self.min_outward_px
+                or was_at > self.lined_up_px):
+            return None
+        self._sightings = []      # the next pass needs its own approach
+        return ResupplyPass(last_off, outward, now - last_t)
+
+
 class MissileUrgency:
     """Confirm ammo changes and retain spent-missile urgency for one pursuit."""
 
@@ -312,13 +408,17 @@ class MissileUrgency:
             self._candidate_reads = 1
         elif new_read:
             self._candidate_reads += 1
+        previous = self._ammo_by_rack.get(rack)
+        # The same test the confirmed rearm makes below, on this one read.
+        rearm_seen = (0 < ammo <= REARM_SIGN_MAX_COUNT
+                      and (self._empty or (resupply_seeking and previous is not None
+                                           and ammo > previous)))
         if self._candidate_reads < self._confirm_reads:
-            return self.snapshot()
+            return self.snapshot(rearm_seen=rearm_seen)
 
         if ammo == 0 and terminal_zero:
             self._empty = True
 
-        previous = self._ammo_by_rack.get(rack)
         if ammo > 0 and (self._empty or (resupply_seeking and previous is not None
                                          and ammo > previous)):
             self._missiles_spent = 0
@@ -352,8 +452,8 @@ class MissileUrgency:
         self._last_positive.pop(rack, None)
         return self.snapshot()
 
-    def snapshot(self, *, rearmed: bool = False) -> MissilePriority:
-        return MissilePriority(self._missiles_spent, self._empty, rearmed)
+    def snapshot(self, *, rearmed: bool = False, rearm_seen: bool = False) -> MissilePriority:
+        return MissilePriority(self._missiles_spent, self._empty, rearmed, rearm_seen)
 
 
 def resupply_preempts(*, priority: MissilePriority,

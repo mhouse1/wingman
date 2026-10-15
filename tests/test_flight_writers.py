@@ -116,8 +116,7 @@ def test_takeover_stops_every_writer(monkeypatch):
     monkeypatch.setattr(ctrl, "cancel_mission", lambda: calls.append("cancel_mission"))
     monkeypatch.setattr(ctrl, "release_tracking_holds",
                         lambda why=None: calls.append(f"tracking:{why}"))
-    for name in ("stop_search_and_destroy_loop", "stop_boresight_engage_loop",
-                 "stop_cloak_loop"):
+    for name in ("stop_search_and_destroy_loop", "stop_boresight_engage_loop"):
         monkeypatch.setattr(ctrl, name, lambda n=name: calls.append(n))
     ctrl.release_for_manual_takeover()
     for event in ("_eject_stop", "_me_stop", "_climb_stop", "_boundary_turn_stop",
@@ -125,8 +124,7 @@ def test_takeover_stops_every_writer(monkeypatch):
         assert getattr(ctrl, event).is_set(), event
     assert ctrl._eject_stop_reason == "manual takeover"
     assert calls == ["cancel_mission", "tracking:manual takeover",
-                     "stop_search_and_destroy_loop", "stop_boresight_engage_loop",
-                     "stop_cloak_loop"]
+                     "stop_search_and_destroy_loop", "stop_boresight_engage_loop"]
 
 
 def test_one_failing_stop_does_not_skip_the_rest(monkeypatch):
@@ -137,9 +135,9 @@ def test_one_failing_stop_does_not_skip_the_rest(monkeypatch):
         raise RuntimeError("loop lock wedged")
 
     monkeypatch.setattr(ctrl, "stop_search_and_destroy_loop", _boom)
-    monkeypatch.setattr(ctrl, "stop_cloak_loop", lambda: stopped.append("cloak"))
+    monkeypatch.setattr(ctrl, "stop_boresight_engage_loop", lambda: stopped.append("boresight"))
     ctrl.release_for_manual_takeover()
-    assert stopped == ["cloak"]
+    assert stopped == ["boresight"]
 
 
 def test_cleanup_waits_for_a_hold_it_used_to_abandon(monkeypatch):

@@ -199,7 +199,6 @@ def test_takeover_names_what_wingman_was_holding(fresh_actuator, caplog):
     c.release_tracking_holds = lambda why=None: None
     c.stop_search_and_destroy_loop = lambda: None
     c.stop_boresight_engage_loop = lambda: None
-    c.stop_cloak_loop = lambda: None
     c._climb_key(AFTERBURNER_KEY, press=True, action="afterburner_evade")
     with caplog.at_level(logging.INFO, logger="wingman.controller"):
         c.release_for_manual_takeover()

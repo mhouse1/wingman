@@ -350,9 +350,6 @@ class FakeController:
     def note_stall_prevention(self, game_state) -> None:
         pass
 
-    def note_boundary(self, dist, forward) -> None:
-        pass
-
     def stop_boundary_turn(self) -> None:
         pass
 
@@ -396,9 +393,6 @@ class FakeController:
 
     def is_disengage_running(self) -> bool:
         return False
-
-    def is_survival_hold(self) -> bool:
-        return False  # stub never runs mission_loiter
 
     def is_secondary_weapon_active(self) -> bool:
         return False  # ADR 136 heatdive never actuates in the stub

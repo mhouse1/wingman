@@ -985,7 +985,7 @@ class AmmoEventsHandler:
         if self._last_missile_count is not None and missiles_snapshot < self._last_missile_count:
             self._fired_since_padlock += self._last_missile_count - missiles_snapshot
             if self._fired_since_padlock >= self._padlock_spread_missiles:
-                # ADR 144: mission_su30 does not use the padlock camera, so there
+                # ADR 144: mission_acs does not use the padlock camera, so there
                 # is no target to switch. Switching to the secondary rack also
                 # reads as "missiles fired" here (4 -> 2).
                 if not self._ctrl.is_padlock_blocked():
@@ -1968,7 +1968,7 @@ class BehaviorTreeHandler:
             if self.active and boundary_tactic_enabled(bt_cfg):
                 actuators[TACTIC_BOUNDARY_TURN] = (self._start_boundary_turn,
                                                    ctrl.is_boundary_turning)
-            # ADR 147: the mission in play's own altitude doctrine (mission_su30
+            # ADR 147: the mission in play's own altitude doctrine (mission_acs
             # levels off at 3000 m, below the tree's floor). getattr so a
             # controller-less handler (mode off, tests) simply has none.
             self._tree = build_tree(
@@ -2300,15 +2300,7 @@ class BehaviorTreeHandler:
         """Disengage leaf start_fn: fire the roll, then re-arm the absence
         clock — the legacy handler's fire-once-and-reset semantics, so the
         next disengage requires a fresh full absence window.
-
-        ADR 110: never during a survival hold. ``disengage_roll_right`` opens
-        with ``cancel_mission()``, and the condition is 30 s without an enemy —
-        which is precisely the state a survival hold produces. Loiter was built
-        to eventually cancel itself.
         """
-        if self._ctrl.is_survival_hold():
-            logger.debug("Disengage suppressed — survival hold owns the aircraft")
-            return
         self._ctrl.disengage_roll_right()
         self._enemy_last_seen_ts = time.time()
 
@@ -2407,12 +2399,6 @@ class BehaviorTreeHandler:
             self._ctrl.note_stall_prevention(current_game_state)
         except Exception as exc:
             log_suppressed(logger, "note_stall_prevention", exc)
-        # ADR 111: loiter picks its ORBIT DIRECTION from this. It runs its own
-        # control loop, so it needs the reading rather than the tactic.
-        try:
-            self._ctrl.note_boundary(_b_dist, _b_fwd, _b_lat)
-        except Exception as exc:
-            log_suppressed(logger, "note_boundary", exc)
         # ADR 140 D4/D6: drives Controller's padlock_state() tri-state.
         # Run BEFORE the terrain read below (reordered by ADR 142) so
         # padlock_state() reflects THIS tick's frame, not the previous
@@ -2471,7 +2457,6 @@ class BehaviorTreeHandler:
             is_respawning=bool(is_respawning),
             incoming_detected=bool(incoming),
             mission_running=self._ctrl.is_mission_running(),
-            survival_hold=self._ctrl.is_survival_hold(),
             game_state=current_game_state,
             missiles_empty_confirmed=missiles_empty_confirmed,
             fuel_pct=self._analyzer.get_afterburner_fuel_pct(),
@@ -2611,22 +2596,7 @@ class BehaviorTreeHandler:
         if (selection != TACTIC_BOUNDARY_TURN
                 and self._ctrl.is_boundary_turning()):
             self._ctrl.stop_boundary_turn()
-        # ADR 110: during a survival hold the MISSION owns the flight path, and
-        # the combat branch must not steer. Measured 2026-09-04: a five-minute
-        # loiter took 203 EngageNav commands, so the navigator was flying at the
-        # enemy throughout a hold whose objective is to stay away from it — and
-        # the long-ring contacts it chased sit at the arena edge.
-        #
-        # Gated at the ACTUATION, not in the conditions: the tree still reports
-        # what it would have chosen, which is the shadow pattern used elsewhere
-        # here and keeps the log readable.
-        #
-        # Regroup is gated too. It steers to rejoin the fight, which is the one
-        # thing a hold exists to avoid, and it would be a second writer on the
-        # roll axis the orbit is using. Staying in bounds is BoundaryTurn's job
-        # and BoundaryTurn stays live.
-        _combat_ok = _may_fly and not snap.survival_hold
-        if _combat_ok and selection in (TACTIC_ENGAGE, TACTIC_REGROUP):
+        if _may_fly and selection in (TACTIC_ENGAGE, TACTIC_REGROUP):
             # Regroup: enemy components are empty by the condition that selected
             # the leaf, so the navigator falls through to the friendly centroid.
             self._actuate_engage(components, altitude, now)
@@ -2646,23 +2616,10 @@ class BehaviorTreeHandler:
             # Orbit is suppressed here: it is a sustained roll hold, and holding
             # roll through a climb is a different manoeuvre from correcting
             # heading during one.
-            #
-            # ADR 110: and not during a survival hold. This is the SECOND caller
-            # of _actuate_engage — the ADR 028 rev 5 path where Climb owns pitch
-            # and the navigator still commands roll. Gating only the Engage /
-            # Regroup selection missed it, and 9 EngageNav commands reached a
-            # loitering aircraft on 2026-09-04 15:31 because loiter climbs, so
-            # Climb is the selection for most of a hold.
-            if not snap.survival_hold:
-                self._actuate_engage(components, altitude, now, steer_only=True)
-        elif (_may_fly and not snap.survival_hold
-                and selection == TACTIC_ATTACK_SUPPORT):
+            self._actuate_engage(components, altitude, now, steer_only=True)
+        elif _may_fly and selection == TACTIC_ATTACK_SUPPORT:
             # HLDD 013 Phase 1: the fallback slot every other tactic already
-            # outranks — nothing else is steering at all on this tick. The
-            # survival-hold exclusion is this branch's own condition, not an
-            # inner check, since (unlike Climb) it has no other reason to
-            # run during a hold at all — see ADR 110's "9 EngageNav commands
-            # reached a loitering aircraft" and HLDD 013's Actuation section.
+            # outranks — nothing else is steering at all on this tick.
             self._actuate_seek_center(_b_dist, _b_fwd, _b_lat)
         return False
 

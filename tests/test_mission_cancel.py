@@ -579,7 +579,7 @@ def test_the_respawn_reset_is_gated_on_the_flag():
 
 def test_the_resumed_mission_is_the_last_one_flown():
     """Resuming into the wrong mission would be worse than not resuming — the
-    operator picked loiter or j20 for a reason."""
+    operator picked acs or j20 for a reason."""
     import pathlib
     src = pathlib.Path("wingman/controller.py").read_text()
     assert "def restart_last_mission" in src

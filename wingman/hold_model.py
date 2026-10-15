@@ -79,9 +79,28 @@ class HoldModel:
     DRIFT_MAX_PER_S = 1.5
     # The most the target's motion may add to the error, in half-frames.
     LEAD_MAX = 0.2
+    # A learned rate (learn_rate) weighs about this many seconds of steering,
+    # and starts from the configured rate as if it had seen this much key time.
+    RATE_TAU_S = 5.0
+    _RATE_PRIOR_KEY_S = 0.3
+    # A picture pair with less key time than this says nothing about the rate.
+    _RATE_MIN_KEY_S = 0.02
 
-    def __init__(self, rate_per_s: float, lag_s: float, memory_s: float = 3.0) -> None:
+    def __init__(self, rate_per_s: float, lag_s: float, memory_s: float = 3.0, *,
+                 learn_rate: bool = False, rate_min: "float | None" = None,
+                 rate_max: "float | None" = None) -> None:
+        self.base_rate_per_s = float(rate_per_s)
         self.rate_per_s = float(rate_per_s)
+        # learn_rate: the rate follows the pictures (`_observe`), between
+        # rate_min and rate_max. The jets differ fivefold: a second of pitch key
+        # moved the target 0.6 to 0.9 half-frames in the sessions of 2026-10-11
+        # and 0.15 to 0.23 on 2026-10-14 at 1,200 to 1,450 KPH.
+        self.learn_rate = bool(learn_rate)
+        self.rate_min = self.rate_per_s * 0.1 if rate_min is None else float(rate_min)
+        self.rate_max = self.rate_per_s * 1.3 if rate_max is None else float(rate_max)
+        prior = self._RATE_PRIOR_KEY_S ** 2
+        self._rate_num = self.rate_per_s * prior
+        self._rate_den = prior
         self.lag_s = max(0.0, float(lag_s))
         # How far back a picture may date and still be believed: an unchanged
         # picture older than this is taken as that old, no older.
@@ -134,14 +153,34 @@ class HoldModel:
         if not self._MIN_GAP_S <= gap <= self.DRIFT_MAX_GAP_S:
             self.drift_per_s = 0.0
             return
+        key_s = self.key_time(prev[0] - self.lag_s, seen_at - self.lag_s)
+        changed = error - prev[1]
         # What the error did beyond what the keys account for.
-        moved = error - prev[1] + self.rate_per_s * self.key_time(
-            prev[0] - self.lag_s, seen_at - self.lag_s)
+        moved = changed + self.rate_per_s * key_s
         if abs(moved) / gap > self.DRIFT_MAX_PER_S:
             self.drift_per_s = 0.0
             return
         weight = 1.0 - math.exp(-gap / self.DRIFT_TAU_S)
-        self.drift_per_s += weight * (moved / gap - self.drift_per_s)
+        if not self.learn_rate:
+            self.drift_per_s += weight * (moved / gap - self.drift_per_s)
+            return
+        # Learning the rate, the two are kept apart: a pair with no key in it
+        # shows only the target's own motion, and a pair with key time shows the
+        # keys' travel once that motion is taken out. Estimated from every pair
+        # at once, a rate set too high reads as the target moving away and the
+        # two hold each other up (simulated: a jet answering at 0.2 was learned
+        # as 0.54 to 0.74; kept apart, 0.22 to 0.40).
+        if abs(key_s) < self._RATE_MIN_KEY_S:
+            self.drift_per_s += weight * (changed / gap - self.drift_per_s)
+            return
+        # Least squares through the origin, travel against key time, older
+        # pairs fading over RATE_TAU_S.
+        travel = self.drift_per_s * gap - changed
+        fade = math.exp(-gap / self.RATE_TAU_S)
+        self._rate_num = self._rate_num * fade + travel * key_s
+        self._rate_den = self._rate_den * fade + key_s * key_s
+        self.rate_per_s = max(self.rate_min, min(self.rate_max,
+                                                 self._rate_num / self._rate_den))
 
     def plan(self, error: float, seen_at: float, now: float, *,
              deadband: float, min_pulse_s: float = 0.0) -> HoldPlan:

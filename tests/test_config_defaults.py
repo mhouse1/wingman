@@ -58,6 +58,7 @@ def test_resupply_priority_defaults_to_shadow_and_ships_actuation_trial():
     assert schema_default("pursuit_mode.resupply_priority.enabled") is True
     assert schema_default("pursuit_mode.resupply_priority.actuate") is False
     assert schema_default("pursuit_mode.resupply_priority.rearm_climb_s") == 3.0
+    assert schema_default("pursuit_mode.resupply_priority.deadband") == 0.025
     # The candidate-frame capture is off unless a config asks for it
     # (operator, 2026-10-05).
     assert schema_default("pursuit_mode.resupply_priority.save_candidate_frames") is False
@@ -65,8 +66,15 @@ def test_resupply_priority_defaults_to_shadow_and_ships_actuation_trial():
         "enabled": True,
         "actuate": True,
         "rearm_climb_s": 3.0,
+        "deadband": 0.025,
+        "pass_trigger": {"enabled": True, "actuate": True, "missing_s": 0.5,
+                         "min_off_centre_px": 35, "min_outward_px": 5,
+                         "lined_up_px": 120},
         "save_candidate_frames": False,
     }
+    # A config without the key neither watches for the pass nor acts on it.
+    assert schema_default("pursuit_mode.resupply_priority.pass_trigger.enabled") is False
+    assert schema_default("pursuit_mode.resupply_priority.pass_trigger.actuate") is False
 
 
 def test_every_declared_default_passes_its_own_leaf():

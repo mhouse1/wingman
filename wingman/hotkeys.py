@@ -27,8 +27,7 @@ from .keybindings import (
     CAPTURE_SCREEN_SHOT,
     FINISH_ROUND_THEN_EXIT,
     MISSION_J20_KEY,
-    MISSION_LOITER_KEY,
-    MISSION_SU30_KEY,
+    MISSION_ACS_KEY,
     NOSE_DOWN_KEY,
     NOSE_UP_KEY,
     PADLOCK_CAMERA,
@@ -159,7 +158,7 @@ def register_hotkeys(ctrl, keyboard_module) -> None:
                 # 'u' skips rather than preempts a running mission, and the
                 # skip must have no side effects: relabelling _last_mission
                 # before the launch is refused would retag the mission that
-                # is actually flying (su30's padlock block turns off, the
+                # is actually flying (acs's padlock block turns off, the
                 # next respawn restarts the wrong mission) and reset the
                 # 2 s takeover grace. A cancelled mission still unwinding
                 # is not "flying" — that is the resume-from-manual case.
@@ -208,25 +207,15 @@ def register_hotkeys(ctrl, keyboard_module) -> None:
             logger.exception("Controller: failed to register configured-mission hotkey")
 
         try:
-            def start_loiter_mission(_e):
-                logger.info("Controller: '%s' key pressed - starting loiter mission", MISSION_LOITER_KEY)
-                ctrl._set_last_mission("loiter")
-                threading.Thread(target=ctrl.mission_loiter, daemon=True).start()
-            keyboard_module.on_press_key(MISSION_LOITER_KEY, start_loiter_mission, suppress=False)
-            logger.info("Controller: registered hotkey '%s' to start loiter mission", MISSION_LOITER_KEY)
-        except Exception:
-            logger.exception("Controller: failed to register loiter mission hotkey")
-
-        try:
-            ctrl._last_su30_key_ts = 0.0
-            def start_su30_mission(_e):
+            ctrl._last_acs_key_ts = 0.0
+            def start_acs_mission(_e):
                 now = time.time()
-                if now - ctrl._last_su30_key_ts < 0.5:  # debounce: ignore key-repeat
+                if now - ctrl._last_acs_key_ts < 0.5:  # debounce: ignore key-repeat
                     return
-                ctrl._last_su30_key_ts = now
+                ctrl._last_acs_key_ts = now
                 current_state = ctrl._analyzer.game_state if ctrl._analyzer is not None else None
-                logger.info("Controller: '%s' key pressed - starting SU-30 mission (state=%s)",
-                            MISSION_SU30_KEY,
+                logger.info("Controller: '%s' key pressed - starting ACS mission (state=%s)",
+                            MISSION_ACS_KEY,
                             current_state.name if current_state is not None and hasattr(current_state, 'name') else current_state)
                 # Same as the J20 hotkey: a press means "fly it now", so the
                 # FSM is forced into GAME_BATTLE (which also resumes from
@@ -234,13 +223,13 @@ def register_hotkeys(ctrl, keyboard_module) -> None:
                 if ctrl._analyzer is not None and current_state != GameState.GAME_BATTLE:
                     if not ctrl._analyzer.trigger_event("manual_force_battle"):
                         logger.warning("Controller: unable to force GAME_BATTLE via FSM trigger")
-                ctrl._set_last_mission("su30")
-                threading.Thread(target=ctrl.mission_su30, kwargs={"preempt": True},
+                ctrl._set_last_mission("acs")
+                threading.Thread(target=ctrl.mission_acs, kwargs={"preempt": True},
                                  daemon=True).start()
-            keyboard_module.on_press_key(MISSION_SU30_KEY, start_su30_mission, suppress=False)
-            logger.info("Controller: registered hotkey '%s' to start SU-30 mission", MISSION_SU30_KEY)
+            keyboard_module.on_press_key(MISSION_ACS_KEY, start_acs_mission, suppress=False)
+            logger.info("Controller: registered hotkey '%s' to start ACS mission", MISSION_ACS_KEY)
         except Exception:
-            logger.exception("Controller: failed to register SU-30 mission hotkey")
+            logger.exception("Controller: failed to register ACS mission hotkey")
 
         # ADR 094: finish the round, then exit. Deferred, and reversible.
         try:

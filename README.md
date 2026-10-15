@@ -200,8 +200,7 @@ on your own display, and work bare when the nested game window has focus. See [A
 |-----|--------|
 | `enter` | **Manual takeover** — wingman releases every control instantly; only flare deployment continues |
 | `u` | Start the configured mission (`mission.default_mission`) — and, while in manual, hand control back to wingman |
-| `y` | Start the loiter mission — climb to the hold altitude and orbit to stay alive |
-| `o` | Start the SU-30 mission, taking the aircraft from a running mission |
+| `o` | Start ACS_MISSION, taking the aircraft from a running mission |
 | `n` | Activate unattended mode (also auto-enabled from config) |
 | `end` | Cancel active mission |
 | `i` / `j` / `k` / `l` | Manual takeover **from your own display** (needs `ctrl+alt` on the nested lane) — see below |
@@ -214,13 +213,14 @@ on your own display, and work bare when the nested game window has focus. See [A
 | `z` | Finish the round, then exit and close MetalStorm |
 
 **Missions.** `mission.default_mission` in `wingman/config.yaml` picks the
-mission, and battle entry, respawn and `u` all launch it ([ADR 145](docs/adr/145-mission-jas39-cloak-and-u-launches-the-configured-mission.md)). It ships as
-`su30`. The other choices are `j20`, the original padlock mission, and two more
-per-jet scripts, `jas39` and `f111`. The three per-jet scripts are expected to
-merge into a single ACS mode. Each mission is specified in
-[`docs/missions/`](docs/missions/). `y` starts `loiter`, a survival hold that
-climbs and orbits. In every mission, flares are fired by the incoming-missile
-detector, so they go out only when a missile is actually inbound.
+mission, and battle entry, respawn and `u` all launch it ([ADR 145](docs/adr/145-mission-jas39-cloak-and-u-launches-the-configured-mission.md)). There are
+two. `acs` (ACS_MISSION, shipped) climbs, fires along the bore sight and hands
+over to pursuit; it was the Su-30 script, renamed once it flew other jets.
+`j20` is the original padlock mission. The loiter, survey, JAS39 and F-111
+missions were removed ([ADR 160](docs/adr/160-acs-mission-and-j20-are-the-only-missions.md)). Each mission is specified in
+[`docs/missions/`](docs/missions/). In every mission, flares are fired by the
+incoming-missile detector, so they go out only when a missile is actually
+inbound.
 
 `i/j/k/l` are wingman's own roll and pitch commands, so at the **game window** they
 are indistinguishable from its presses and are ignored there. `enter` and the
@@ -378,9 +378,9 @@ Built and flying today:
   onto the target, without using the padlock.
 
 Not built yet: weapon-lock confirmation, choosing ACS or padlock automatically
-from the jet profile, and flying to objectives such as bases. Today, per-jet
-missions (`su30`, `jas39`, `f111`) and the missiles-empty response start the
-ACS pieces. The per-jet missions are expected to merge into a single ACS mode.
+from the jet profile, and flying to objectives such as bases. Today ACS_MISSION
+(`acs`) and the missiles-empty response start the ACS pieces
+([ADR 160](docs/adr/160-acs-mission-and-j20-are-the-only-missions.md)).
 
 ---
 

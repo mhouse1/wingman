@@ -1,5 +1,5 @@
 # name
-mission_su30
+mission_acs (ACS_MISSION; was mission_su30, renamed by ADR 160)
 
 # sequence
 * nose up on battle starting or respawn

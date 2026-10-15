@@ -86,9 +86,6 @@ class AnalyzerSnapshot:
     # minimap radii, or None when the boundary is not readable. Before this the
     # tree had no boundary input at all, which is why nothing in it could act
     # on an aircraft flying out of the arena.
-    # ADR 109: mission_loiter owns the aircraft and its objective is survival.
-    # Tactics that trade the airframe for a tactical outcome must yield to it.
-    survival_hold: bool = False
     boundary_dist: "float | None" = None
     boundary_forward: "float | None" = None
     # ADR 120: nearest reading in the median window. The release decision uses
@@ -202,23 +199,14 @@ def is_respawning(snapshot: AnalyzerSnapshot) -> bool:
 
 
 def is_missiles_empty(snapshot: AnalyzerSnapshot) -> bool:
-    # ADR 109: never during a survival hold. Eject exists to trade a rearmed
-    # aircraft for an empty one; mission_loiter exists to keep THIS one alive,
-    # and an empty rack is irrelevant to that. Measured 2026-09-04 09:58:45 —
-    # Eject dove a loitering aircraft at -71 degrees, suppressed its climb for
-    # four seconds, and killed it.
-    return snapshot.missiles == 0 and not snapshot.survival_hold
+    return snapshot.missiles == 0
 
 
 def is_eject_confirmed(snapshot: AnalyzerSnapshot) -> bool:
     """The debounced verdict — used instead of the raw read once the Eject
     leaf actuates (ADR 024 3.1b gate).
-
-    ADR 109: yields to a survival hold, on the same reasoning as
-    ``is_missiles_empty`` — this is the actuating path, so it is the one that
-    matters in a live session.
     """
-    return snapshot.missiles_empty_confirmed and not snapshot.survival_hold
+    return snapshot.missiles_empty_confirmed
 
 
 def make_missile_evade_condition(is_running_fn=None, yields_to_fn=None):
@@ -615,7 +603,7 @@ class ClimbCondition:
     def _effective_alt_floor_m(self) -> "float | None":
         """The hard altitude floor in force this tick, or None for no floor.
 
-        ADR 147: a mission may set its own floor (mission_su30 levels off at
+        ADR 147: a mission may set its own floor (mission_acs levels off at
         3000 m, below the tree's 4000 m, and the tree restarted the climb 1.3 s
         after the script stopped it). The override only REPLACES a floor that
         exists: ``alt_floor_m`` unset still means no floor for every mission.
@@ -919,7 +907,7 @@ def make_sustain_climb_condition(enter_below_alt: "float | None",
       band which fires regardless (terrain outranks everything).
 
     ``suppressed_fn`` (ADR 147): true while the mission in play flies its own
-    altitude and is not the adaptive doctrine (mission_su30). The band is still
+    altitude and is not the adaptive doctrine (mission_acs). The band is still
     evaluated so its hysteresis state tracks the altitude as it always does; only
     the verdict is withheld.
 
@@ -1005,7 +993,7 @@ class _BuildContext:
     climb_last_hard_emergency_ts_fn: "Callable[[], float] | None" = None
     # ADR 147: the mission in play's own altitude doctrine, read by the Climb
     # slot. Both default to None — the tree's configured floor and sustain band
-    # apply unchanged — so every mission but mission_su30 is untouched.
+    # apply unchanged — so every mission but mission_acs is untouched.
     alt_floor_override_fn: "Callable[[], float | None] | None" = None
     sustain_suppressed_fn: "Callable[[], bool] | None" = None
 

@@ -160,6 +160,7 @@ def _alt(n, alt):
 
 _ALT_LOG = [
     f"{_ts(1)} [INFO] Controller: mission_su30 - step 4/4: activating pursuit mode",
+    f"{_ts(2)} [INFO] Controller: mission_acs - step 4/4: activating pursuit mode",
     f"{_ts(1)} [WARNING] Controller: mission_su30 - nose angle -10 deg not confirmed within 20s, continuing to pursuit",
     _alt(5, 5000),                                                   # before the pursuit window
     _alt(11, 3000), _alt(13, 3100), _alt(15, 3200), _alt(17, 3050), _alt(19, 2950),
@@ -181,9 +182,10 @@ def test_floor_events_are_counted_by_the_floor_they_cite():
     assert dict(r["floor_events"]) == {3000: 2, 4000: 1}
 
 
-def test_su30_handoffs_and_the_unconfirmed_nose_angle_are_counted():
+def test_acs_handoffs_and_the_unconfirmed_nose_angle_are_counted():
+    """Under both names: mission_su30 before ADR 160, mission_acs after."""
     r = R.analyse(_ALT_LOG)
-    assert (r["su30_handoffs"], r["su30_nose_unconfirmed"]) == (1, 1)
+    assert (r["acs_handoffs"], r["acs_nose_unconfirmed"]) == (2, 1)
 
 
 def test_the_report_prints_the_altitude_block():
@@ -192,7 +194,7 @@ def test_the_report_prints_the_altitude_block():
     assert "10th to 90th percentile 2950 to 3100 m" in text
     assert "(5 readings inside pursuit windows)" in text
     assert "ALTITUDE FLOOR events by floor {3000: 2, 4000: 1}" in text
-    assert "su30 hand-offs 1, nose angle not confirmed 1" in text
+    assert "ACS hand-offs 2, nose angle not confirmed 1" in text
 
 
 def test_the_report_says_so_when_no_altitude_falls_in_a_pursuit():

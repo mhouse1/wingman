@@ -184,6 +184,42 @@ def display_is_up(display: str) -> bool:
     return probe_display(display) == "up"
 
 
+# A snap app (VS Code installed as a snap) launches its terminals with the snap's
+# own GTK and GIO runtime in these variables. They are harmless to the shell and
+# fatal to Xwayland: -decorate loads libdecor's GTK plugin, which reads settings
+# through whatever schemas GSETTINGS_SCHEMA_DIR names. The code snap refresh of
+# 2026-10-15 (rev 271) shipped schemas without org.gnome.desktop.interface
+# font-antialiasing, so GTK fell back to the xsettings `antialiasing` key that
+# GNOME 50 removed, and GLib aborted the server before :3 ever answered.
+SNAP_TOOLKIT_VARS = (
+    "GSETTINGS_SCHEMA_DIR", "GTK_PATH", "GTK_EXE_PREFIX", "GTK_IM_MODULE_FILE",
+    "GIO_MODULE_DIR", "GDK_PIXBUF_MODULE_FILE", "GDK_PIXBUF_MODULEDIR", "LOCPATH",
+)
+SNAP_ORIG_SUFFIX = "_VSCODE_SNAP_ORIG"
+
+
+def host_session_env(environ=None) -> dict:
+    """The operator's desktop env with a snap terminal's toolkit overrides undone.
+
+    Each `X_VSCODE_SNAP_ORIG` holds the value X had before the snap rewrote it
+    (empty means X was unset), so it is restored rather than guessed. A toolkit
+    variable is dropped only when it points into a snap: one the operator set on
+    purpose is left alone.
+    """
+    env = dict(os.environ if environ is None else environ)
+    for key in [k for k in env if k.endswith(SNAP_ORIG_SUFFIX)]:
+        base = key[:-len(SNAP_ORIG_SUFFIX)]
+        orig = env.pop(key)
+        if orig:
+            env[base] = orig
+        else:
+            env.pop(base, None)
+    for key in SNAP_TOOLKIT_VARS:
+        if "/snap/" in env.get(key, ""):
+            del env[key]
+    return env
+
+
 def start(display: str, size: str) -> int:
     """Bring up a rootful Xwayland on `display`. Idempotent for an IDLE server.
 
@@ -302,7 +338,7 @@ def start(display: str, size: str) -> int:
                 # when running fullscreen") — and is moot anyway: a fullscreen
                 # window has no decorations to draw.
                 ["Xwayland", display, "-geometry", size, placement],
-                stdout=log, stderr=log,
+                stdout=log, stderr=log, env=host_session_env(),
                 start_new_session=True,   # outlive the make recipe that spawned us
             )
     except FileNotFoundError:

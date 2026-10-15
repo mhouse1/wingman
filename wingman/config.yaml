@@ -403,7 +403,10 @@ health:
   death_no_confirmed_s: 8.0
   decline_evidence_drop: 80
   decline_evidence_window_s: 6.0
-  dropout_capture: {enabled: true, capture_after_s: 5.0, recapture_interval_s: 60.0,
+  # enabled: false (operator, 2026-10-14: "turn off health_dropout png
+  # captures"): nothing is written to test_screenshots/health_dropouts. The
+  # session summary's dropout counts come from the analyzer and are unchanged.
+  dropout_capture: {enabled: false, capture_after_s: 5.0, recapture_interval_s: 60.0,
     max_per_session: 12}
   # ADR 137 D7, retuned 2026-09-11: dropout_capture above deliberately skips
   # this exact window (telemetry not live = "death/menu gap, not a
@@ -452,17 +455,15 @@ mission: {manual_takeover: {persist_through_respawn: false},
   j20_turn_guard_s: 10.0,
   # ADR 144: which mission battle entry launches (the Good-Luck / battle-alive
   # launch in GAME_STARTING, and the restart default when no mission has been
-  # recorded yet). j20 = the adaptive J20 mission, su30 = the scripted Su-30
-  # sequence (su30_mission: below), jas39 = J20 plus the cloak loop
-  # (jas39_mission: below), f111 = the su30 script plus the wing sweep
-  # (f111_mission: below, ADR 149), survey = straight passes across the arena for
-  # mapping, with no weapons (survey_mission: below, Design 017 phase 4b).
+  # recorded yet). acs = ACS_MISSION, the scripted sequence (acs_mission: below),
+  # j20 = the adaptive J20 mission. ADR 160 renamed su30 to acs and removed the
+  # loiter, survey, jas39 and f111 missions.
   # ADR 145: the 'u' hotkey launches this same mission,
-  # so this key is how a mission is chosen; 'o' still starts su30 regardless.
+  # so this key is how a mission is chosen; 'o' still starts acs regardless.
   # Respawn restarts whichever mission ran last.
-  # Set to su30 by the operator on 2026-09-24; set j20 to launch J20 at battle
-  # entry again.
-  default_mission: su30,
+  # Set to su30 by the operator on 2026-09-24 (acs since ADR 160); set j20 to
+  # launch J20 at battle entry again.
+  default_mission: acs,
   # ADR 137 D5: one frame saved at the exact crash_with_missiles tick — the
   # log-only instrument (D4) couldn't tell a genuine perception gap apart
   # from an ordinary death/explosion screen; every OCR channel reads "no
@@ -503,56 +504,21 @@ mission: {manual_takeover: {persist_through_respawn: false},
   # the 2026-09-20 session that motivated this (all 5 that session were
   # enemy fire, not terrain). terrain_lookback_s has no live terrain example
   # yet to tune against — same default pending live data.
-  crash_capture: {enabled: true, max_per_session: 20, pre_crash_buffer_s: 8.0,
+  # enabled: false (operator, 2026-10-14: "turn off crash_with_missiles png
+  # captures"). No PNG is written and the pre-crash buffer is not kept. The
+  # DIED ARMED line and its enemy-fire / terrain cause are still logged at every
+  # such death; only its missile, alt and rate figures lose the buffer's
+  # earlier sample (they read alt=None rate=None on most lines anyway).
+  crash_capture: {enabled: false, max_per_session: 20, pre_crash_buffer_s: 8.0,
     pre_crash_freshness_s: 2.0, pre_crash_lookback_s: 5.0,
     enemy_fire_lookback_s: 10.0, terrain_lookback_s: 10.0,
     dir: test_screenshots/crash_with_missiles}}
 debug: {show_window: false, show_grid_highlighted: false, draw_markers: true, capture_with_overlay: false,
   debug_output_dir: tests/test-output}
-# mission_loiter ('y'): the survival hold. Two behaviours only — climb to the
-# hold band, then orbit inside it. Altitude buys reaction time and a continuous
-# turn denies a firing solution; nothing else contributes to staying alive, so
-# nothing else is in the loop. Flares stay with the incoming-missile detector,
-# which knows when one is actually inbound.
-# ADR 115: hold at 5000 m, not 7000 m. Measured 2026-09-04 21:31-21:34, median
-# speed by altitude: 4-5 km 1154 KPH, 5-6 km 876, 6-7 km 369 (min 84), 7-8 km
-# 576. The old band (6500-7500) sat in the aircraft's worst-performing region,
-# so the climb plateaued below it and the orbit had no energy to hold a turn.
-# mission_survey (Design 017 phase 4b): fly the arena in straight passes so the
-# pictures can be turned into a map. Holds target_alt, holds a compass heading
-# read from the minimap, and turns back when the arena edge is ahead; each turn
-# goes towards the `sweep` side of the first pass, so the passes lie side by
-# side. target_alt is 3500, not higher: the first flight (2026-10-04) stalled
-# every time the nose-up climb passed about 4000 m and never got above 4321 m.
-# While it flies the tree's climb to 5000 m is refused for the same reason, and
-# the tree's boundary turn is allowed only as a last resort (backstop_frac):
-# both hold the nose up for seconds, which takes this aircraft over the top.
-# The survey controls pitch by the measured climb rate: one press sized to the
-# gap, then a wait (the keys under "climb_rate_ms" in the schema).
-# No weapons, no pursuit, padlock left alone. For a mode with no
-# opponents: nothing in it defends the aircraft. Chosen with
-# mission.default_mission: survey; `make survey` switches that on and off for
-# this machine in config.local.yaml. Each battle starts its passes
-# heading_step_deg further round than the last (0, 45, 90, ...), so one session
-# flies crossing passes; 0 keeps every battle on heading_deg.
-survey_mission: {target_alt: 3500, hysteresis_m: 500, climb_rate_ms: 60, descent_rate_ms: 30,
-  alt_tau_s: 10, rate_deadband_ms: 15, rate_per_press_s: 150, rate_gain: 0.5, pitch_interval_s: 3.0,
-  press_min_s: 0.08, press_max_s: 0.35, turn_climb_max_ms: -30, takeover_alt_m: 1200,
-  backstop_frac: 0.3, altitude_deadband_m: 150, level_band_deg: 25,
-  heading_deg: 0, heading_step_deg: 45, sweep: right, heading_deadband_deg: 8, heading_release_deg: 3,
-  turn_release_deg: 25, turn_max_s: 40, edge_turn_frac: 0.7, edge_cone_cos: 0.7,
-  edge_close_frac: 0.35, edge_closing_frac: 0.03, edge_holdoff_s: 30,
-  boundary_max_age_s: 4.0, min_leg_s: 20,
-  tick_s: 0.3, pulse_s: 0.3, lock_timeout_s: 5.0, status_every_s: 5.0,
-  map_look_every_s: 15, map_first_look_s: 5, map_wait_s: 2.0, map_poll_s: 0.1, map_key_hold_s: 0.05,
-  edge_radius_frac: 0.8, edge_backstop_radius_frac: 0.97, position_max_age_s: 90,
-  arena_radius_m: 9400, lane_spacing_frac: 0.3, lane_limit_frac: 0.6, cross_max_s: 40, cross_edge_radius_frac: 0.85}
 # The game's full map (Design 017, "The full map"), opened with the m key: a
 # north-up disc in the middle of the screen with the aircraft's own icon at its
-# true place. The survey opens it for about a second every map_look_every_s of
-# cruise and logs where it is ("SURVEY POS"). The survey's turn back at the
-# edge is judged from that position (survey_mission.edge_radius_frac). The
-# numbers are the disc's and its markings' sizes and colours, measured on two
+# true place. The survey mission opened it to read where the aircraft was; ADR
+# 160 removed that mission, so nothing opens the map now. The numbers are the disc's and its markings' sizes and colours, measured on two
 # pictures on 2026-10-04 (wingman/full_map.py, and the schema for each key).
 full_map: {enabled: true, radius_frac: 0.3944, n_offset_frac: 1.052, n_window_frac: 0.09,
   n_hsv_lower: [15, 160, 180], n_hsv_upper: [25, 255, 255], n_min_area_frac: 0.002,
@@ -560,38 +526,13 @@ full_map: {enabled: true, radius_frac: 0.3944, n_offset_frac: 1.052, n_window_fr
   ring_dark_share: 0.6, icon_max_s: 30, icon_min_v: 235, icon_min_area_frac: 0.00018,
   icon_max_area_frac: 0.0027, cone_hsv_lower: [35, 60, 60], cone_hsv_upper: [85, 255, 255],
   cone_min_area_frac: 0.004, cone_max_dist_frac: 0.45}
-loiter_mission: {target_alt: 5000, hysteresis_m: 500, orbit_direction: right,
-  orbit_roll_interval_s: 3.0, orbit_roll_hold_s: 0.6, tick_s: 1.0,
-  # ADR 112: pitch is a CLOSED LOOP on altitude, not a nudge on every roll.
-  # Roll alone descends — 6709 m to 6385 m in 18 s on 2026-09-04. Holding
-  # nose-up unconditionally is the same error mirrored: 6634 m to 10189 m in
-  # the 18:47 hold, 3200 m above target, speed 1782 to 528 KPH. So pitch
-  # corrects toward target and does nothing within orbit_deadband_m of it.
-  orbit_pitch_hold_s: 0.35, orbit_deadband_m: 150, lock_timeout_s: 5.0,
-  # ADR 114: level the nose before circling. The climb exits on ALTITUDE and
-  # says nothing about attitude — measured handover at 7113 m with the nose at
-  # +82 deg, which zoomed to 8401 m, bled 962 to 207 KPH, stalled and departed.
-  level_band_deg: 20, recover_hold_s: 0.8,
-  # ADR 123: entry pull-up. Measured 2026-09-05 21:31:41 — the hold started at
-  # 139 m in a -74 deg dive and the aircraft hit the ground five seconds later.
-  entry_pullup_s: 5.0,
-  # ADR 111: reverse the orbit when circling is carrying it toward the edge.
-  # Band is wider than BoundaryTurn's — reversing a circle is cheap, so
-  # starting early costs nothing. Cooldown stops a noisy reading spinning
-  # the aircraft back and forth instead of turning.
-  boundary_avoid_frac: 0.60, boundary_max_age_s: 4.0,
-  # Compared across ORBITS, not samples: in a circle the range naturally
-  # oscillates, so a per-sample rule reverses about half the time and the
-  # aircraft weaves instead of turning (measured 2026-09-04, six reversals
-  # in thirty seconds). One window is about one orbit.
-  orbit_window_s: 15.0, closing_margin: 0.05}
-
 j20_mission: {target_painting_mode: false, attack_mode_dry_run: false, min_safe_altitude: 500,
   bearing_deadzone_deg: 12, short_ring_min_count: 1, ring_debounce_ticks: 2, ema_reseed_angle_deg: 60,
   rear_commit_deg: 150, rear_release_deg: 90, orbit_direction: right, orbit_roll_hold_s: 0.3,
   orbit_roll_interval_s: 2.0, coarse_kp: 0.5, coarse_min_hold_s: 0.15, coarse_max_hold_s: 0.6,
   coarse_cooldown_s: 2.0}
-# mission_su30 ('o', docs/missions/su30.md, ADR 144): a four-step script run
+# mission_acs, ACS_MISSION ('o', docs/missions/acs.md, ADR 144; mission_su30
+# until ADR 160 renamed it): a four-step script run
 # once per life — nose up, switch to the secondary weapon, level off at
 # climb_alt_m with the nose at nose_angle_deg, then hand over to pursuit mode
 # (HLDD 015). Deliberately NOT the adaptive doctrine. Its engagement mode is
@@ -619,60 +560,13 @@ j20_mission: {target_painting_mode: false, attack_mode_dry_run: false, min_safe_
 # angle from altitude rate over speed (telemetry.pitch_angle_deg), which lands
 # roughly every 3 s, so the step corrects on NEW samples only and pulses rather
 # than holds (ADR 068/069: a held key overshoots on a lagging reading).
-su30_mission: {climb_alt_m: 3000, alt_floor_m: 3000, climb_max_s: 90.0,
+acs_mission: {climb_alt_m: 3000, alt_floor_m: 3000, climb_max_s: 90.0,
   nose_angle_deg: -10, angle_tolerance_deg: 4.0, angle_confirm_reads: 2,
   angle_pulse_s: 0.6, angle_max_s: 20.0, tick_s: 0.5, lock_timeout_s: 5.0,
   yield_to_target: true}
 # yield_to_target (operator, 2026-09-26): a tracker lock or a ring icon during the
 # climb or the nose-angle step ends the script and starts the pursuit at once (after
 # the 17:37 respawn the script climbed and held -10 deg past targets it had acquired).
-# mission_f111 (docs/missions/f111.md, ADR 149): mission_su30 plus the F-111's
-# wing sweep on 'w' (ToggleWingSweep, a toggle). Six steps once per life: nose up
-# and sweep the wings, boresight engage, no weapon switch until the spawn weapon
-# runs out, level off at climb_alt_m with the nose at nose_angle_deg, unsweep on
-# the way back down to unsweep_alt_m, then pursuit mode. No hotkey of its own:
-# chosen with mission.default_mission: f111 ('u' and respawn follow it).
-# This block is separate from su30_mission so retuning one jet does not retune
-# the other.
-#
-# climb_alt_m: the spec's "after reaching 3000 m altitude" (meters, decided
-#   2026-09-25; the request's "3000 ft" was not meant).
-# alt_floor_m: ADR 147's per-mission floor, extended to this mission by ADR 149
-#   (operator, 2026-09-25). While f111 is in play the tree's floor is this value
-#   instead of behavior_tree.climb.alt_floor_m (4000), and the armed sustain
-#   climb stands aside; without it the tree restarts the climb just after the
-#   level-off, as it did for su30 before ADR 147. Keep it at or below
-#   climb_alt_m (tests/test_controller_config.py pins that). Remove the key to
-#   restore the tree's 4000 m floor and sustain band for this mission.
-# unsweep_alt_m: the spec's "when the altitude descends back to 3000 m", judged
-#   on a fresh altitude reading taken after the level-off.
-# unsweep_timeout_s: the spec's "wait at most 30 seconds, and on timeout unsweep
-#   anyway". The wait sits before the pursuit hand-off and delays it by at most
-#   this much.
-# wingsweep_tap_s: a 0.1 s tap, as activate_special_weapon presses 'q': 'w' is a
-#   toggle, so a press is a single event and a longer hold buys nothing.
-#
-# The angle-step numbers are su30_mission's, copied with its reasoning: named
-# guesses, not measurements. The angle is the flight-path angle from altitude
-# rate over speed (telemetry.pitch_angle_deg), which lands roughly every 3 s, so
-# the step corrects on NEW samples only and pulses rather than holds (ADR
-# 068/069: a held key overshoots on a lagging reading).
-f111_mission: {climb_alt_m: 3000, alt_floor_m: 3000, climb_max_s: 90.0,
-  nose_angle_deg: -10, angle_tolerance_deg: 4.0, angle_confirm_reads: 2,
-  angle_pulse_s: 0.6, angle_max_s: 20.0, tick_s: 0.5, unsweep_alt_m: 3000,
-  unsweep_timeout_s: 30.0, wingsweep_tap_s: 0.1}
-# mission_jas39 (docs/missions/jas39.md, ADR 145): mission_j20 plus the JAS39's
-# special weapon, a cloak on 'q'. Chosen with mission.default_mission: jas39;
-# it has no hotkey of its own, and 'u' launches it.
-# turn_guard_s: the spec's "fly the spawn heading for 10 seconds" (ADR 132).
-#   J20 flies the same 10 s, but reads mission.j20_turn_guard_s; this block has
-#   its own key so retuning one mission does not retune the other. 0 disables.
-# cloak_press_interval_s: wingman has no signal for when the cloak is off
-#   cooldown, so the mission presses 'q' every 3 s and the cloak comes back
-#   within 3 s of being available (operator, 2026-09-24, after first asking for
-#   1 s). Safe only because a 'q' press while the JAS39 is cloaked does not
-#   turn the cloak off (operator, 2026-09-24).
-jas39_mission: {turn_guard_s: 10.0, cloak_press_interval_s: 3.0}
 behavior_tree:
   mode: active
   disengage_after_s: 30
@@ -1330,6 +1224,33 @@ tracking:
     pitch_rate: 1.15
     roll_rate: 0.4
     min_pulse_s: 0.08
+    # Operator, 2026-10-14: "this is a different jet that flies faster, so an
+    # auto adjusting rate is better". The rates above are now where learning
+    # starts: each axis learns its own from the pictures (travel the keys made,
+    # the target's own motion taken out, against the key time held, over about
+    # the last 5 s of steering), kept between learn_rate_min and learn_rate_max
+    # times the configured rate. Measured that day at 1,200 to 1,450 KPH: a
+    # second of pitch key moved the target 0.15 to 0.23 half-frames and of roll
+    # 0.13, against the 1.15 and 0.4 above, so every hold was sized five to seven
+    # times too short. On a resupply pass at 05:37:03 to 05:37:09, 16 nose-down
+    # holds in a row were let go after 0.08 to 0.33 s with the marker 40 to 60 px
+    # below the bore sight, and the aircraft flew over it. The press lines now
+    # end in `rate=` with the rate in use. Simulated, a jet answering at 0.2 is
+    # learned as 0.21 to 0.40 and a falling marker is held at a median 0.100
+    # instead of 0.175; a jet answering at 1.5 is learned low (0.97 to 1.21).
+    # Pitch only (2026-10-14 06:25 session): the roll key banks the aircraft and
+    # so turns the picture about the bore sight, and how far that moves the
+    # target across the screen depends on where the target is. From 06:27:40.7
+    # to 06:27:42.4 roll right was held with the target right of the bore and
+    # below it, and it went from x 1078 to 1194, further right, as the bank
+    # carried it round; the learned roll rate fell from 0.40 to the 0.04 floor
+    # and the next roll holds were planned at 5 to 23 s. Pitch learned 0.11 to
+    # 0.26 in the same minutes, in the 0.15 to 0.23 measured for this jet.
+    # false keeps an axis's fixed rate.
+    learn_pitch_rate: true
+    learn_roll_rate: false
+    learn_rate_min: 0.1
+    learn_rate_max: 1.3
 tracking_hsv:
   red_lower: [0, 150, 150]
   red_upper: [10, 255, 255]
@@ -1391,11 +1312,69 @@ pursuit_mode:
     enabled: true
     actuate: true
     # Operator, 2026-10-02: "crashes can be avoided by immediately applying
-    # nose up manuver on rearm". On a confirmed rearm the pursuit holds nose-up
-    # this long with the roll released, then steering resumes. Measured on the
-    # session before it: 20 of 28 rearms were followed by a respawn within
-    # 30 s. Named guess; 0 = off. Actuated mode only.
+    # nose up manuver on rearm". On a rearm the pursuit holds nose-up this long
+    # with the roll released, then steering resumes. Measured on the session
+    # before it: 20 of 28 rearms were followed by a respawn within 30 s. Named
+    # guess; 0 = off. Actuated mode only.
+    # Operator, 2026-10-13: "immediate nose up with full afterburner for 3seconds
+    # after resupply". The afterburner is held for the same time (Actuator owner
+    # `rearm_climb`), and the climb-out starts on the first missile count that
+    # shows the rearm instead of on the confirmation three reads later. Measured
+    # over 52 rearms (five sessions, 10-11 and 10-13): the confirmation came a
+    # median 4.6 s after the marker was last seen, the first count above zero
+    # 1.5 s after it; in the 3.5 s after the confirmation the aircraft gained a
+    # median 11 m, and 18 of the 52 were followed by a respawn within 30 s. In 70
+    # spells with every rack empty no count above zero went back to zero. A count
+    # over 8 is not taken as the sign (resupply.REARM_SIGN_MAX_COUNT).
     rearm_climb_s: 3.0
+    # Operator, 2026-10-13: "it just missed the resupply". The steering deadband
+    # while the resupply marker has the steering, in half-frames on both axes
+    # (0.025 is 24 px across and 15 px up or down at 1920 x 1200). A target
+    # keeps tracking.deadband's 0.05. At 0.05 the hold parked the marker at the
+    # edge of a 48 by 30 px box, about the size of the marker's own ring: on
+    # 2026-10-13 03:56:59 to 03:57:12 it sat about 50 px right of the bore sight
+    # and 10 to 60 px below it for 13 s, then swept off to the lower right at
+    # 1,280 KPH with no rearm. Over 83 close passes in five sessions (10-11 and
+    # 10-13) a rearm followed 3 of 3 with the marker held under 30 px from the
+    # centre, 63 percent at 30 to 50 px, 37 percent at 50 to 75 px and 17
+    # percent beyond; on 41 of 42 misses the marker left on the vertical side it
+    # had been held on. Speed matters too and is not changed here (78 percent
+    # under 900 KPH, 10 percent over 1,350). A 0.08 s pitch pulse moves the
+    # marker 0.02 to 0.03 and a 0.16 s roll pulse 0.02 to 0.04 (measured, same
+    # sessions), under twice this value, so a pulse from one edge does not
+    # cross the other. Named guess; 0.05 restores the old box.
+    deadband: 0.025
+    # Action Item 003 (operator, 2026-10-13: "proceed with implementing the
+    # climb-out"). The climb-out above also starts at the pass: when the marker
+    # the pursuit was flying at has been missing missing_s, was at least
+    # min_off_centre_px from the centre at its last sighting, and had moved at
+    # least min_outward_px outward in the second before (px at 1200 px of frame
+    # height). The count that shows the rearm then starts no second climb-out,
+    # and logs `count N read X s after the climb-out started at the pass`.
+    # The marker going missing is not enough. In the session of that day (08:00
+    # to 18:15) the steered marker went missing 0.9 s or more 162 times: 49 were
+    # pickups, and 73 times it was back within 4 s, having sat a median 20 px
+    # from the centre and not moved (-2 px). At a pickup it was a median 60 px
+    # out and had moved 28 px outward. At 35 and 5 the rule fires on 36 of the 49
+    # pickups and 5 of the 73 dropouts; 15 of its 21 other firings came with the
+    # count already at 4 or more (inferred: a full selected rack, where no count
+    # can show the pickup and no climb-out started before). Measured on the
+    # log's 0.35 s lines, not on the steering's 0.17 s; the first session is the
+    # check, against the baseline in docs/action-item/003. actuate: false logs
+    # `pass seen, shadow` and presses nothing. A missed pass climbs out too; that
+    # is the cost.
+    # lined_up_px, added after the first flight: the marker must also have been
+    # within this of the centre a second before it was lost. At 19:51:52 the
+    # marker had just taken the steering 597 px from the centre, blinked out for
+    # 0.6 s, and the climb-out broke the approach (the marker was back 0.9 s
+    # later). On the baseline log this costs 1 of the 36 pickups signed.
+    pass_trigger:
+      enabled: true
+      actuate: true
+      missing_s: 0.5
+      min_off_centre_px: 35
+      min_outward_px: 5
+      lined_up_px: 120
     # resupply_candidate_*.png in tests/test-output/target_tracking: the frame
     # in which a resupply marker first appears, two per pursuit at most. Off
     # (operator, 2026-10-05); the detector's evidence is in docs/anomaly/011.
@@ -1535,7 +1514,7 @@ pursuit_mode:
   # Named guess; false turns it off.
   gun_on_centre: true
   gun_centre_err: 0.05
-  # mission_su30 no longer presses SWITCH_WEAPON at step 2 (operator,
+  # mission_su30 (now mission_acs) no longer presses SWITCH_WEAPON at step 2 (operator,
   # 2026-09-24: "not switch weapons until it runs out"; ADR 144 D4). Its
   # pursuit hand-off defers the switch until the selected weapon's ammo has
   # read 0 this many cycles in a row (about 0.35 s each). SWITCH_WEAPON is a
@@ -1562,7 +1541,7 @@ pursuit_mode:
   # dive_guard_ttg_s; pitch goes neutral instead. Roll tracking, firing and the
   # search roll are unchanged. Measured basis: six of eight unplanned deaths in
   # the 2026-09-25 00:49-01:41 session followed a chase dive through the 3000 m
-  # floor. su30 and f111: 3000 + 500 = 3500 m. Logged as `DIVE GUARD`. The ttg
+  # floor. acs: 3000 + 500 = 3500 m. Logged as `DIVE GUARD`. The ttg
   # term assumes the ground at altitude 0 (terrain near 900 m exists), hence
   # the wide 60 s. Named guesses, from the action item. 0 turns a term off.
   dive_guard_margin_m: 500
@@ -1586,7 +1565,7 @@ pursuit_mode:
   # every search_look_down_interval_s, only while the dive guard is clear and a
   # fresh flight-path angle is shallower than search_look_down_min_deg (no reading,
   # no tap). Logged as `LOOKDOWN:`.
-  # search_floor_m replaces "floor in play + dive_guard_margin_m" (3500 m for su30)
+  # search_floor_m replaces "floor in play + dive_guard_margin_m" (3500 m for acs)
   # as the dive guard's altitude term during a pursuit, so both the search and the
   # chase may descend to about 300 m above the fight. This deliberately reverses part
   # of the 2026-09-25 guard, whose basis was six of eight deaths after a chase dive

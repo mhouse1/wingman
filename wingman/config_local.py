@@ -17,7 +17,7 @@ import yaml
 LOCAL_NAME = "config.local.yaml"
 
 _HEADER = ("# Per-machine settings, merged over config.yaml by a live run (CR-018-16).\n"
-           "# Untracked. Written by `make invite` and `make survey`; edit by hand for\n"
+           "# Untracked. Written by `make invite`; edit by hand for\n"
            "# anything else.\n")
 
 
