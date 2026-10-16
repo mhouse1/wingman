@@ -647,6 +647,77 @@ SCHEMA = Section(
             }),
         }),
 
+        # Code Review 019 cycle 11 (operator, 2026-10-15: "shadow first"): relative
+        # terrain depth from one picture, from a monocular depth model run in a
+        # process of its own (wingman.depth_worker). Logged and drawn; nothing
+        # steers on it.
+        "depth_view": Section(children={
+            "enabled": Leaf(types=(bool,), default=False),
+            # A Hugging Face model id or a local directory.
+            "model": Leaf(types=(str,), default="depth-anything/Depth-Anything-V2-Small-hf"),
+            # torch threads in the worker process.
+            "threads": Leaf(types=(int,), minimum=1, maximum=32, default=4),
+            # The picture's height into the model, px.
+            "input_px": Leaf(types=(int,), minimum=56, maximum=1024, default=252),
+            # At most one picture this often.
+            "min_interval_s": Leaf(types=NUMBER, minimum=0, maximum=10, default=0.3),
+        }),
+
+        # Code Review 019 cycle 9 (operator, 2026-10-15): the airbrake while the
+        # resupply marker has the pursuit's steering, dosed on each fresh speed
+        # reading, so the pass is not flown at the cruise burner's speed.
+        "approach_brake": Section(children={
+            "enabled": Leaf(types=(bool,), default=False),
+            # The objectives it brakes for. Resupply only, to begin with.
+            "resupply": Leaf(types=(bool,), default=False),
+            # A fresh reading above this starts a dose.
+            "cap_kph": Leaf(types=NUMBER, minimum=300, maximum=3000, default=850.0),
+            # The speed a dose aims at.
+            "target_kph": Leaf(types=NUMBER, minimum=300, maximum=3000, default=800.0),
+            # The airbrake's deceleration the dose is worked out with.
+            "decel_kph_s": Leaf(types=NUMBER, minimum=10, maximum=1000, default=150.0),
+            # The longest dose one reading can start.
+            "max_dose_s": Leaf(types=NUMBER, minimum=0.1, maximum=10, default=3.0),
+        }),
+
+        # Code Review 019 step 3a: the terrain outlines measured on the pursuit's
+        # own frames and drawn on live_hud.png under the picture they came from.
+        # Shadow: it logs PATHVIEW lines and draws; nothing steers on it. Reads
+        # its detector settings from terrain_avoidance.loom.
+        "clear_path": Section(children={
+            "enabled": Leaf(types=(bool,), default=False),
+            # Step 3d: where to aim so the line to the goal stays in free air.
+            # Shadow: PATH lines and the corridor on the HUD; nothing steers.
+            "planner": Section(children={
+                # Free air the goal, or a detour's aim point, must have round it
+                # (full-frame px at 1920 wide).
+                "clear_px": Leaf(types=NUMBER, minimum=0, maximum=400, default=60.0),
+                # A detour keeps its side this long, unless the goal turns direct.
+                "hold_s": Leaf(types=NUMBER, minimum=0, maximum=10, default=1.0),
+                # Flying at something closing faster than this: escape, whatever the goal.
+                "escape_tau_s": Leaf(types=NUMBER, minimum=0, maximum=30, default=3.0),
+                # A closing outline blocks only when it closes sooner than this
+                # fraction of the time of the surface the goal is drawn against.
+                "nearer_frac": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.7),
+                # The surface behind the goal closing faster than this: logged as
+                # a wall and counted. Reported only; no mode depends on it.
+                "wall_warn_s": Leaf(types=NUMBER, minimum=0, maximum=30, default=3.0),
+                # The surface round the goal: the dots within this distance of it
+                # (full-frame px at 1920 wide), on its outline, fitted alone.
+                "wall_radius_px": Leaf(types=NUMBER, minimum=10, maximum=600, default=150.0),
+                # Fewer dots than this there: not measured.
+                "wall_min_dots": Leaf(types=(int,), minimum=3, maximum=200, default=8),
+            }),
+            # Step 3e: the goals whose steering follows the planner's aim while it
+            # detours or escapes. Off for each in the schema.
+            "steer": Section(children={
+                "resupply": Leaf(types=(bool,), default=False),
+                "control_point": Leaf(types=(bool,), default=False),
+                "crown": Leaf(types=(bool,), default=False),
+                "target": Leaf(types=(bool,), default=False),
+            }),
+        }),
+
         "tracking": Section(children={
             "enabled": BOOL,
             "actuate": BOOL,
@@ -790,6 +861,7 @@ SCHEMA = Section(
                     "min_off_centre_px": Leaf(types=NUMBER, minimum=0, default=35),
                     "min_outward_px": Leaf(types=NUMBER, default=5),
                     "lined_up_px": Leaf(types=NUMBER, minimum=0, default=120),
+                    "min_size_px": Leaf(types=NUMBER, minimum=0, default=50),
                 }),
                 # The frame in which a resupply marker first appears, saved to
                 # tests/test-output/target_tracking, two per pursuit at most.
@@ -887,6 +959,21 @@ SCHEMA = Section(
                 # session instead of spending it in the first minutes.
                 "min_interval_s": SECONDS,
                 "max_per_encounter": _int(0),
+            }),
+            # Code Review 019 (CR-019-09): the last `seconds` of annotated HUD
+            # frames, taken `rate_hz` times a second and held in memory, written
+            # to `dir` at each death. Live runs only.
+            "black_box": Section(children={
+                "enabled": Leaf(types=(bool,), default=False),
+                "dir": Leaf(types=(str,), default="test_screenshots/path_blackbox"),
+                "seconds": Leaf(types=NUMBER, minimum=1, maximum=120, default=18.0),
+                "rate_hz": Leaf(types=NUMBER, minimum=0.2, maximum=10, default=3.0),
+                # Cycle 5: a clip of the last alarm_seconds, 1.5 s after each
+                # planner alarm (DETOUR or ESCAPE), to <dir>/alarms. At most one
+                # every alarm_gap_s and alarm_max a session; 0 is off.
+                "alarm_max": Leaf(types=(int,), minimum=0, maximum=1000, default=0),
+                "alarm_gap_s": Leaf(types=NUMBER, minimum=0, maximum=600, default=30.0),
+                "alarm_seconds": Leaf(types=NUMBER, minimum=0.5, maximum=18, default=4.0),
             }),
         }),
 

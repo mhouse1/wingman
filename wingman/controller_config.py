@@ -63,6 +63,10 @@ class ControllerConfig:
     afterburner_cruise: dict = field(default_factory=dict)
     stall_prevention: dict = field(default_factory=dict)
     fuel: dict = field(default_factory=dict)
+    # Code Review 019 step 3e: the clear-path block (`clear_path.steer`).
+    clear_path: dict = field(default_factory=dict)
+    # Code Review 019 cycle 9: the airbrake on objective approaches.
+    approach_brake: dict = field(default_factory=dict)
     # ADR 144: mission_acs's block (climb altitude, nose angle, pulse timing).
     acs: dict = field(default_factory=dict)
     # ADR 140: only `confirm_seconds` is read here — the vision fields
@@ -119,6 +123,8 @@ class ControllerConfig:
             padlock_center_indicator=cfg.get("padlock_center_indicator", {}) or {},
             pursuit_mode=cfg.get("pursuit_mode", {}) or {},
             tracking=cfg.get("tracking", {}) or {},
+            clear_path=cfg.get("clear_path", {}) or {},
+            approach_brake=cfg.get("approach_brake", {}) or {},
         )
         if not overrides:
             return base

@@ -2290,7 +2290,7 @@ def _priority_pursuit(monkeypatch, caplog, *, marker=None, pins=(), tracker=None
 
     def find_marker(_frame, **_kw):
         calls["marker"] += 1
-        return marker
+        return marker() if callable(marker) else marker
 
     def find_pins(_frame, _cfg=None):
         calls["pins"] += 1
@@ -2402,12 +2402,20 @@ def test_the_marker_nearer_the_centre_than_the_target_takes_the_steering(monkeyp
 
 
 def test_the_resupply_marker_comes_before_the_priority_target(monkeypatch, caplog):
-    """Two missiles spent and the resupply marker in view on the left, the
-    priority target on the right: the resupply has the steering."""
-    monkeypatch.setattr(controller_module, "find_resupply_marker",
-                        lambda _frame, **_kw: ResupplyMarker(500, 600, 40, 40, 300, 180))
+    """Two missiles spent, and the resupply marker on the left and the priority
+    target on the right come into view together: the resupply has the steering."""
+    resupply_scans = []
+
+    def find_resupply(_frame, **_kw):
+        resupply_scans.append(1)
+        return ResupplyMarker(500, 600, 40, 40, 300, 180)
+
+    monkeypatch.setattr(controller_module, "find_resupply_marker", find_resupply)
+    # The resupply is looked for once a missile is spent; the crown comes into
+    # view in that same cycle, so neither has had the steering before.
     _ctrl, messages, _calls = _priority_pursuit(
-        monkeypatch, caplog, marker=_priority_marker(1400, 600),
+        monkeypatch, caplog,
+        marker=lambda: _priority_marker(1400, 600) if resupply_scans else None,
         analyzer=_SequenceAnalyzer([4, 2, 2]), empty_confirm_reads=1,
         resupply_priority_actuate=True, run_s=1.4,
         pursue_kwargs={"weapon_already_switched": True})
@@ -2416,6 +2424,32 @@ def test_the_resupply_marker_comes_before_the_priority_target(monkeypatch, caplo
     after = "\n".join(messages[focus_at:])
     assert "roll_left - pressing" in after
     assert "roll_right - pressing" not in after
+
+
+def test_the_marked_objective_being_flown_at_keeps_the_steering_from_the_resupply(
+        monkeypatch, caplog):
+    """Operator, 2026-10-15: "it should have prioritized the objective that's
+    already in view". At 12:58:34.9 the pursuit had flown at control point C
+    for 4.4 s; the resupply marker came into view at the left edge, took the
+    steering, and C slid off the screen. Here the crown on the right has the
+    steering before the second missile is spent; the resupply marker on the
+    left waits for it."""
+    monkeypatch.setattr(controller_module, "find_resupply_marker",
+                        lambda _frame, **_kw: ResupplyMarker(500, 600, 40, 40, 300, 180))
+    _ctrl, messages, _calls = _priority_pursuit(
+        monkeypatch, caplog, marker=_priority_marker(1400, 600),
+        analyzer=_SequenceAnalyzer([4, 2, 2]), empty_confirm_reads=1,
+        resupply_priority_actuate=True, run_s=1.4,
+        pursue_kwargs={"weapon_already_switched": True})
+
+    joined = "\n".join(messages)
+    assert ("PRIORITY: marker at (1400,600) keeps the steering; "
+            "resupply marker at (500,600) waits") in messages
+    assert sum("keeps the steering; resupply marker" in m for m in messages) == 1, (
+        "logged once per wait")
+    assert "roll_right - pressing" in joined
+    assert "roll_left - pressing" not in joined
+    assert not any("rearm focus begins" in m for m in messages)
 
 
 def _pin(angle_deg):

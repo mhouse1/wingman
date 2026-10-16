@@ -301,6 +301,16 @@ class ResupplyPassWatch:
     median 33 px from the centre a second before (130 at most), so 120 px
     costs one of the 36.
 
+    The marker must also be near enough to fly through. 2026-10-15 12:58:24: the
+    marker sat 55 px from the centre, 40 px across, and dropped out for half a
+    second; the rule signed a pass, no rearm came, and the climb-out pulled the
+    aircraft off it.
+    On that day's and the day before's logs, the 9 passes a rearm followed had
+    the marker last seen 53 to 67 px across; 16 of the 20 with no rearm after
+    them had it under 50 px. Of the 19 rearms there with a marker size, 17 had
+    it last seen 53 px across or more; the other two (26 and 34 px) were not
+    signed as passes either.
+
     No I/O and no clock of its own: `update` is called once per steering tick.
     """
 
@@ -311,13 +321,15 @@ class ResupplyPassWatch:
 
     def __init__(self, *, missing_s: float = 0.5, min_off_centre_px: float = 35.0,
                  min_outward_px: float = 5.0, lined_up_px: float = 120.0,
-                 min_approach_s: float = 2.0) -> None:
+                 min_size_px: float = 50.0, min_approach_s: float = 2.0) -> None:
         self.missing_s = max(0.0, float(missing_s))
         self.min_off_centre_px = float(min_off_centre_px)
         self.min_outward_px = float(min_outward_px)
         self.lined_up_px = float(lined_up_px)
+        self.min_size_px = max(0.0, float(min_size_px))
         self.min_approach_s = max(0.0, float(min_approach_s))
-        self._sightings: "list[tuple[float, float, bool]]" = []   # (time, px off centre, steering)
+        # (time, px off centre, px across, steering)
+        self._sightings: "list[tuple[float, float, float, bool]]" = []
         self._judged = False      # this loss has been judged, pass or not
 
     def update(self, now: float, marker: "ResupplyMarker | None", *, steering: bool,
@@ -330,12 +342,13 @@ class ResupplyPassWatch:
             off = math.hypot(marker.x - frame_width / 2,
                              marker.y - frame_height / 2) * 1200.0 / frame_height
             self._sightings = [s for s in self._sightings if now - s[0] <= self._KEEP_S]
-            self._sightings.append((now, off, bool(steering and active)))
+            size = max(marker.width, marker.height) * 1200.0 / frame_height
+            self._sightings.append((now, off, size, bool(steering and active)))
             self._judged = False
             return None
         if not self._sightings or self._judged:
             return None
-        last_t, last_off, last_steering = self._sightings[-1]
+        last_t, last_off, last_size, last_steering = self._sightings[-1]
         if now - last_t < self.missing_s:
             return None
         self._judged = True
@@ -344,7 +357,7 @@ class ResupplyPassWatch:
         if last_t - self._sightings[0][0] < self.min_approach_s:
             return None
         recent = [s for s in self._sightings if s[0] >= last_t - self._STEER_WINDOW_S]
-        if sum(1 for s in recent if s[2]) < self._STEER_SHARE * len(recent):
+        if sum(1 for s in recent if s[3]) < self._STEER_SHARE * len(recent):
             return None
         before = sorted(s[1] for s in self._sightings
                         if last_t - self._BEFORE_S[0] <= s[0] <= last_t - self._BEFORE_S[1])
@@ -353,7 +366,7 @@ class ResupplyPassWatch:
         was_at = before[len(before) // 2]
         outward = last_off - was_at
         if (last_off < self.min_off_centre_px or outward < self.min_outward_px
-                or was_at > self.lined_up_px):
+                or was_at > self.lined_up_px or last_size < self.min_size_px):
             return None
         self._sightings = []      # the next pass needs its own approach
         return ResupplyPass(last_off, outward, now - last_t)

@@ -982,6 +982,63 @@ terrain_avoidance:
       red_wrap_upper: [179, 255, 255]
       green_lower: [50, 70, 195]
       green_upper: [65, 255, 255]
+# Code Review 019 step 3a: the same outlines measured on the pursuit's own
+# frames (about 0.17 s apart) instead of the main tick's, logged as PATHVIEW
+# lines and drawn on live_hud.png under the picture they came from: free air
+# tinted, outlines coloured by time to contact, the point the picture expands
+# from. Shadow only. Uses terrain_avoidance.loom's settings with its own
+# detector instances; the main tick's readings above carry on unchanged.
+clear_path:
+  enabled: true
+  # Step 3d (shadow): with the goal the pursuit flies at on the same picture
+  # (resupply marker, crown or control point with the steering, else the
+  # tracked target), DIRECT when the line there is clear and the goal has
+  # clear_px of free air round it, DETOUR to the nearest such point otherwise,
+  # ESCAPE when the flight path is on something closing in under escape_tau_s,
+  # BLIND when the view is unreadable or the goal is outside it. Logged as PATH
+  # lines; the corridor is drawn on live_hud.png. Named guesses.
+  # 2026-10-15, after five hours in shadow (Code Review 019): outlines with too
+  # few dots to measure are unknowns (BLIND), not obstacles, and a closing
+  # outline blocks only when it closes sooner than nearer_frac of the surface
+  # the goal is drawn against. Treating unknowns as obstacles raised an alarm on
+  # 82% of objective approaches, 6 of 7 successful pickups among them.
+  # wall_warn_s: the measured surface behind the goal closing faster than this
+  # is logged as a wall (PATH[shadow]) and counted. Before 62 resupply
+  # climb-outs it was a median 2.2 s ahead of those that ended in a death within
+  # 10 s and 4.8 s ahead of those that did not. Reported only.
+  # wall_radius_px, wall_min_dots: the same surface from the dots within
+  # wall_radius_px of the goal alone (wall_local=), at least wall_min_dots of
+  # them; one fit over a whole outline is set by its fastest-growing part.
+  planner: {clear_px: 60, hold_s: 1.0, escape_tau_s: 3.0, nearer_frac: 0.7, wall_warn_s: 3.0,
+            wall_radius_px: 150, wall_min_dots: 8}
+# Code Review 019 cycle 11 (operator, 2026-10-15: "shadow first"): relative
+# terrain depth from one picture (Depth Anything V2 Small), in a worker process
+# of its own (wingman.depth_worker): this PC has no usable CUDA device and on the
+# CPU a 252 px picture takes 95 to 200 ms with 4 threads. The model is
+# downloaded once (about 100 MB) on the first start. Logged as DEPTH lines and
+# drawn as a small map left of the analysed view; nothing steers on it.
+depth_view:
+  enabled: true
+  model: depth-anything/Depth-Anything-V2-Small-hf
+  threads: 4
+  input_px: 252
+  min_interval_s: 0.3
+# Code Review 019 cycle 9 (operator, 2026-10-15): while the resupply marker has
+# the pursuit's steering, a fresh speed reading above cap_kph holds the airbrake
+# for (reading - target_kph) / decel_kph_s seconds, at most max_dose_s; the
+# speed is read about every 3 s, too seldom to brake to a threshold. Cruise's
+# afterburner pauses for the dose (they cancel each other, ADR 137). Released at
+# the climb-out, at any climb, during a missile evade or the afterburner evade,
+# on a takeover and when the marker loses the steering. Evidence: four of the
+# five climb-out deaths seen on 2026-10-15 passed the marker at 1,134 to 1,299
+# KPH; ADR 159 measured the airbrake at 500 to 600 KPH off per 3 s. Named guesses.
+approach_brake:
+  enabled: true
+  resupply: true
+  cap_kph: 850
+  target_kph: 800
+  decel_kph_s: 150
+  max_dose_s: 3.0
 # Design 010 instrumentation: the RETURN TO BATTLE banner. Counted, not
 # acted on — it appears only after the crossing, so it measures the
 # outcome rather than preventing it.
@@ -1368,6 +1425,13 @@ pursuit_mode:
     # marker had just taken the steering 597 px from the centre, blinked out for
     # 0.6 s, and the climb-out broke the approach (the marker was back 0.9 s
     # later). On the baseline log this costs 1 of the 36 pickups signed.
+    # min_size_px, 2026-10-15: the marker last seen at least this many px across
+    # (at 1200 px of frame height). At 12:58:24 a pass was signed with the
+    # marker 40 px across, no rearm followed, and the climb-out broke the
+    # approach. On the 10-14 and 10-15 logs the 9 passes a rearm followed had it
+    # 53 to 67 px across; 16 of the 20 with no rearm had it under 50. 17 of the 19
+    # rearms there with a size had it 53 px or more; the two under (26, 34) were
+    # not signed as passes either.
     pass_trigger:
       enabled: true
       actuate: true
@@ -1375,6 +1439,7 @@ pursuit_mode:
       min_off_centre_px: 35
       min_outward_px: 5
       lined_up_px: 120
+      min_size_px: 50
     # resupply_candidate_*.png in tests/test-output/target_tracking: the frame
     # in which a resupply marker first appears, two per pursuit at most. Off
     # (operator, 2026-10-05); the detector's evidence is in docs/anomaly/011.
@@ -1726,6 +1791,17 @@ hud:
     # eject/pursuit encounter (0 = no per-encounter cap). Named guesses.
     min_interval_s: 5.0
     max_per_encounter: 12
+  # Code Review 019 (CR-019-09): the last 18 s of annotated HUD frames, three a
+  # second, kept in memory and written at each death as
+  # <dir>/<stamp>_death_<nn>_<HHMMSS.mmm>.jpg, so a crash can be watched as
+  # wingman saw it. The respawn screen is read 3 to 5 s after the impact, so
+  # 18 s holds about 13 s of flight. About 54 frames and 4 MB a death; the
+  # capture budget keeps the folder to its default 1000 files. Live runs only.
+  # Each planner alarm (DETOUR or ESCAPE, Code Review 019 cycle 5) also leaves a
+  # 4 s clip in <dir>/alarms, taken 1.5 s after it: at most one every 30 s and 60
+  # a session, so each alarm can be labelled true or false from what was on screen.
+  black_box: {enabled: true, dir: test_screenshots/path_blackbox, seconds: 18.0, rate_hz: 3.0,
+              alarm_max: 60, alarm_gap_s: 30.0, alarm_seconds: 4.0}
 # Design 012: opt-in via --record-session (the Makefile's 'v' argument, e.g.
 # "make rd v"), never the default — a multi-hour session's file size and CPU
 # cost scale with fps. Low by design: this is reviewed at tactic-selection
@@ -1774,7 +1850,13 @@ telemetry:
   trend_min_speed_rate_mph_s: 15.0
   steep_dive_min_sin: 0.8
   level_max_sin: 0.15
-  ocr_every_n_ticks: 2
+  # Operator, 2026-10-15 (Code Review 019 cycle 10): every tick again. Every
+  # second tick (v1.6.27, for OCR time) left speed and altitude up to 3 s old
+  # (median 3.0 s between changes of the PATH lines' spd=), which the approach
+  # brake doses on and a pull-out projection would run on. The gates were
+  # designed for the 1.5 s tick (max_gate_dt_s 1.5); each read is about 0.4 s
+  # of OCR on the pool, in parallel with the other crops.
+  ocr_every_n_ticks: 1
   eject_closed_loop: {enabled: true, check_interval_s: 1.5, confirm_consecutive: 2,
     legacy_nose_hold_s: 5.0, over_rotation_after_s: 6.0, target_dive_angle_deg: 65.0,
     dive_angle_floor_deg: 55.0, descent_target_mps: 100.0, descent_floor_mps: 50.0,

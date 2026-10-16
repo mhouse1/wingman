@@ -3,6 +3,10 @@ import sys
 import os
 import warnings
 import re
+import select
+import shutil
+import subprocess
+import time
 from pathlib import Path
 import base64
 
@@ -73,10 +77,70 @@ def pytest_addoption(parser):
         help="Fail tests on timing violations (default: warnings only)"
     )
 
+# The Xvfb this pytest process started, if any (_start_private_display).
+_private_display = None
+
+
+def _start_private_display():
+    """Run the suite on a private Xvfb, as `make test` does (ADR 153).
+
+    GNOME 50 raises an "Allow remote interaction" dialog for every XTest client
+    on the session display, and pytest_sessionfinish sends XTest key releases.
+    `make test` sources scripts/gate-display.sh first; a direct
+    `uv run --active pytest tests/test_x.py` used to stay on :0 and prompt.
+    No-op off Linux, without Xvfb, and when WINGMAN_GATE_DISPLAY is already set
+    (make test, a gate lane, or WINGMAN_GATE_DISPLAY=real).
+    """
+    global _private_display
+    if (os.environ.get("WINGMAN_GATE_DISPLAY") or not sys.platform.startswith("linux")
+            or shutil.which("Xvfb") is None):
+        return
+    read_fd, write_fd = os.pipe()
+    # Same screen as scripts/gate-display.sh; keep them in step.
+    proc = subprocess.Popen(
+        ["Xvfb", "-displayfd", str(write_fd), "-nolisten", "tcp",
+         "-screen", "0", "1920x1200x24"],
+        pass_fds=(write_fd,), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    os.close(write_fd)
+    # Xvfb writes its display number to the fd once it accepts connections.
+    number = b""
+    deadline = time.monotonic() + 10.0
+    with os.fdopen(read_fd, "rb", buffering=0) as pipe:
+        while not number.endswith(b"\n"):
+            ready, _, _ = select.select([pipe], [], [], max(deadline - time.monotonic(), 0))
+            chunk = pipe.read(16) if ready else b""
+            if not chunk:
+                proc.kill()
+                proc.wait()
+                raise pytest.UsageError("Xvfb did not start within 10s (ADR 153)")
+            number += chunk
+    _private_display = proc
+    display = f":{number.decode().strip()}"
+    # XDG_SESSION_TYPE=x11 so Capture picks mss rather than the PipeWire portal.
+    os.environ.update(WINGMAN_GATE_DISPLAY=display, DISPLAY=display, XDG_SESSION_TYPE="x11")
+    os.environ.pop("WAYLAND_DISPLAY", None)
+
+
 def pytest_configure(config):
+    _start_private_display()
     # Add WINGMAN_VERSION to the pytest-html report metadata
     if hasattr(config, '_metadata'):
         config._metadata['Wingman Version'] = WINGMAN_VERSION
+
+
+def pytest_report_header(config):
+    if _private_display is not None:
+        return f"display: private Xvfb on {os.environ['DISPLAY']} (ADR 153)"
+    return None
+
+
+def pytest_unconfigure(config):
+    if _private_display is not None:
+        _private_display.terminate()
+        try:
+            _private_display.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _private_display.kill()
 
 @pytest.fixture(scope='session')
 def strict_timing(request):

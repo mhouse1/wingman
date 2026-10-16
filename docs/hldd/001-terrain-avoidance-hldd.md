@@ -561,7 +561,9 @@ The measurement now runs live in shadow. It logs and draws; nothing reads it to 
   consecutive ticks.
 - **Overlay** on `live_hud.png`: the tracked points that agreed, the path box, the expansion point and a
   `Loom[SHADOW]:` status line, beside Phase 1's box. The points belong to the pair that was measured, so they
-  are dropped when the reading is older than 4 s.
+  are dropped when the reading is older than 4 s. **2026-10-15: the points are no longer drawn** (operator:
+  white dots nothing used). `LoomReading.points` is kept; the tests use it to check the HUD colour mask.
+  During a pursuit the HUD now draws the pursuit's own view instead ([Code Review 019](../code-review/019-2026-10.md)).
 
 A featureless view (sky, water, a dark night) gives `n/a(few-points)`, never a warning. A tick with no reading
 resets the confirm streak.

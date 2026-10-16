@@ -6,6 +6,7 @@ import math
 import sys
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable, NamedTuple
 
@@ -22,6 +23,8 @@ from .hold_model import HoldModel, PictureClock
 from .hold_tactic import HoldTactic
 from .hotkeys import register_hotkeys as _register_hotkeys
 from .controller_config import ControllerConfig
+from .suppressed import log_suppressed
+from .clear_path import PathGoal
 from .crop_region import CropCoords, crop_centre
 from .icon_steering import IconPoints, IconSteeringConfig, find_ring_icons
 from .air_superiority import find_control_point_marker, find_control_point_ring_icons
@@ -273,6 +276,51 @@ def _side_of(err: "float | None") -> "str | None":
     if err is None or err == 0:
         return None
     return "left" if err < 0 else "right"
+
+
+def _path_goal(resupply_marker, priority_marker, priority_kind, target_obs):
+    """What the pursuit flies at this cycle, for the clear-path planner (Code
+    Review 019 step 3d): the marker that has the steering, else the tracked
+    target, else nothing. Each argument is None unless it has the steering."""
+    if resupply_marker is not None:
+        return PathGoal("resupply", float(resupply_marker.x), float(resupply_marker.y),
+                        (int(resupply_marker.width), int(resupply_marker.height)))
+    if priority_marker is not None:
+        return PathGoal("crown" if priority_kind == "priority_target" else "control point",
+                        float(priority_marker.x), float(priority_marker.y),
+                        (int(priority_marker.width), int(priority_marker.height)))
+    if target_obs is not None and target_obs.get("centroid_x") is not None:
+        return PathGoal("target", float(target_obs["centroid_x"]),
+                        float(target_obs["centroid_y"]))
+    return None
+
+
+def _alarm_clip(plan) -> "str | None":
+    """The black-box clip a plan asks for, or None (Code Review 019 cycles 5
+    and 7): ESCAPE on any goal, DETOUR on an objective, and the wall behind the
+    resupply marker under the planner's `wall_warn_s`, so the pickups that
+    survive a close wall are seen as well as the ones that do not.
+
+    Not DETOUR on a target: none of the clips labelled on 2026-10-15 showed
+    terrain the chase was in danger from, and they took most of the budget."""
+    if plan is None:
+        return None
+    if plan.mode == "ESCAPE" or (plan.mode == "DETOUR" and plan.goal.kind != "target"):
+        return "%s-%s" % (plan.mode.lower(), plan.goal.kind.replace(" ", "-"))
+    if plan.wall_close and plan.goal.kind == "resupply":
+        return "wall-resupply"
+    return None
+
+
+def _fmt_marker_size(marker) -> str:
+    """`WxH` of this cycle's own sighting of a marker, `-` without one.
+
+    Code Review 019 step 3b: a marker drawn larger as the aircraft closes may
+    give the goal's own time to contact, which the logs could not show while
+    they carried its size only at the last sighting."""
+    if marker is None:
+        return "-"
+    return "%dx%d" % (int(marker.width), int(marker.height))
 
 
 def _last_known_side(last_lock_ts: "float | None", last_lock_err: "float | None",
@@ -573,6 +621,32 @@ class Controller:
         # HUD rendering when it is None, same fail-open shape as a missing
         # target tracker.
         self._hud_renderer = None
+        # Code Review 019 step 3a: terrain perception on the pursuit's own
+        # frames (clear_path.PathPerception), wired from main.py for live runs.
+        # None: the pursuit takes no view and the HUD keeps the main tick's.
+        self._path_perception = None
+        # Cycle 11: relative depth from a monocular model (depth_view.DepthPerception),
+        # wired from main.py for live runs. Shadow: logged and drawn only.
+        self._depth_perception = None
+        # Step 3e: which goals the planner's aim steers, by kind ("resupply",
+        # "control point", "crown", "target"). Off in the schema.
+        _steer = (getattr(_c, "clear_path", None) or {}).get("steer") or {}
+        self._clear_path_steer = {
+            kind: bool(_steer.get(key, schema_default(f"clear_path.steer.{key}")))
+            for kind, key in (("resupply", "resupply"), ("control point", "control_point"),
+                              ("crown", "crown"), ("target", "target"))}
+        self._path_steer_logged = 0.0
+        self._path_steer_mode: "str | None" = None
+        # Cycle 9: the airbrake on the approach to the resupply marker
+        # (`approach_brake`), dosed on each fresh speed reading. Off in the schema.
+        _brake = getattr(_c, "approach_brake", None) or {}
+        self._approach_brake_cfg = {
+            key: _brake.get(key, schema_default(f"approach_brake.{key}"))
+            for key in ("enabled", "resupply", "cap_kph", "target_kph", "decel_kph_s",
+                        "max_dose_s")}
+        self._approach_brake_held = False
+        self._approach_brake_until = 0.0
+        self._approach_brake_read_ts: "float | None" = None
         # ADR 136: True once switch_weapon() has fired for the current eject —
         # the shared AMMO_MISSILE crop then reads the secondary loadout, not
         # the primary rack, so ADR 088's rearm-abort check must stop trusting
@@ -919,6 +993,7 @@ class Controller:
         self._resupply_pass_min_off_px = float(_pass_get("min_off_centre_px"))
         self._resupply_pass_min_outward_px = float(_pass_get("min_outward_px"))
         self._resupply_pass_lined_up_px = float(_pass_get("lined_up_px"))
+        self._resupply_pass_min_size_px = float(_pass_get("min_size_px"))
         # The resupply point is flown through, so its marker is held closer to
         # the centre than a target is: at the target's 0.05 the marker was
         # parked at the edge of a 48 by 30 px box, about its own ring's size
@@ -1678,6 +1753,92 @@ class Controller:
         """
         self._hud_renderer = hud_renderer
 
+    def set_depth_perception(self, perception) -> None:
+        """Code Review 019 cycle 11: the depth view the pursuit hands its
+        pictures to (shadow), or None."""
+        self._depth_perception = perception
+
+    def set_path_perception(self, perception) -> None:
+        """Wire in the terrain perception the pursuit runs on its own frames
+        (Code Review 019 step 3a, `clear_path.PathPerception`). Live runs only:
+        main.py does not wire it for the replay and capture lanes, whose grabs
+        hand out scripted screenshots. Shadow: it logs and draws."""
+        self._path_perception = perception
+
+    def _planned_aim(self, kind: str, marker, picture_ts: float, perception):
+        """Where the steering points for `marker` (Code Review 019 step 3e).
+
+        The planner's aim when it detours or escapes on a picture at most
+        0.6 s older than this one, moved with the marker since; the marker
+        itself otherwise, and always while steering is off for this kind.
+        BLIND keeps the marker: whether a marker the planner cannot vouch for
+        is still flown at is the approach decision (CR-019-12), not the
+        planner's. Returns (x, y) and the plan followed, or None.
+        """
+        here = (float(marker.x), float(marker.y))
+        if perception is None or not self._clear_path_steer.get(kind, False):
+            return here, None
+        view = perception.last
+        plan = None if view is None else view.plan
+        if (plan is None or plan.goal.kind != kind or plan.mode not in ("DETOUR", "ESCAPE")
+                or not 0.0 <= picture_ts - view.picture_ts <= 0.6):
+            if self._path_steer_mode is not None:
+                logger.info("PATH STEER: %s straight at the marker again", kind)
+                self._path_steer_mode = None
+            return here, None
+        aim = (plan.aim[0] + here[0] - plan.goal.x, plan.aim[1] + here[1] - plan.goal.y)
+        if plan.label != self._path_steer_mode and time.time() - self._path_steer_logged >= 2.0:
+            logger.info("PATH STEER: %s via %s, aim (%.0f,%.0f) for the marker at (%.0f,%.0f)%s",
+                        kind, plan.label, aim[0], aim[1], here[0], here[1],
+                        "" if plan.blocker_tau is None
+                        else ", blocker closing in %.1f s" % plan.blocker_tau)
+            self._path_steer_logged = time.time()
+        self._path_steer_mode = plan.label
+        return aim, plan
+
+    def _path_own_state(self) -> "tuple[float | None, float | None]":
+        """Airspeed (KPH, the fresh raw reading) and flight-path angle (degrees)
+        from one telemetry snapshot, for the clear-path log (Code Review 019
+        cycle 8: the two climb-out deaths seen at 17:35 and 17:51 on 2026-10-15
+        passed the marker at 1,134 and 1,233 KPH). None for what is not read."""
+        if self._analyzer is None:
+            return None, None
+        try:
+            snap = self._analyzer.get_telemetry()
+        except Exception:
+            return None, None
+        if snap is None:
+            return None, None
+        speed = (float(snap.speed.value)
+                 if snap.speed_fresh() and snap.speed.value is not None else None)
+        return speed, snap.pitch_angle_deg()
+
+    def _path_view_renderer(self, obs, health, missiles, flares, steering_target,
+                            steering_label, steering_stale, render_state: dict):
+        """The perception worker's callback for one pursuit picture: draw the HUD
+        from the picture the view was taken on, with that cycle's steering. Its
+        arguments are bound now, so a later cycle cannot change what is drawn."""
+        hud = self._hud_renderer
+        if hud is None:
+            return None
+
+        def _on_view(frame, view):
+            # Cycle 11: the depth view's newest reading goes on the HUD with it.
+            depth = getattr(self._depth_perception, "last", None)
+            if depth is not None:
+                view = replace(view, depth=depth)
+            if hud.maybe_render(frame, obs, "PURSUIT_MODE", health, missiles, flares,
+                                steering_target=steering_target,
+                                steering_label=steering_label,
+                                steering_stale=steering_stale,
+                                path_view=view) is not None:
+                render_state["ts"] = time.monotonic()
+            # Cycles 5 and 7: a clip round each planner alarm, to label it from the screen.
+            reason = _alarm_clip(getattr(view, "plan", None))
+            if reason is not None:
+                hud.note_alarm(reason)
+        return _on_view
+
     def roll_left(self, hold_seconds: float = 0.3, block: bool = True, ignore_cancel: bool = False):
         """Roll left by holding the configured roll-left key."""
         if self._turn_blocked("roll_left"):
@@ -2232,11 +2393,99 @@ class Controller:
         it up when the recovery hands back, if the time is not over."""
         logger.info("RESUPPLY: rearm climb-out, nose up and afterburner for %.1fs (%s)",
                     self._resupply_rearm_climb_s, why)
+        self._approach_brake_off("rearm climb-out")
         if not yielding:
             self.release_roll_hold(why="rearm climb-out")
             self.hold_pitch_for_icon("up", "rearm climb-out")
             self._rearm_afterburner(True)
         return time.time() + self._resupply_rearm_climb_s
+
+    def _approach_brake_tick(self, armed: bool) -> None:
+        """Code Review 019 cycle 9 (operator, 2026-10-15): the airbrake on the
+        approach to the resupply marker, one pursuit cycle. `armed` is True while
+        the marker has the steering, no climb-out runs and no recovery has the
+        airframe.
+
+        Four of the five climb-out deaths seen on 2026-10-15 passed the marker at
+        1,134 to 1,299 KPH, with cruise holding the afterburner. The speed is read
+        about every 3 s and the airbrake takes 500 to 600 KPH off in that time
+        (ADR 159), so braking to a threshold would overshoot by hundreds of KPH.
+        Each fresh reading above `cap_kph` starts a dose instead, (reading -
+        target_kph) / decel_kph_s seconds, at most `max_dose_s`; a fresh reading at
+        or below `target_kph` ends one early.
+        """
+        cfg = self._approach_brake_cfg
+        if not (cfg["enabled"] and cfg["resupply"]):
+            return
+        now = time.time()
+        veto = (None if armed else "the marker no longer has the steering") \
+            or self._approach_brake_veto(now)
+        if veto is not None:
+            self._approach_brake_off(veto)
+            return
+        reading, read_ts = self._speed_reading()
+        if reading is not None and read_ts != self._approach_brake_read_ts:
+            self._approach_brake_read_ts = read_ts
+            if reading > float(cfg["cap_kph"]):
+                dose = min(float(cfg["max_dose_s"]),
+                           (reading - float(cfg["target_kph"])) / float(cfg["decel_kph_s"]))
+                self._approach_brake_until = now + dose
+                logger.info("SPEEDCAP: %.0f KPH over the %.0f KPH cap on the resupply "
+                            "approach: airbrake for %.1f s", reading, float(cfg["cap_kph"]),
+                            dose)
+                self._approach_brake_on()
+            elif self._approach_brake_held and reading <= float(cfg["target_kph"]):
+                self._approach_brake_off("%.0f KPH reached" % reading)
+                return
+        if self._approach_brake_held and now >= self._approach_brake_until:
+            self._approach_brake_off("dose given")
+
+    def _approach_brake_veto(self, now: float) -> "str | None":
+        """Why the approach brake may not hold now, or None: a takeover, a climb
+        or an eject owns the airframe, or a missile evade wants the speed."""
+        if self._manual_takeover_active():
+            return "manual takeover"
+        if self._climbing.is_set():
+            return "a climb has the airframe"
+        if self._ejecting.is_set():
+            return "eject"
+        if self._missile_evading.is_set() or now < self._ab_evade_until:
+            return "missile evade"
+        return None
+
+    def _approach_brake_on(self) -> None:
+        """Hold the airbrake for the approach. Cruise yields first and its burner
+        comes up at once (ADR 151 D4): the two cancel each other (ADR 137)."""
+        if self._approach_brake_held:
+            return
+        self._approach_brake_held = True
+        _actuator.reevaluate(AFTERBURNER_KEY)
+        self._climb_key(AIRBRAKE_KEY, press=True, action="approach_brake")
+
+    def _approach_brake_off(self, why: str) -> None:
+        """Let the approach brake go, if it holds; cruise's burner comes back on
+        its next tick. While the emergency climb holds the airbrake the key is
+        that climb's (ADR 137), so it is left down for the climb to release."""
+        self._approach_brake_until = 0.0
+        if not getattr(self, "_approach_brake_held", False):
+            return
+        self._approach_brake_held = False
+        if not self._climb_emergency_active:
+            self._climb_key(AIRBRAKE_KEY, press=False, action="approach_brake")
+        logger.info("SPEEDCAP: airbrake released (%s)", why)
+
+    def _speed_reading(self) -> "tuple[float | None, float | None]":
+        """The fresh raw speed reading (KPH) and when it was accepted, from one
+        telemetry snapshot; (None, None) without one."""
+        if self._analyzer is None:
+            return None, None
+        try:
+            snap = self._analyzer.get_telemetry()
+        except Exception:
+            return None, None
+        if snap is None or not snap.speed_fresh() or snap.speed.value is None:
+            return None, None
+        return float(snap.speed.value), snap.speed.ts
 
     def _rearm_afterburner(self, hold: bool) -> None:
         """The rearm climb-out's lease on the afterburner: taken and renewed
@@ -4090,6 +4339,8 @@ class Controller:
                 priority_kind = None      # whose: "priority_target" or "air_superiority"
                 priority_last_ts = 0.0
                 priority_error_logged = False
+                marked_kept_steering = False   # the marked objective's marker had the steering last cycle
+                resupply_wait_logged = False   # this wait for the marked objective is logged
                 missile_urgency = MissileUrgency(self._pursuit_empty_confirm_reads)
                 missile_priority = missile_urgency.snapshot()
                 resupply_seeking = False
@@ -4120,7 +4371,8 @@ class Controller:
                     missing_s=self._resupply_pass_missing_s,
                     min_off_centre_px=self._resupply_pass_min_off_px,
                     min_outward_px=self._resupply_pass_min_outward_px,
-                    lined_up_px=self._resupply_pass_lined_up_px)
+                    lined_up_px=self._resupply_pass_lined_up_px,
+                    min_size_px=self._resupply_pass_min_size_px)
                     if self._resupply_pass_enabled else None)
                 self._search_climb_reached = False
                 self._search_climbing = False
@@ -4133,6 +4385,20 @@ class Controller:
                 # A grab often returns the picture of the grab before; the
                 # steering is told when its picture was first seen.
                 picture_clock = PictureClock()
+                # Code Review 019 step 3a: the terrain on the pursuit's own
+                # pictures, and the HUD drawn from the picture it was taken on.
+                # The measurement runs on the perception's own worker thread: on
+                # this one its median 46 ms slowed the steering cycle from 0.165 s
+                # to 0.210 s (2026-10-15 07:42). Written by the worker, read here.
+                path_perception = self._path_perception
+                if path_perception is not None and not path_perception.enabled:
+                    path_perception = None
+                if path_perception is not None:
+                    path_perception.reset()
+                    path_perception.start()
+                path_render = {"ts": 0.0}   # monotonic time of the last render with a view
+                path_error_logged = False
+                last_health = last_ammo = last_flares = None
                 while not self._eject_stop.wait(timeout=self._pursuit_steer_interval_s):
                     if (self._pursuit_max_duration_s > 0
                             and time.time() - start >= self._pursuit_max_duration_s):
@@ -4219,44 +4485,6 @@ class Controller:
                         enemy_strength = (0.0 if icon_points is None else
                                           math.hypot(icon_points.turn_pts,
                                                      icon_points.pitch_pts))
-                        resupply_proposed = resupply_preempts(
-                            priority=missile_priority,
-                            marker_visible=resupply_marker is not None)
-                        # Operator, 2026-10-02: while weapons remain, go for
-                        # whichever is nearer the screen centre, the resupply
-                        # icon or a visible target. Firing carries on either way.
-                        target_nearer = (
-                            resupply_proposed and not missile_priority.empty
-                            and bool(visible) and err is not None
-                            and not marker_nearer_than_target(
-                                resupply_marker, err, err_y,
-                                frame.shape[1], frame.shape[0]))
-                        if target_nearer:
-                            resupply_proposed = False
-                        resupply_control = (self._resupply_priority_actuate
-                                            and resupply_proposed)
-                        # Action Item 003: the marker lost while moving outward
-                        # is the pass, and the climb-out starts there.
-                        if pass_watch is not None:
-                            passed = pass_watch.update(
-                                time.monotonic(), detected_resupply_marker,
-                                steering=resupply_control,
-                                active=not yielding and not rearm_climb_until,
-                                frame_width=frame.shape[1], frame_height=frame.shape[0])
-                            if passed is not None:
-                                pass_text = (
-                                    "marker passed: last seen %.1fs ago, %.0f px off the "
-                                    "centre, %+.0f px outward" % (
-                                        passed.since_seen_s, passed.off_centre_px,
-                                        passed.outward_px))
-                                if (self._resupply_pass_actuate
-                                        and self._resupply_priority_actuate
-                                        and self._resupply_rearm_climb_s > 0):
-                                    rearm_climb_until = self._start_rearm_climb_out(
-                                        pass_text, yielding)
-                                    rearm_climb_started = time.time()
-                                else:
-                                    logger.info("RESUPPLY: pass seen, shadow (%s)", pass_text)
                         # Same date: with every rack empty the pursuit searches
                         # for resupply instead of targets. Nameplates and
                         # opponent icons are not steered at and the gun stays
@@ -4264,32 +4492,28 @@ class Controller:
                         # the search manoeuvre below flies.
                         resupply_search = (self._resupply_priority_actuate
                                            and missile_priority.empty)
-                        if resupply_proposed and not resupply_seeking:
-                            logger.info(
-                                "RESUPPLY: urgency overtook pursuit at spent=%d; "
-                                "rearm focus begins (%s)",
-                                missile_priority.missiles_spent,
-                                "actuating" if self._resupply_priority_actuate else "shadow")
-                        resupply_seeking = resupply_seeking or resupply_proposed
                         # Operator, 2026-10-09: the marked objectives, the crown
                         # (the priority target) and the control points of air
                         # superiority the enemy holds. A marker in view is flown
                         # at as the resupply marker is; off screen, the pin on
                         # the ring feeds the icon law in place of the red icons.
-                        # The resupply comes first. With every rack empty the
-                        # crown's marker in view is still flown at, and nothing
-                        # else of the two is looked for: on 2026-10-10 05:44:06
-                        # the racks were confirmed empty with the crown dead
-                        # ahead, 55 px across, the search took the roll and the
-                        # aircraft went by it.
+                        # The resupply comes first, unless the marked objective
+                        # already has the steering (below). With every rack
+                        # empty the crown's marker in view is still flown at,
+                        # and nothing else of the two is looked for: on
+                        # 2026-10-10 05:44:06 the racks were confirmed empty
+                        # with the crown dead ahead, 55 px across, the search
+                        # took the roll and the aircraft went by it.
                         priority_marker = None
                         priority_marker_stale = False
                         priority_pins = []
+                        priority_detected = None    # this cycle's own sighting
                         if self._priority_target_enabled or self._air_superiority_enabled:
                             try:
                                 _kind, _marker, priority_pins = (
                                     self._scan_marked_objective(
                                         frame, crown_marker_only=resupply_search))
+                                priority_detected = _marker
                                 if _kind is not None:
                                     priority_kind = _kind
                                 if _marker is not None:
@@ -4323,14 +4547,88 @@ class Controller:
                         # the rule the resupply marker follows (2026-10-02).
                         # With every rack empty no target is steered at, so
                         # none is weighed against it.
-                        priority_proposed = (
-                            priority_marker is not None and not resupply_control
+                        priority_in_reach = (
+                            priority_marker is not None
                             and not (not resupply_search
                                      and bool(visible) and err is not None
                                      and not marker_nearer_than_target(
                                          priority_marker, err, err_y,
                                          frame.shape[1], frame.shape[0])))
+                        resupply_proposed = resupply_preempts(
+                            priority=missile_priority,
+                            marker_visible=resupply_marker is not None)
+                        # Operator, 2026-10-02: while weapons remain, go for
+                        # whichever is nearer the screen centre, the resupply
+                        # icon or a visible target. Firing carries on either way.
+                        target_nearer = (
+                            resupply_proposed and not missile_priority.empty
+                            and bool(visible) and err is not None
+                            and not marker_nearer_than_target(
+                                resupply_marker, err, err_y,
+                                frame.shape[1], frame.shape[0]))
+                        if target_nearer:
+                            resupply_proposed = False
+                        # Operator, 2026-10-15: "it should have prioritized the
+                        # objective that's already in view". At 12:58:34.9 the
+                        # pursuit had flown at control point C for 4.4 s, its
+                        # marker 35 px across and 280 px from the centre; the
+                        # resupply marker came into view 26 px across at the
+                        # left edge, took the steering, and C slid off the
+                        # bottom of the screen. While weapons remain, the
+                        # marked objective that had the steering last cycle
+                        # keeps it while its marker is in view; the resupply
+                        # waits for it to be flown through or lost. With every
+                        # rack empty the rearm still comes first. The resupply
+                        # already keeps the steering it has, by
+                        # `not resupply_control` below.
+                        resupply_waits = (resupply_proposed and marked_kept_steering
+                                          and priority_in_reach
+                                          and not missile_priority.empty)
+                        if resupply_waits:
+                            resupply_proposed = False
+                            if not resupply_wait_logged:
+                                logger.info(
+                                    "%s: marker at (%.0f,%.0f) keeps the steering; "
+                                    "resupply marker at (%.0f,%.0f) waits",
+                                    priority_tag, priority_marker.x, priority_marker.y,
+                                    resupply_marker.x, resupply_marker.y)
+                        resupply_wait_logged = resupply_waits
+                        resupply_control = (self._resupply_priority_actuate
+                                            and resupply_proposed)
+                        # Action Item 003: the marker lost while moving outward
+                        # is the pass, and the climb-out starts there.
+                        if pass_watch is not None:
+                            passed = pass_watch.update(
+                                time.monotonic(), detected_resupply_marker,
+                                steering=resupply_control,
+                                active=not yielding and not rearm_climb_until,
+                                frame_width=frame.shape[1], frame_height=frame.shape[0])
+                            if passed is not None:
+                                pass_text = (
+                                    "marker passed: last seen %.1fs ago, %.0f px off the "
+                                    "centre, %+.0f px outward" % (
+                                        passed.since_seen_s, passed.off_centre_px,
+                                        passed.outward_px))
+                                if (self._resupply_pass_actuate
+                                        and self._resupply_priority_actuate
+                                        and self._resupply_rearm_climb_s > 0):
+                                    rearm_climb_until = self._start_rearm_climb_out(
+                                        pass_text, yielding)
+                                    rearm_climb_started = time.time()
+                                else:
+                                    logger.info("RESUPPLY: pass seen, shadow (%s)", pass_text)
+                        if resupply_proposed and not resupply_seeking:
+                            logger.info(
+                                "RESUPPLY: urgency overtook pursuit at spent=%d; "
+                                "rearm focus begins (%s)",
+                                missile_priority.missiles_spent,
+                                "actuating" if self._resupply_priority_actuate else "shadow")
+                        resupply_seeking = resupply_seeking or resupply_proposed
+                        priority_proposed = priority_in_reach and not resupply_control
                         priority_control = priority_actuate and priority_proposed
+                        # Read on the next cycle: the objective being flown at
+                        # keeps the steering while its marker is in view.
+                        marked_kept_steering = priority_control
                         # The pin steers only while the tracker has no target.
                         priority_search = (
                             priority_actuate and priority_points is not None
@@ -4437,14 +4735,27 @@ class Controller:
                                 self.release_pitch_hold(why="rearm climb-out over")
                         # The afterburner is held with the nose-up and let go with it.
                         self._rearm_afterburner(climbing_out)
+                        # Code Review 019 cycle 9: the airbrake while the resupply
+                        # marker has the steering; none in a climb-out or recovery.
+                        self._approach_brake_tick(
+                            resupply_control and not yielding and not rearm_climb_until)
+                        # Code Review 019 step 3e: the planner's aim in place of the
+                        # marker while it detours or escapes (when steering is on).
+                        resupply_aim, resupply_plan = (None, None)
+                        if resupply_control and resupply_marker is not None:
+                            resupply_aim, resupply_plan = self._planned_aim(
+                                "resupply", resupply_marker, picture_ts, path_perception)
                         search_climbing = False
                         if climbing_out:
                             self.release_roll_hold(why="rearm climb-out")
                         elif resupply_control and not yielding:
-                            hud_steering_target = (resupply_marker.x, resupply_marker.y)
-                            hud_steering_label = "RESUPPLYING"
+                            hud_steering_target = resupply_aim
+                            hud_steering_label = ("RESUPPLYING" if resupply_plan is None
+                                                  else "RESUPPLYING via " + resupply_plan.label)
                             hud_steering_stale = resupply_marker_stale
-                            error_x = ((resupply_marker.x - frame.shape[1] / 2)
+                            if self._approach_brake_held:
+                                hud_steering_label += " + AIRBRAKE"
+                            error_x = ((resupply_aim[0] - frame.shape[1] / 2)
                                        / (frame.shape[1] / 2))
                             self.orient_nose_to_target(
                                 error_x, deadband=self._resupply_deadband,
@@ -4510,7 +4821,7 @@ class Controller:
                         if climbing_out:
                             self.hold_pitch_for_icon("up", "rearm climb-out")
                         elif resupply_control and not yielding:
-                            error_y = ((resupply_marker.y - frame.shape[0] / 2)
+                            error_y = ((resupply_aim[1] - frame.shape[0] / 2)
                                        / (frame.shape[0] / 2))
                             if error_y > 0 and guard:
                                 self.release_pitch_hold(
@@ -4596,6 +4907,45 @@ class Controller:
                                     icon_error_logged = True
                         if guard:
                             self._dive_guard_pullout()
+                        # Code Review 019 step 3a: this picture goes to the terrain
+                        # perception's worker, which draws the HUD under the picture
+                        # its view came from, with this cycle's steering on it.
+                        # Shadow: nothing steers on it, and its failure must not
+                        # cost the cycle.
+                        # Only while health is being read: the state lags the screen,
+                        # and on 2026-10-15 08:24 the view was taken of the round-end
+                        # MVP card (the main tick's detectors had this gate already).
+                        path_health = True
+                        if path_perception is not None and self._analyzer is not None:
+                            try:
+                                path_health = bool(self._analyzer.game_battle_alive)
+                            except Exception:
+                                path_health = True
+                        if path_perception is not None and not path_health:
+                            path_perception.skip_no_health()
+                        elif path_perception is not None:
+                            try:
+                                path_perception.submit(
+                                    frame, picture_ts,
+                                    self._path_view_renderer(
+                                        obs, last_health, last_ammo, last_flares,
+                                        hud_steering_target, hud_steering_label,
+                                        hud_steering_stale, path_render),
+                                    goal=_path_goal(
+                                        resupply_marker if resupply_control else None,
+                                        (priority_marker if priority_control else None),
+                                        priority_kind, obs if control_visible else None),
+                                    own=self._path_own_state())
+                            except Exception:
+                                if not path_error_logged:
+                                    logger.exception("Controller: pursuit terrain view failed")
+                                    path_error_logged = True
+                        # Cycle 11: the depth view takes the same pictures (shadow).
+                        if self._depth_perception is not None and path_health:
+                            try:
+                                self._depth_perception.submit(frame, picture_ts)
+                            except Exception as exc:
+                                log_suppressed(logger, "depth_view_submit", exc)
                         # CR-018-01: ammo, weapon switch, fire and HUD run on their own
                         # ~0.3 s cadence (the old loop period); only steering runs faster.
                         if time.time() < next_engage_ts:
@@ -4747,7 +5097,7 @@ class Controller:
                             logger.debug(
                                 "RESUPPLY: spent=%d empty=%s marker=%s weight=%.1f "
                                 "opponent=%.1f proposed=%s seeking=%s mode=%s "
-                                "marker_stale=%s target_nearer=%s search=%s pin=%s",
+                                "marker_stale=%s target_nearer=%s search=%s pin=%s size=%s",
                                 missile_priority.missiles_spent,
                                 missile_priority.empty, marker_text,
                                 missile_priority.missiles_spent * self._icon_cfg.points_scale,
@@ -4756,19 +5106,21 @@ class Controller:
                                 resupply_marker_stale, target_nearer, resupply_search,
                                 "-" if not resupply_search or icon_state is None
                                 or icon_state.get("icon") is None
-                                else "%.0f" % icon_state["icon"].angle_deg)
+                                else "%.0f" % icon_state["icon"].angle_deg,
+                                _fmt_marker_size(detected_resupply_marker))
                         if priority_marker is not None or priority_pins or priority_search:
                             # Also when a nearer target keeps the steering.
                             logger.debug(
                                 "%s: marker=%s stale=%s pin=%s proposed=%s "
-                                "control=%s search=%s mode=%s", priority_tag,
+                                "control=%s search=%s mode=%s size=%s", priority_tag,
                                 "-" if priority_marker is None else "(%.0f,%.0f)" % (
                                     priority_marker.x, priority_marker.y),
                                 priority_marker_stale,
                                 "-" if not priority_pins
                                 else "%+.0f" % priority_pins[0].angle_deg,
                                 priority_proposed, priority_control, priority_search,
-                                "actuate" if priority_actuate else "shadow")
+                                "actuate" if priority_actuate else "shadow",
+                                _fmt_marker_size(priority_detected))
                         if terminal_zero and not self._resupply_priority_actuate:
                                 logger.info(
                                     "Controller: pursue_and_engage — ammo exhausted, "
@@ -4782,7 +5134,13 @@ class Controller:
                                 and not (self._resupply_priority_actuate
                                          and missile_priority.empty)):
                             self.fire_active_weapon(hold_seconds=0.1, block=False, ignore_cancel=True)
-                        if self._hud_renderer is not None:
+                        last_health, last_ammo, last_flares = health, ammo, flares
+                        # With the pursuit's own view the HUD is drawn above, from the
+                        # picture the view was taken on. This render is the fallback
+                        # for when no new picture has come for 2 s.
+                        if self._hud_renderer is not None and (
+                                path_perception is None
+                                or time.monotonic() - path_render["ts"] > 2.0):
                             self._hud_renderer.maybe_render(
                                 frame, obs, "PURSUIT_MODE", health, ammo, flares,
                                 steering_target=hud_steering_target,
@@ -4798,9 +5156,25 @@ class Controller:
                 # if this pursuit is handing off to it, and must not inherit
                 # a roll/pitch key this loop was holding.
                 self.release_tracking_holds(why="pursuit loop exit")
+                self._approach_brake_off("pursuit loop exit")
                 # A marker in view when the pursuit ends was not flown through.
                 with self._objective_tally_lock:
                     self._objective_tally.drop_approaches()
+                if self._path_perception is not None:
+                    try:
+                        self._path_perception.stop()
+                        _path_line = self._path_perception.end()
+                        if _path_line:
+                            logger.info(_path_line)
+                    except Exception as exc:
+                        log_suppressed(logger, "clear_path_summary", exc)
+                if self._depth_perception is not None:
+                    try:
+                        _depth_line = self._depth_perception.end()
+                        if _depth_line:
+                            logger.info(_depth_line)
+                    except Exception as exc:
+                        log_suppressed(logger, "depth_view_summary", exc)
                 if tally is not None:
                     tally.gun_s = self._gun_fired_s
                     logger.info(tally.line(
@@ -5684,6 +6058,9 @@ class Controller:
         # this every subsequent tick the hold stays RUNNING.
         self._climb_emergency_requested = bool(emergency)
         self._climbing.set()
+        # Code Review 019 cycle 9: the approach brake lets go before the climb
+        # presses anything; the emergency climb takes the airbrake itself.
+        self._approach_brake_off("climb")
         self._climb_stop.clear()
         logger.info("\033[95m⬆️  CLIMB — holding nose up + afterburner%s "
                     "(target alt %.0f, cap %.0fs)\033[0m",
@@ -5865,6 +6242,12 @@ class Controller:
         """
         if not self._cruise_ab_enabled:
             return
+        # Code Review 019 cycle 9: the approach brake pauses cruise without ending
+        # it. The burner is lifted when the brake goes on (they cancel each
+        # other, ADR 137) and comes back on the first tick after it lets go,
+        # instead of waiting for the fuel to refill to rearm_fuel_pct.
+        if getattr(self, "_approach_brake_held", False):
+            return
 
         may_hold = (
             # ADR 139 D4: the manual-takeover / climb-emergency arbitration
@@ -6017,7 +6400,9 @@ class Controller:
     # _owner_may_hold, and _may_hold_key maps its requester names onto it. An owner
     # not listed yields to nothing.
     _THROTTLE_YIELDS = {
-        "cruise": ("manual_takeover", "climb_emergency"),    # ADR 134 D9, ADR 137
+        # ADR 134 D9, ADR 137; and Code Review 019 cycle 9, the approach brake,
+        # which pauses cruise rather than ending it (note_afterburner_cruise).
+        "cruise": ("manual_takeover", "climb_emergency", "approach_brake"),
         "evade": ("manual_takeover", "climb_emergency"),     # ADR 128 D7, D8
         "climb": (),                  # stops on its own stop event (registry)
         "missile_evade": (),          # own fuel gate; yields to eject by entry guard
@@ -6039,6 +6424,8 @@ class Controller:
             return self._manual_takeover_active()
         if name == "climb_emergency":
             return bool(self._climb_emergency_active)
+        if name == "approach_brake":
+            return bool(getattr(self, "_approach_brake_held", False))
         raise ValueError(f"unknown yield condition {name!r}")
 
     def _owner_may_hold(self, _key: str, owner: str) -> bool:
@@ -8224,6 +8611,18 @@ class Controller:
         #    the echo grace, and the boundary turn's does the SAF-010 push.
         self._stop_flight_writers("shutdown")
         self._join_flight_writers(_WRITER_JOIN_BUDGET_S)
+        # The pursuit's terrain worker (Code Review 019) presses nothing; the
+        # pursuit's own end stops it, and this stops it when that end did not run.
+        if self._path_perception is not None:
+            try:
+                self._path_perception.stop(timeout=0.5)
+            except Exception as exc:
+                log_suppressed(logger, "clear_path_stop", exc)
+        if self._depth_perception is not None:
+            try:
+                self._depth_perception.stop(timeout=1.0)
+            except Exception as exc:
+                log_suppressed(logger, "depth_view_stop", exc)
 
         # 2. Belt-and-braces: release every injectable key.
         if keyboard_module and not self._simulate_os_input:

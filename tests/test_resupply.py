@@ -224,15 +224,17 @@ def test_confirmed_ammo_increase_while_seeking_resets_before_zero():
 # ---------------------------------------------------------------------------
 
 def _fly_marker(watch, offsets, *, start=100.0, step=0.17, steering=True, active=True,
-                height=1200, then_missing_s=0.0):
+                height=1200, then_missing_s=0.0, size=55):
     """Feed sightings `offsets` px right of the centre, one per `step`, then the
-    marker missing tick by tick for `then_missing_s`. Returns every pass signed."""
+    marker missing tick by tick for `then_missing_s`. Returns every pass signed.
+    `size` is the marker's px across at 1200 px of frame height."""
     signed = []
     t = start
     width = int(height * 1.6)
+    across = round(size * height / 1200)
     for off in offsets:
         marker = None if off is None else ResupplyMarker(
-            width / 2 + off * height / 1200, height / 2, 55, 55, 900, 0)
+            width / 2 + off * height / 1200, height / 2, across, across, 900, 0)
         got = watch.update(t, marker, steering=steering, active=active,
                            frame_width=width, frame_height=height)
         if got is not None:
@@ -316,6 +318,22 @@ def test_no_pass_while_the_pursuit_is_not_steering():
 def test_the_pixel_limits_are_at_1200_px_of_frame_height():
     small = _fly_marker(ResupplyPassWatch(), _APPROACH + _SWEEP, height=600, then_missing_s=3.0)
     assert len(small) == 1 and small[0].off_centre_px == pytest.approx(160)
+
+
+def test_a_marker_still_too_small_to_fly_through_is_not_a_pass():
+    """2026-10-15 12:58:24: the marker dropped out 55 px from the centre, 40 px
+    across; a pass was signed, no rearm came, and the climb-out broke the
+    approach. The passes a rearm followed had it 53 to 67 px across."""
+    assert _fly_marker(ResupplyPassWatch(), _APPROACH + _SWEEP, size=40,
+                       then_missing_s=3.0) == []
+    assert len(_fly_marker(ResupplyPassWatch(), _APPROACH + _SWEEP, size=53,
+                           then_missing_s=3.0)) == 1
+    # The floor is at 1200 px of frame height, as the other limits are.
+    assert _fly_marker(ResupplyPassWatch(), _APPROACH + _SWEEP, size=40, height=600,
+                       then_missing_s=3.0) == []
+    # At 0 the floor is off, the rule as it was.
+    assert len(_fly_marker(ResupplyPassWatch(min_size_px=0), _APPROACH + _SWEEP, size=40,
+                           then_missing_s=3.0)) == 1
 
 
 def test_the_next_pass_needs_its_own_approach():

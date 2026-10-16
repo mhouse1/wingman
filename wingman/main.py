@@ -35,9 +35,11 @@ from .analyzer import GameStateAnalyzer, POPUP_DISMISS_STATES
 from .state import GameState, GameEvent, BATTLE_STATES
 from .config_local import (local_path as local_config_path, merge as merge_config,
                            overlay_keys, read_overlay)
-from .suppressed import suppressed_counts
+from .suppressed import log_suppressed, suppressed_counts
 from .transition_queue import TransitionQueue
 from .hud import HudRenderer
+from .clear_path import PathPerception
+from .depth_view import DepthPerception
 from .terrain_loom import TerrainLoom
 from .mission_stats import MissionStatsTracker
 from .performance import PerformanceTracker
@@ -914,7 +916,7 @@ def main():
 
     # Target tracker and HUD renderer
     target_tracker = TargetTracker(cfg)
-    hud_renderer = HudRenderer.from_config(cfg)
+    hud_renderer = HudRenderer.from_config(cfg, live=not replay_mode and not capture_mode)
 
     # Initialize controller with config-driven weapon loop interval and exit event
     j20_cfg = cfg.get("j20_mission", {})
@@ -1267,6 +1269,12 @@ def main():
         if live_capture is not None:
             live_capture.on_event(event_name, time.time())
         stats_tracker.on_event(event_name, time.time())
+        # Code Review 019 (CR-019-09): every death leaves the HUD's last seconds.
+        if event_name == "respawn_detected" and hud_renderer is not None:
+            try:
+                hud_renderer.dump_black_box("death")
+            except Exception as exc:
+                log_suppressed(logger, "hud_black_box", exc)
 
     # FSM_TRANSITION subscribers are independent (ADR 060 Phase 1). These were
     # mutually exclusive if/elif/else branches only because the old single-slot
@@ -1348,6 +1356,17 @@ def main():
         behavior_tree.set_terrain_loom(
             TerrainLoom((cfg.get("terrain_avoidance") or {}).get("loom")),
             cap.grab_from_thread)
+        # Code Review 019 step 3a: the same measurement on the pursuit's own
+        # frames, with its own detector instances. Live only, for the reason
+        # above: the pursuit's grabs are scripted screenshots in those lanes.
+        ctrl.set_path_perception(PathPerception(
+            (cfg.get("terrain_avoidance") or {}).get("loom"), cfg.get("clear_path")))
+        # Cycle 11: relative depth from a monocular model, in a worker process
+        # that loads it in the background (shadow; stopped by ctrl.cleanup()).
+        depth_view = DepthPerception(cfg.get("depth_view"))
+        if depth_view.enabled:
+            depth_view.start()
+            ctrl.set_depth_perception(depth_view)
     tracking_hud = TrackingHudHandler(
         target_tracker, hud_renderer, analyzer, ctrl, cfg.get("tracking", {}),
         nav_source=behavior_tree,

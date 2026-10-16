@@ -638,24 +638,31 @@ def test_a_deaf_listener_is_restarted(monkeypatch, caplog):
 
     created = []
 
+    class _Ctx:
+        def __init__(self):
+            self.disabled = threading.Event()
+
     class _Rec:
         def __init__(self, name):
             self.name = name
-            self._disabled = threading.Event()
 
         def keysym_to_keycode(self, ks):
             return 36
 
         def record_create_context(self, *a, **k):
             created.append(self.name)
-            return object()
+            ctx = _Ctx()
+            _shared.setdefault("contexts", []).append(ctx)
+            return ctx
 
         def record_enable_context(self, ctx, handler):
-            _shared["active"] = self
-            self._disabled.wait(timeout=10)      # deaf: never calls the handler
+            ctx.disabled.wait(timeout=10)        # deaf: never calls the handler
 
         def record_disable_context(self, ctx):
-            _shared["active"]._disabled.set()
+            # XRecord disables the context it is given, enabled yet or not; a
+            # fake that released "the last one enabled" lost a stop that came
+            # between a context's creation and its enable (2 runs in 8).
+            ctx.disabled.set()
 
         def record_free_context(self, ctx):
             pass
@@ -706,8 +713,6 @@ def test_a_deaf_listener_is_restarted(monkeypatch, caplog):
             time.sleep(0.05)
         stop_pressing.set()
         kbd._stop.set()
-        if "active" in _shared:
-            _shared["active"]._disabled.set()
         loop.join(timeout=5.0)
     # d_setup is not a recording; each iteration creates exactly one context.
     assert created.count(":9") >= 2, created
@@ -1008,3 +1013,128 @@ def test_click_over_no_window_only_reports_when_isolation_is_off(monkeypatch, ca
     assert all("pointer is over no window at (939, 1094)" in w
                and "nested.isolate_pointer is off" in w for w in warnings)
     assert fake.delivered == [False, False]
+
+
+# --- CR-019-16: a deaf listener whose recording ignores the disable -------------
+# 2026-10-15 21:42:32: the watchdog disabled the :3 recording, the blocked
+# record_enable_context never returned, and its close() from the watchdog thread
+# woke nothing. The :3 listener heard no key for 19 minutes.
+
+def _fake_xlib(monkeypatch, rec_class):
+    import sys
+    import types
+    mods = {
+        "Xlib.display": types.SimpleNamespace(Display=rec_class),
+        "Xlib.X": types.SimpleNamespace(KeyPress=2, KeyRelease=3),
+        "Xlib.XK": types.SimpleNamespace(string_to_keysym=lambda n: 99),
+        "Xlib.ext.record": types.SimpleNamespace(AllClients=3, FromServer=0),
+        "Xlib.protocol.rq": types.SimpleNamespace(EventField=lambda *_: None),
+    }
+    for name, mod in mods.items():
+        monkeypatch.setitem(sys.modules, name, mod)
+    xlib = types.ModuleType("Xlib")
+    xlib.display, xlib.X, xlib.XK = mods["Xlib.display"], mods["Xlib.X"], mods["Xlib.XK"]
+    ext = types.ModuleType("Xlib.ext")
+    ext.record = mods["Xlib.ext.record"]
+    proto = types.ModuleType("Xlib.protocol")
+    proto.rq = mods["Xlib.protocol.rq"]
+    monkeypatch.setitem(sys.modules, "Xlib", xlib)
+    monkeypatch.setitem(sys.modules, "Xlib.ext", ext)
+    monkeypatch.setitem(sys.modules, "Xlib.protocol", proto)
+    monkeypatch.setattr(input_linux, "_ensure_xauthority", lambda: None)
+    monkeypatch.setattr(input_linux, "_TALLY_INTERVAL_S", 0.3)
+    monkeypatch.setattr(input_linux, "_DEAF_RESTART_WAIT_S", 0.2)
+    monkeypatch.setattr(input_linux, "_injected_press_counts", {})
+
+
+def _wedged_rec(created, shutdown_wakes: bool):
+    class _Socket:
+        def __init__(self, rec):
+            self._rec = rec
+
+        def shutdown(self, how):
+            if shutdown_wakes:
+                self._rec._shut = True
+                self._rec._woken.set()
+
+    class _Rec:
+        def __init__(self, name):
+            self.name = name
+            self._woken = threading.Event()
+            self._shut = False
+            self.display = types.SimpleNamespace(socket=_Socket(self))
+
+        def keysym_to_keycode(self, ks):
+            return 36
+
+        def record_create_context(self, *a, **k):
+            created.append(self.name)
+            return object()
+
+        def record_enable_context(self, ctx, handler):
+            _Rec.active.append(self)
+            self._woken.wait(timeout=20)       # the disable does not end it
+            if self._shut:
+                raise ConnectionError("Display connection closed by server")
+
+        def record_disable_context(self, ctx):
+            pass                               # what 21:42 looked like
+
+        def record_free_context(self, ctx):
+            pass
+
+        def flush(self):
+            pass
+
+        def close(self):
+            pass
+
+    import types
+    _Rec.active = []
+    return _Rec
+
+
+def _run_deaf(monkeypatch, caplog, rec_class, created, until):
+    _fake_xlib(monkeypatch, rec_class)
+    kbd = input_linux._LinuxXTestKeyboard()
+    stop_pressing = threading.Event()
+
+    def _press():
+        while not stop_pressing.wait(0.02):
+            input_linux._note_injected_press(":9")
+
+    threading.Thread(target=_press, daemon=True).start()
+    with caplog.at_level("INFO", logger="wingman.input_linux"):
+        loop = threading.Thread(target=kbd._listener_loop, args=(":9",), daemon=True)
+        loop.start()
+        deadline = time.time() + 10.0
+        while time.time() < deadline and not until():
+            time.sleep(0.05)
+        stop_pressing.set()
+        kbd._stop.set()
+        for rec in rec_class.active:
+            rec._woken.set()
+        loop.join(timeout=5.0)
+    return [r for r in caplog.records]
+
+
+def test_a_wedged_deaf_recording_is_shut_down_and_the_listener_restarts(monkeypatch, caplog):
+    created = []
+    rec_class = _wedged_rec(created, shutdown_wakes=True)
+    records = _run_deaf(monkeypatch, caplog, rec_class, created,
+                        until=lambda: created.count(":9") >= 2)
+    messages = [r.getMessage() for r in records]
+    assert created.count(":9") >= 2, created           # a new recording after the shutdown
+    assert any("restarting the :9 listener after the deaf watchdog (its recording was shut down"
+               in m for m in messages)
+    assert not any(m.startswith("XKey listener thread died") for m in messages)
+
+
+def test_a_deaf_listener_that_will_not_restart_is_an_error(monkeypatch, caplog):
+    created = []
+    rec_class = _wedged_rec(created, shutdown_wakes=False)
+    records = _run_deaf(
+        monkeypatch, caplog, rec_class, created,
+        until=lambda: any("did not restart" in r.getMessage() for r in caplog.records))
+    errors = [r.getMessage() for r in records if r.levelname == "ERROR"]
+    assert any(m.startswith("XKey[:9]: the deaf listener did not restart") for m in errors)

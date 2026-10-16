@@ -69,7 +69,7 @@ def test_resupply_priority_defaults_to_shadow_and_ships_actuation_trial():
         "deadband": 0.025,
         "pass_trigger": {"enabled": True, "actuate": True, "missing_s": 0.5,
                          "min_off_centre_px": 35, "min_outward_px": 5,
-                         "lined_up_px": 120},
+                         "lined_up_px": 120, "min_size_px": 50},
         "save_candidate_frames": False,
     }
     # A config without the key neither watches for the pass nor acts on it.
