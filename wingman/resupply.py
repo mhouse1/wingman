@@ -19,6 +19,19 @@ class ResupplyMarker:
     height: int
     area: int
     angle_deg: float
+    fill: float = 1.0       # share of the disc's inside that is its dark fill
+
+
+# Operator, 2026-10-16: "when resupply is that color it means its behind
+# terrain, in that case it should ignore that target". In view the icon's disc
+# is filled in one dark olive whatever lies behind it: hue 26 to 27, saturation
+# 255, value 54 on the six archived icons. Behind terrain the outline and glyph
+# are duller and the ground shows through: hue 20 to 105, saturation 10 to 167
+# (2026-10-16 23:34). A disc whose inside is less of that fill than
+# _MIN_FILL is not returned.
+_FILL_LO = np.array([22, 200, 35], dtype=np.uint8)
+_FILL_HI = np.array([31, 255, 95], dtype=np.uint8)
+_MIN_FILL = 0.5
 
 
 @dataclass(frozen=True)
@@ -43,8 +56,12 @@ RESUPPLY_MARKER_HOLD_S = 0.5
 _DEFAULT_REGION_PCT = (0.08, 0.08, 0.92, 0.92)
 
 
-def find_resupply_marker(frame, region_pct=None) -> "ResupplyMarker | None":
+def find_resupply_marker(frame, region_pct=None,
+                         occluded: "list | None" = None) -> "ResupplyMarker | None":
     """Find the resupply icon's yellow disc in a color capture.
+
+    A disc without its dark fill is behind terrain and is not returned; when
+    `occluded` is a list, each such disc is appended to it.
 
     The icon is a disc in one saturated yellow: a circular outline around a
     crossed-missiles glyph, which fills about 18% of a square box and spreads
@@ -123,8 +140,17 @@ def find_resupply_marker(frame, region_pct=None) -> "ResupplyMarker | None":
         corners = (glyph & (np.abs(dx) > 0.22) & (np.abs(dy) > 0.22)).sum()
         if corners < 0.22 * glyph_area:
             continue
+        inside = hsv[top:top + height, left:left + width][
+            (mask[top:top + height, left:left + width] == 0) & (radius < 0.70)]
+        fill = (float((cv2.inRange(inside.reshape(-1, 1, 3), _FILL_LO, _FILL_HI) > 0).mean())
+                if inside.size else 0.0)
         angle = math.degrees(math.atan2(y - frame_height / 2, x - frame_width / 2))
-        candidates.append(ResupplyMarker(x, y, width, height, area, angle))
+        marker = ResupplyMarker(x, y, width, height, area, angle, fill)
+        if fill < _MIN_FILL:
+            if occluded is not None:
+                occluded.append(marker)
+            continue
+        candidates.append(marker)
 
     return max(candidates, key=lambda marker: marker.area, default=None)
 

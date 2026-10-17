@@ -3203,3 +3203,52 @@ def test_the_tree_records_the_navigation_roll_it_commanded():
     assert bt.last_nav_roll is not None
     assert bt.last_nav_roll["dir"] == "right"      # the ctrl stub always answers "right"
     assert bt.last_nav_roll["kind"] == "steer" and bt.last_nav_roll["mode"] == "regroup"
+
+
+class TestKillCardHook:
+    """Code Review 019 cycle 19: the respawn handler hands the kill card reader
+    each frame of a latched respawn screen and closes the death when gameplay
+    resumes; re-detections inside the restart cooldown are not a new death."""
+
+    class _Card:
+        def __init__(self):
+            self.frames = []
+            self.ends = 0
+
+        def submit(self, frame):
+            self.frames.append(frame)
+
+        def end(self):
+            self.ends += 1
+
+    @staticmethod
+    def _gs(respawning=True):
+        return {"is_respawning": respawning, "respawn_confidence": 1.0}
+
+    def test_each_respawn_screen_frame_is_read_and_the_death_closed_once(self):
+        h, a, c = _respawn()
+        card = self._Card()
+        h._kill_card = card
+        first, second = object(), object()
+        h.tick_detect(first, self._gs(True), GameState.GAME_BATTLE)
+        h.tick_detect(second, self._gs(True), GameState.GAME_BATTLE)
+        assert card.frames == [first, second]
+        h.note_gameplay_resumed()
+        h.note_gameplay_resumed()
+        assert card.ends == 1
+
+    def test_a_re_detection_inside_the_cooldown_is_not_read(self):
+        h, a, c = _respawn()
+        card = self._Card()
+        h._kill_card = card
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        h.note_gameplay_resumed()
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)   # cooldown
+        assert len(card.frames) == 1 and card.ends == 1
+
+    def test_no_respawn_reads_nothing(self):
+        h, a, c = _respawn()
+        card = self._Card()
+        h._kill_card = card
+        h.tick_detect(object(), self._gs(False), GameState.GAME_BATTLE)
+        assert card.frames == []

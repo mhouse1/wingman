@@ -356,8 +356,11 @@ class RespawnHandler:
     def __init__(self, analyzer, ctrl, mission_cfg, *, enemy_presence, ammo_events,
                  behavior_tree=None, live_capture=None, emit_capture_event=None,
                  disposition_fn, respawn_state_enum, cooldown_s: float = 10.0,
-                 replay_mode: bool = False, clock=time.time):
+                 replay_mode: bool = False, clock=time.time, kill_card=None):
         self._clock = clock
+        # Code Review 019 cycle 19: the death's cause from the game's kill card
+        # (wingman/kill_card.py), read on the latched respawn screen. Shadow.
+        self._kill_card = kill_card
         self._analyzer = analyzer
         self._ctrl = ctrl
         self._enemy_presence = enemy_presence
@@ -459,6 +462,8 @@ class RespawnHandler:
         if self._state == self._RespawnState.RESPAWNING:
             logger.info("\033[92m✓ Gameplay resumed — mission restarts on health return\033[0m")
             self._state = self._RespawnState.IDLE
+            if self._kill_card is not None:
+                self._kill_card.end()
 
     # -- alive transition ---------------------------------------------------
 
@@ -892,6 +897,8 @@ class RespawnHandler:
                 self._state = self._RespawnState.RESPAWNING
                 logger.info("Respawn screen active — mission restarts when health returns")
 
+        if self._kill_card is not None and self._state == self._RespawnState.RESPAWNING:
+            self._kill_card.submit(frame)
         logger.info("\033[91mRESPAWN ACTIVE (%.0f%% confidence)\033[0m",
                     game_state.get('respawn_confidence', 0) * 100)
         return True

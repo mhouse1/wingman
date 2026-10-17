@@ -1448,6 +1448,27 @@ class GameStateAnalyzer:
                     self._background_ocr_lock.release()
         return self._ocr_executor
 
+    def run_ocr(self, fn, *args, timeout: float = 10.0):
+        """Run ``fn(reader, *args)`` on one of the OCR pool's threads, with that
+        thread's EasyOCR reader, and return its result. None without a pool or a
+        reader, on a timeout or when ``fn`` raises. Blocks: call it off the main
+        loop (Code Review 019 cycle 19, the kill card reader). The pool's readers
+        are reused: a reader of its own costs about 300 MB (Performance 008)."""
+        executor = self.ocr_executor
+        if executor is None:
+            return None
+
+        def _job():
+            reader = _get_thread_ocr_reader()
+            return None if reader is None else fn(reader, *args)
+
+        try:
+            return executor.submit(_job).result(timeout=timeout)
+        except Exception:
+            logger.debug("Analyzer: run_ocr(%s) failed", getattr(fn, "__name__", fn),
+                         exc_info=True)
+            return None
+
     def _trigger(self, trigger_name: str) -> bool:
         """Thread-safe FSM trigger dispatch. Returns False on invalid transitions.
 

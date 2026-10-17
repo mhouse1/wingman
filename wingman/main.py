@@ -40,6 +40,7 @@ from .transition_queue import TransitionQueue
 from .hud import HudRenderer
 from .clear_path import PathPerception
 from .depth_view import DepthPerception
+from .kill_card import KillCardReader, read_card
 from .terrain_loom import TerrainLoom
 from .mission_stats import MissionStatsTracker
 from .performance import PerformanceTracker
@@ -1373,6 +1374,15 @@ def main():
         icon_cfg=IconSteeringConfig.from_dict(
             (cfg.get("pursuit_mode") or {}).get("icon_steering")),
     )
+    # Code Review 019 cycle 19 (shadow): each death's cause from the game's kill
+    # card, read on the analyzer's OCR pool. Live only: a replay's respawn
+    # screens are archived screenshots, not this session's deaths.
+    kill_card = KillCardReader(
+        read_fn=lambda frame: analyzer.run_ocr(read_card, frame),
+        enabled=(bool((cfg.get("kill_card") or {}).get(
+            "enabled", schema_default("kill_card.enabled")))
+            and not replay_mode and not capture_mode))
+    kill_card.start()
     respawn = RespawnHandler(
         analyzer, ctrl, mission_cfg,
         enemy_presence=enemy_presence, ammo_events=ammo_events,
@@ -1385,6 +1395,7 @@ def main():
         # config.yaml (crash_capture enabled) — replay is not a live crash,
         # so it must not write real PNGs to disk as a release-gate side effect.
         replay_mode=replay_mode,
+        kill_card=kill_card if kill_card.enabled else None,
     )
     waiting_fallback = WaitingFallbackHandler(
         analyzer, ctrl, mission_cfg, live_capture=live_capture,
@@ -1955,6 +1966,8 @@ def main():
         # emit-before-cleanup rule as the shadow summary above.
         dropout_summary = analyzer.health_dropout_summary()
         logger.info("Health dropout histogram (ADR 080): %s", json.dumps(dropout_summary))
+        # Code Review 019 cycle 19: the session's DEATH CARDS line, before cleanup.
+        kill_card.stop()
         # ADR 099: a first Backspace ends the session but leaves MetalStorm up so
         # the operator can keep flying by hand. The hotkey hooks must therefore
         # survive cleanup(), or the second press has nothing listening for it.

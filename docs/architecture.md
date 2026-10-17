@@ -476,7 +476,7 @@ and stall prevention still re-press every tick, which now only renews their leas
 |---|---|---|---|---|
 | `stall_prevention` | per-tick reflex | manual takeover | the emergency airbrake: releases it | operator directive |
 | `climb_emergency` | climb hold, emergency only, and only while the flight path is steeper than `climb.emergency_airbrake_below_deg` (-40): shallower than that it is released and the nose-up carries the afterburner; a missing angle keeps the current state, and a hold that starts with none does not brake | stall prevention | cruise and the afterburner evade, which yield to it | ADR 137, ADR 159 |
-| `approach_brake` | pursuit hold while the resupply marker has the steering: a fresh speed reading above `approach_brake.cap_kph` starts a dose of (reading - `target_kph`) / `decel_kph_s` seconds, at most `max_dose_s` | manual takeover, any climb (the emergency climb takes the key and releases it), an eject, a missile evade or the afterburner evade, the rearm climb-out, the marker losing the steering | cruise, which pauses for it | Code Review 019 cycle 9, operator 2026-10-15 |
+| `approach_brake` | pursuit hold while a resupply marker, control point or crown has the steering (`approach_brake.resupply`, `control_point`, `crown`): a fresh speed reading above `approach_brake.cap_kph` starts a dose of (reading - `target_kph`) / `decel_kph_s` seconds, at most `max_dose_s` | manual takeover, any climb (the emergency climb takes the key and releases it), an eject, a missile evade or the afterburner evade, the rearm climb-out, the marker losing the steering | cruise, which pauses for it | Code Review 019 cycle 9, operator 2026-10-15 |
 
 **Pitch, `NOSE_UP_KEY` and `NOSE_DOWN_KEY`.**
 

@@ -12,6 +12,12 @@ resupply point, in the color of the team that holds it:
 - In view: a dark disc with an outline and its letter, ringed by four arcs
   with arrowheads. `find_control_point_marker` finds the red discs and returns
   the largest, which is the nearest.
+- Behind terrain: the outline and its letter only, in a paler red, with no
+  disc (the ground shows through it) and no arcs. Operator, 2026-10-16: "it
+  flew into terrain trying to capture 'B' ... when objectives are shaded in
+  that color it means its behind terrain, in that case it should ignore that
+  target". Not returned: the pursuit flies at another objective or the
+  target instead, and with neither its search climbs.
 - Off screen: a small pin on the ring the red aircraft icons use, a circle
   around the letter with a pointer. Its place on the ring is the direction.
   `find_control_point_ring_icons` finds the red pins.
@@ -41,6 +47,18 @@ class ControlPointMarker:
     height: int
     area: int
     angle_deg: float
+    fill: float = 1.0       # share of the disc's inside that is its dark fill
+
+
+# The dark fill of a disc in view, one color whatever is behind it: hue 2 to
+# 3, saturation 190 to 200, value 52 to 75 on the four archived discs. Behind
+# terrain the inside shows the ground: hue 6 to 12, saturation 120 to 150
+# (two discs, 2026-10-16).
+_FILL_LO = np.array([0, 170, 35], dtype=np.uint8)
+_FILL_HI = np.array([4, 255, 95], dtype=np.uint8)
+# A disc whose inside is less of its fill than this is behind terrain: 0.96
+# to 1.00 on the four in view, 0.24 and 0.0 on the two behind.
+_MIN_FILL = 0.5
 
 
 # Where a marker counts when the caller names no region: [x1, y1, x2, y2] in
@@ -53,8 +71,12 @@ _MINIMAP_PCT = (0.82, 0.0, 1.0, 0.28)
 _PIN_MIN_AREA_PX = 60.0
 
 
-def find_control_point_marker(frame, region_pct=None) -> "ControlPointMarker | None":
+def find_control_point_marker(frame, region_pct=None,
+                              occluded: "list | None" = None) -> "ControlPointMarker | None":
     """Find the nearest enemy-held control point's disc in a color capture.
+
+    A disc without its dark fill is behind terrain and is not returned; when
+    `occluded` is a list, each such disc is appended to it.
 
     Measured on four discs, 22 to 56 px across (2026-10-09): a red circle
     whose outline fills 18% to 20% of its box, around a red letter that fills
@@ -135,11 +157,17 @@ def find_control_point_marker(frame, region_pct=None) -> "ControlPointMarker | N
             continue
         # Between the rim and the letter, and in the letter's gaps, the disc
         # is dark.
-        dark = hsv[top:top + height, left:left + width, 2][~box_red & (radius < 0.70)]
-        if dark.size == 0 or float(np.median(dark)) > 110:
+        inside = hsv[top:top + height, left:left + width][~box_red & (radius < 0.70)]
+        if inside.size == 0:
             continue
+        fill = float((cv2.inRange(inside.reshape(-1, 1, 3), _FILL_LO, _FILL_HI) > 0).mean())
         angle = math.degrees(math.atan2(y - frame_height / 2, x - frame_width / 2))
-        candidates.append(ControlPointMarker(x, y, width, height, area, angle))
+        marker = ControlPointMarker(x, y, width, height, area, angle, fill)
+        if fill < _MIN_FILL:
+            if occluded is not None:
+                occluded.append(marker)
+            continue
+        candidates.append(marker)
 
     return max(candidates, key=lambda marker: marker.width * marker.height, default=None)
 

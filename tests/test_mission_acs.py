@@ -991,7 +991,9 @@ class _SeenTracker(_Tracker):
 
 def test_a_lock_during_the_climb_goes_straight_to_the_pursuit(monkeypatch, caplog):
     analyzer = _Analyzer([(1500, 30)])            # never reaches 3000 m
-    ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, tracker=_SeenTracker(),
+    # The lock comes after the look before the climb: a lock already there
+    # skips the climb (test_a_lock_at_the_start_skips_the_climb).
+    ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, tracker=_SeenTracker(after=1),
                       acs={"yield_to_target": True})
     log = _record(ctrl, monkeypatch)
     with caplog.at_level("INFO", logger="wingman.controller"):
@@ -999,7 +1001,7 @@ def test_a_lock_during_the_climb_goes_straight_to_the_pursuit(monkeypatch, caplo
         t.join(timeout=5.0)
     assert not t.is_alive()
     kinds = [e[0] for e in log]
-    assert "pursue" in kinds
+    assert kinds.index("climb") < kinds.index("pursue")
     assert "nose_down" not in kinds and "nose_up" not in kinds, "the nose-angle step is skipped"
     assert any("target in view (lock) during the climb" in r.getMessage() for r in caplog.records)
 
@@ -1046,5 +1048,185 @@ def test_without_yield_the_script_keeps_climbing_past_a_lock(monkeypatch):
     log = _record(ctrl, monkeypatch)
     t = _run_mission(ctrl)
     time.sleep(0.4)
+    kinds = [e[0] for e in log]
+    assert "climb" in kinds and "pursue" not in kinds
+    _drain(ctrl, t)
+
+
+# ---------------------------------------------------------------------------
+# No climb with a target in view (operator, 2026-10-16: "it should not climb if
+# targets are in view"). At 23:52:42 the crown was in view from the spawn
+# (screenshot 23:52:41, cut into priority_marker_at_spawn.png), the climb held
+# the nose up for 1.6 s until a ring icon ended it, the crown went under the
+# airframe and the pursuit reached it 19 s later.
+# ---------------------------------------------------------------------------
+
+_FIXTURES = pathlib.Path(__file__).parent / "fixtures"
+
+
+class _FrameCapture:
+    """grab_from_thread returns a 1920x1200 frame holding each fixture crop
+    centred on its own (x, y)."""
+
+    def __init__(self, *placed):
+        import cv2
+        import numpy as np
+        self.frame = np.zeros((1200, 1920, 3), np.uint8)
+        for name, (x, y) in placed:
+            crop = cv2.imread(str(_FIXTURES / name))
+            top, left = y - crop.shape[0] // 2, x - crop.shape[1] // 2
+            self.frame[top:top + crop.shape[0], left:left + crop.shape[1]] = crop
+        self.grabs = 0
+
+    def grab_from_thread(self):
+        self.grabs += 1
+        return self.frame
+
+
+def _objective_ctrl(monkeypatch, capture, yield_to_target=True, tracker=None):
+    ctrl = _make_ctrl(monkeypatch, analyzer=_Analyzer([(1500, 30)]),
+                      tracker=tracker or _SeenTracker(after=10 ** 6),
+                      acs={"yield_to_target": yield_to_target},
+                      pursuit_mode={"priority_target": {"enabled": True, "actuate": True},
+                                    "air_superiority": {"enabled": True, "actuate": True}})
+    ctrl._capture = capture
+    return ctrl
+
+
+def test_a_crown_in_view_at_the_start_skips_the_climb(monkeypatch, caplog):
+    ctrl = _objective_ctrl(monkeypatch, _FrameCapture(("priority_marker_at_spawn.png", (960, 650))))
+    log = _record(ctrl, monkeypatch)
+    with caplog.at_level("INFO", logger="wingman.controller"):
+        t = _run_mission(ctrl)
+        t.join(timeout=5.0)
+    assert not t.is_alive()
+    kinds = [e[0] for e in log]
+    assert "pursue" in kinds
+    assert "climb" not in kinds and "nose_up" not in kinds and "nose_down" not in kinds
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("target in view (crown) at the start, no climb" in m for m in messages)
+    assert not any("step 1/4" in m for m in messages)
+
+
+def test_a_lock_at_the_start_skips_the_climb(monkeypatch):
+    ctrl = _make_ctrl(monkeypatch, analyzer=_Analyzer([(1500, 30)]), tracker=_SeenTracker(),
+                      acs={"yield_to_target": True})
+    log = _record(ctrl, monkeypatch)
+    t = _run_mission(ctrl)
+    t.join(timeout=5.0)
+    kinds = [e[0] for e in log]
+    assert "pursue" in kinds and "climb" not in kinds
+
+
+def test_a_control_point_behind_terrain_at_the_start_does_not_skip_the_climb(monkeypatch):
+    # Operator, 2026-10-16: a marker drawn behind terrain is not flown at, so it
+    # is no reason to skip the climb either.
+    ctrl = _objective_ctrl(monkeypatch, _FrameCapture(("airsup_marker_behind_terrain.png",
+                                                       (950, 550))))
+    log = _record(ctrl, monkeypatch)
+    t = _run_mission(ctrl)
+    assert _wait(lambda: ("climb", 3000) in log)
+    time.sleep(0.1)
     assert "pursue" not in [e[0] for e in log]
     _drain(ctrl, t)
+
+
+def test_a_crown_that_comes_into_view_during_the_climb_ends_it(monkeypatch, caplog):
+    capture = _FrameCapture()
+    ctrl = _objective_ctrl(monkeypatch, capture)
+    log = _record(ctrl, monkeypatch)
+    with caplog.at_level("INFO", logger="wingman.controller"):
+        t = _run_mission(ctrl)
+        assert _wait(lambda: ("climb", 3000) in log)
+        capture.frame = _FrameCapture(("priority_marker_at_spawn.png", (960, 650))).frame
+        t.join(timeout=5.0)
+    kinds = [e[0] for e in log]
+    assert kinds.index("climb") < kinds.index("pursue")
+    assert any("target in view (crown) during the climb" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_without_yield_a_crown_in_view_at_the_start_still_climbs(monkeypatch):
+    ctrl = _objective_ctrl(monkeypatch, _FrameCapture(("priority_marker_at_spawn.png", (960, 650))),
+                           yield_to_target=False)
+    log = _record(ctrl, monkeypatch)
+    t = _run_mission(ctrl)
+    assert _wait(lambda: ("climb", 3000) in log)
+    assert ctrl._capture.grabs == 0, "without yield_to_target nothing is looked for"
+    _drain(ctrl, t)
+
+
+# ---------------------------------------------------------------------------
+# Cycle 18: the climb asked for between missions waits for a target in view.
+# After a respawn the tree's altitude floor selected Climb about 1.5 s before
+# mission_acs restarted, on 66 of 66 respawns (2026-10-16 22:44 session); at
+# 00:17:02 it had the nose at +90 deg by the time the pursuit stopped it.
+# ---------------------------------------------------------------------------
+
+def _between_missions(monkeypatch, *placed, last="acs", yield_to_target=True):
+    ctrl = _objective_ctrl(monkeypatch, _FrameCapture(*placed), yield_to_target=yield_to_target)
+    ctrl._set_last_mission(last)
+    return ctrl
+
+
+def _stop_climb(ctrl):
+    ctrl._climb_stop.set()
+    assert _wait(lambda: not ctrl.is_climbing())
+
+
+_CROWN = ("priority_marker_at_spawn.png", (960, 650))
+
+
+def test_the_floor_climb_after_a_respawn_waits_for_a_crown_in_view(monkeypatch, caplog):
+    ctrl = _between_missions(monkeypatch, _CROWN)
+    with caplog.at_level("INFO", logger="wingman.controller"):
+        ctrl.climb_mode(target_alt=5000)
+        ctrl.climb_mode(target_alt=5000)      # the next tick asks again: one log line
+    assert not ctrl.is_climbing()
+    lines = [r.getMessage() for r in caplog.records if "climb waits" in r.getMessage()]
+    assert lines == ["Controller: climb waits — target in view (crown) before the mission restarts"]
+
+
+def test_the_floor_climb_starts_once_nothing_is_in_view(monkeypatch):
+    ctrl = _between_missions(monkeypatch, _CROWN)
+    ctrl.climb_mode(target_alt=5000)
+    assert not ctrl.is_climbing()
+    ctrl._capture.frame = _FrameCapture().frame
+    ctrl.climb_mode(target_alt=5000)
+    try:
+        assert ctrl.is_climbing()
+    finally:
+        _stop_climb(ctrl)
+
+
+def test_a_hard_emergency_climbs_whatever_is_in_view(monkeypatch):
+    ctrl = _between_missions(monkeypatch, _CROWN)
+    ctrl.climb_mode(target_alt=5000, emergency=True)
+    try:
+        assert ctrl.is_climbing()
+        assert ctrl._capture.grabs == 0, "an emergency does not even look"
+    finally:
+        _stop_climb(ctrl)
+
+
+@pytest.mark.parametrize("last, yield_to_target", [("j20", True), ("acs", False)])
+def test_only_acs_with_yield_to_target_waits(monkeypatch, last, yield_to_target):
+    ctrl = _between_missions(monkeypatch, _CROWN, last=last, yield_to_target=yield_to_target)
+    ctrl.climb_mode(target_alt=5000)
+    try:
+        assert ctrl.is_climbing()
+    finally:
+        _stop_climb(ctrl)
+
+
+def test_a_running_mission_climbs_without_the_wait(monkeypatch):
+    # The mission looks for itself, before its climb and through it (cycle 17).
+    ctrl = _between_missions(monkeypatch, _CROWN)
+    assert ctrl._mission_lock.acquire(timeout=1.0)
+    try:
+        ctrl.climb_mode(target_alt=3000)
+        assert ctrl.is_climbing()
+        assert ctrl._capture.grabs == 0
+    finally:
+        _stop_climb(ctrl)
+        ctrl._mission_lock.release()

@@ -651,6 +651,10 @@ SCHEMA = Section(
         # terrain depth from one picture, from a monocular depth model run in a
         # process of its own (wingman.depth_worker). Logged and drawn; nothing
         # steers on it.
+        # Code Review 019 cycle 19: the death's cause from the game's kill card.
+        "kill_card": Section(children={
+            "enabled": Leaf(types=(bool,), default=False),
+        }),
         "depth_view": Section(children={
             "enabled": Leaf(types=(bool,), default=False),
             # A Hugging Face model id or a local directory.
@@ -668,8 +672,10 @@ SCHEMA = Section(
         # reading, so the pass is not flown at the cruise burner's speed.
         "approach_brake": Section(children={
             "enabled": Leaf(types=(bool,), default=False),
-            # The objectives it brakes for. Resupply only, to begin with.
+            # The objectives it brakes for, each by its own switch.
             "resupply": Leaf(types=(bool,), default=False),
+            "control_point": Leaf(types=(bool,), default=False),
+            "crown": Leaf(types=(bool,), default=False),
             # A fresh reading above this starts a dose.
             "cap_kph": Leaf(types=NUMBER, minimum=300, maximum=3000, default=850.0),
             # The speed a dose aims at.

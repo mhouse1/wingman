@@ -528,3 +528,60 @@ def test_emptied_primary_then_secondary_decrease_keeps_adding():
 def test_marker_nearer_than_target_compares_distance_from_the_screen_centre(target_error, nearer):
     marker = ResupplyMarker(1400, 600, 40, 40, 300, 0)      # 440 px right of centre
     assert marker_nearer_than_target(marker, target_error[0], target_error[1], 1920, 1200) is nearer
+
+
+# ---------------------------------------------------------------------------
+# Behind terrain (operator, 2026-10-16): "when resupply is that color it means its
+# behind terrain, in that case it should ignore that target". In view the icon's
+# disc is filled dark; behind terrain it is a duller outline and glyph with the
+# ground showing through. Cut from the operator's screenshots of 23:34:49 and
+# 23:34:50, the aircraft flying at a mountain face it was drawn on.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name", ["resupply_neg_behind_terrain.png",
+                                  "resupply_neg_behind_terrain_near_ring.png"])
+def test_a_resupply_icon_behind_terrain_is_not_returned(name):
+    behind = []
+    assert find_resupply_marker(_live_crop_frame(name, (900, 600)), occluded=behind) is None
+    if name == "resupply_neg_behind_terrain.png":
+        assert len(behind) == 1 and behind[0].fill < 0.5
+
+
+@pytest.mark.parametrize("name, origin", [
+    ("resupply_pos_ring_near.png", (827, 760)), ("resupply_pos_ring_wide.png", (840, 360)),
+    ("resupply_pos_haze.png", (561, 208)), ("resupply_pos_far.png", (1093, 536))])
+def test_a_resupply_icon_in_view_is_its_dark_fill_inside(name, origin):
+    # 0.88 through haze, which lightens part of the disc; 0.96 and more otherwise.
+    assert find_resupply_marker(_live_crop_frame(name, origin)).fill >= 0.8
+
+
+def test_an_icon_in_view_wins_over_a_larger_one_behind_terrain():
+    frame = _live_crop_frame("resupply_neg_behind_terrain.png", (300, 300))
+    far = cv2.imread(str(FIXTURES / "resupply_pos_far.png"))
+    frame[536:536 + far.shape[0], 1093:1093 + far.shape[1]] = far
+    behind = []
+    marker = find_resupply_marker(frame, occluded=behind)
+    assert marker is not None and marker.x == pytest.approx(1173, abs=3)
+    assert len(behind) == 1
+
+
+def test_the_pursuit_logs_a_resupply_icon_behind_terrain(monkeypatch, caplog):
+    from test_pursuit_mode import _make_ctrl
+    ctrl = _make_ctrl(monkeypatch)
+    with caplog.at_level("INFO", logger="wingman.controller"):
+        behind = []
+        find_resupply_marker(_live_crop_frame("resupply_neg_behind_terrain.png", (900, 600)),
+                             occluded=behind)
+        ctrl._note_objective_behind_terrain(behind, "RESUPPLY", "resupply marker")
+        ctrl._note_objective_behind_terrain(behind, "RESUPPLY", "resupply marker")
+        ctrl._note_objective_behind_terrain(behind, "AIRSUP", "control point")
+    lines = [r.getMessage() for r in caplog.records if "behind terrain" in r.getMessage()]
+    assert [m.split(":")[0] for m in lines] == ["RESUPPLY", "AIRSUP"]   # one each, rate-limited
+
+
+def test_the_pursuit_passes_the_occluded_list_to_the_resupply_scan():
+    import inspect
+    from wingman.controller import Controller
+    src = inspect.getsource(Controller.pursue_and_engage)
+    assert "occluded=resupply_behind)" in src
+    assert '"RESUPPLY", "resupply marker")' in src

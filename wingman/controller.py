@@ -642,8 +642,8 @@ class Controller:
         _brake = getattr(_c, "approach_brake", None) or {}
         self._approach_brake_cfg = {
             key: _brake.get(key, schema_default(f"approach_brake.{key}"))
-            for key in ("enabled", "resupply", "cap_kph", "target_kph", "decel_kph_s",
-                        "max_dose_s")}
+            for key in ("enabled", "resupply", "control_point", "crown", "cap_kph",
+                        "target_kph", "decel_kph_s", "max_dose_s")}
         self._approach_brake_held = False
         self._approach_brake_until = 0.0
         self._approach_brake_read_ts: "float | None" = None
@@ -2400,11 +2400,19 @@ class Controller:
             self._rearm_afterburner(True)
         return time.time() + self._resupply_rearm_climb_s
 
-    def _approach_brake_tick(self, armed: bool) -> None:
+    # The approach brake's switch for each objective it can brake for.
+    _BRAKE_GOAL_KEYS = {"resupply": "resupply", "control point": "control_point",
+                        "crown": "crown"}
+
+    def _approach_brake_tick(self, goal: "str | None") -> None:
         """Code Review 019 cycle 9 (operator, 2026-10-15): the airbrake on the
-        approach to the resupply marker, one pursuit cycle. `armed` is True while
-        the marker has the steering, no climb-out runs and no recovery has the
-        airframe.
+        approach to an objective, one pursuit cycle. `goal` names the objective
+        whose marker has the steering ("resupply", "control point" or "crown"),
+        None when none has it or a climb-out or a recovery runs; each has its own
+        switch. Cycle 13: overnight on 2026-10-15/16, 29 of 68 control-point
+        fly-throughs were followed by a death within 10 s, 59 of the 68 over 850
+        KPH, 10 of the 16 classified deaths terrain; after the braked resupply
+        passes none of the classified deaths was terrain.
 
         Four of the five climb-out deaths seen on 2026-10-15 passed the marker at
         1,134 to 1,299 KPH, with cruise holding the afterburner. The speed is read
@@ -2415,10 +2423,11 @@ class Controller:
         or below `target_kph` ends one early.
         """
         cfg = self._approach_brake_cfg
-        if not (cfg["enabled"] and cfg["resupply"]):
+        if not cfg["enabled"]:
             return
         now = time.time()
-        veto = (None if armed else "the marker no longer has the steering") \
+        armed = goal is not None and bool(cfg.get(self._BRAKE_GOAL_KEYS.get(goal, ""), False))
+        veto = (None if armed else "no braked objective has the steering") \
             or self._approach_brake_veto(now)
         if veto is not None:
             self._approach_brake_off(veto)
@@ -2430,9 +2439,9 @@ class Controller:
                 dose = min(float(cfg["max_dose_s"]),
                            (reading - float(cfg["target_kph"])) / float(cfg["decel_kph_s"]))
                 self._approach_brake_until = now + dose
-                logger.info("SPEEDCAP: %.0f KPH over the %.0f KPH cap on the resupply "
+                logger.info("SPEEDCAP: %.0f KPH over the %.0f KPH cap on the %s "
                             "approach: airbrake for %.1f s", reading, float(cfg["cap_kph"]),
-                            dose)
+                            goal, dose)
                 self._approach_brake_on()
             elif self._approach_brake_held and reading <= float(cfg["target_kph"]):
                 self._approach_brake_off("%.0f KPH reached" % reading)
@@ -4075,7 +4084,10 @@ class Controller:
         if crown_marker_only:
             return None, None, []
         if self._air_superiority_enabled:
-            marker = find_control_point_marker(frame, region_pct=region)
+            behind: list = []
+            marker = find_control_point_marker(frame, region_pct=region, occluded=behind)
+            if marker is None and behind:
+                self._note_objective_behind_terrain(behind)
             if marker is not None:
                 return "air_superiority", marker, []
         if self._priority_target_enabled:
@@ -4087,6 +4099,21 @@ class Controller:
             if pins:
                 return "air_superiority", None, pins
         return None, None, []
+
+    def _note_objective_behind_terrain(self, markers: list, tag: str = "AIRSUP",
+                                       what: str = "control point") -> None:
+        """Log, at most once every 5 s for each kind, that an objective's marker
+        in view is drawn behind terrain and is not flown at (operator,
+        2026-10-16)."""
+        now = time.time()
+        stamps = self.__dict__.setdefault("_behind_terrain_log_ts", {})
+        if now - stamps.get(tag, 0.0) < 5.0:
+            return
+        stamps[tag] = now
+        nearest = max(markers, key=lambda m: m.width * m.height)
+        logger.info("%s: %s at (%.0f,%.0f) is behind terrain (fill %.2f): "
+                    "not flown at; another objective, the target or the search climb instead",
+                    tag, what, nearest.x, nearest.y, nearest.fill)
 
     def _tally_objective_seen(self, kind: str, marker, frame) -> None:
         """Tell the round's tally that `kind`'s marker is in view this scan.
@@ -4438,8 +4465,13 @@ class Controller:
                                 and (missile_priority.missiles_spent > 0
                                  or missile_priority.empty or resupply_seeking)):
                             try:
+                                resupply_behind: list = []
                                 detected_resupply_marker = find_resupply_marker(
-                                    frame, region_pct=self._resupply_region_pct)
+                                    frame, region_pct=self._resupply_region_pct,
+                                    occluded=resupply_behind)
+                                if detected_resupply_marker is None and resupply_behind:
+                                    self._note_objective_behind_terrain(
+                                        resupply_behind, "RESUPPLY", "resupply marker")
                             except Exception:
                                 if not resupply_error_logged:
                                     logger.exception(
@@ -4735,10 +4767,17 @@ class Controller:
                                 self.release_pitch_hold(why="rearm climb-out over")
                         # The afterburner is held with the nose-up and let go with it.
                         self._rearm_afterburner(climbing_out)
-                        # Code Review 019 cycle 9: the airbrake while the resupply
-                        # marker has the steering; none in a climb-out or recovery.
-                        self._approach_brake_tick(
-                            resupply_control and not yielding and not rearm_climb_until)
+                        # Code Review 019 cycles 9 and 13: the airbrake while an
+                        # objective's marker has the steering; none in a climb-out
+                        # or recovery.
+                        brake_goal = None
+                        if not yielding and not rearm_climb_until:
+                            if resupply_control:
+                                brake_goal = "resupply"
+                            elif priority_control:
+                                brake_goal = ("crown" if priority_kind == "priority_target"
+                                              else "control point")
+                        self._approach_brake_tick(brake_goal)
                         # Code Review 019 step 3e: the planner's aim in place of the
                         # marker while it detours or escapes (when steering is on).
                         resupply_aim, resupply_plan = (None, None)
@@ -4766,6 +4805,8 @@ class Controller:
                             hud_steering_target = (priority_marker.x, priority_marker.y)
                             hud_steering_label = priority_hud
                             hud_steering_stale = priority_marker_stale
+                            if self._approach_brake_held:
+                                hud_steering_label += " + AIRBRAKE"
                             error_x = ((priority_marker.x - frame.shape[1] / 2)
                                        / (frame.shape[1] / 2))
                             self.orient_nose_to_target(
@@ -6047,6 +6088,8 @@ class Controller:
                     logger.info("Controller: crash recovery held off — the pursuit has "
                                 "the %s in view", _objective)
                 return
+        if self._climb_waits_for_target(emergency):
+            return
         exit_alt = target_alt if target_alt is not None else self._climb_exit_alt
         if exit_alt is None:
             logger.warning("Controller: climb_mode disabled — exit_above_alt unset")
@@ -6082,6 +6125,43 @@ class Controller:
 
         self._climb_thread = threading.Thread(target=_run, daemon=True)
         self._climb_thread.start()
+
+    def _climb_waits_for_target(self, emergency: bool) -> bool:
+        """True when a climb asked for between missions waits for the target
+        in view (Code Review 019 cycle 18; operator, 2026-10-16: "it should not
+        climb if targets are in view").
+
+        After a respawn the tree's altitude floor (ADR 141, 3000 m for acs)
+        selected Climb about 1.5 s before mission_acs restarted on the health
+        return, on 66 of 66 respawns; the pursuit the mission then handed to
+        stopped it, but at 00:17:02 it had already put the nose at +90 deg.
+        Only while acs is the mission in play with ``yield_to_target`` on, no
+        mission and no pursuit running, and never for a hard emergency (a
+        predicted impact or terrain ahead): those climb whatever is in view.
+        The tree asks again every tick the climb is not running, so the climb
+        starts once the target is gone.
+        """
+        if emergency or not self._acs_yield_to_target:
+            return False
+        if self._pursuing.is_set() or self.is_mission_running():
+            return False
+        if not self._last_mission_lock.acquire(timeout=1.0):
+            return False
+        try:
+            acs_in_play = self._last_mission == "acs"
+        finally:
+            self._last_mission_lock.release()
+        if not acs_in_play:
+            return False
+        reason = self._target_in_view()
+        if not reason:
+            return False
+        now = time.time()
+        if now - self.__dict__.get("_climb_wait_log_ts", 0.0) >= 5.0:
+            self._climb_wait_log_ts = now
+            logger.info("Controller: climb waits — target in view (%s) before the "
+                        "mission restarts", reason)
+        return True
 
     def set_climb_emergency(self, value: bool) -> None:
         """ADR 137 D9: push the tree's CURRENT-tick emergency verdict into
@@ -7553,6 +7633,17 @@ class Controller:
         False means the sequence stopped short — cancelled, exit requested, or
         pursuit could not start — and the caller decides what holding means.
         """
+        # No climb with a target already in view (operator, 2026-10-16: "it
+        # should not climb if targets are in view"). The yield in step 3 first
+        # looked after the climb had begun: at 23:52:42 the crown was in view
+        # from the spawn, the climb held the nose up for 1.6 s, the crown went
+        # under the airframe and the pursuit reached it 19 s later.
+        reason = self._target_in_view() if self._acs_yield_to_target else None
+        if reason:
+            logger.info("Controller: mission_acs - target in view (%s) at the start, "
+                        "no climb: going straight to the pursuit", reason)
+            return self._acs_activate_pursuit()
+
         # Step 1: nose up. climb_mode is non-blocking and idempotent, so the
         # steps below happen while the climb is already under way.
         logger.info("Controller: mission_acs - step 1/4: nose up, climbing to %.0f m",
@@ -7582,8 +7673,9 @@ class Controller:
         self.start_boresight_engage_loop()
 
         # Step 3: climb to the level-off altitude, then set the nose angle.
-        # With yield_to_target, a lock or a ring icon ends either wait early and
-        # the script goes straight to the pursuit.
+        # With yield_to_target, a lock, a ring icon or an objective's marker in
+        # view (_target_in_view) ends either wait early and the script goes
+        # straight to the pursuit.
         reached = self._acs_wait_for_altitude()
         if not reached:
             return False
@@ -7631,19 +7723,33 @@ class Controller:
             tick_s=self._acs_tick_s,
             interrupt=self._target_in_view if self._acs_yield_to_target else None)
 
+    # What _target_in_view calls an objective's marker in view.
+    _OBJECTIVE_IN_VIEW = {"priority_target": "crown", "air_superiority": "control point"}
+
     def _target_in_view(self) -> "str | None":
         """What ends a scripted wait for the pursuit: "lock" when the tracker's
-        last scan had a target, "icon" when a fresh frame has a ring icon, else
-        None. Never raises: a failed check is no evidence of a target."""
+        last scan had a target, "icon" when a fresh frame has a ring icon,
+        "crown" or "control point" when it has that objective's marker in view
+        (operator, 2026-10-16: "it should not climb if targets are in view"),
+        else None. A marker drawn behind terrain is not in view, and a pin at
+        the screen's edge is not either. Never raises: a failed check is no
+        evidence of a target."""
         try:
             tracker = self._target_tracker
             if tracker is not None and hasattr(tracker, "last_observation"):
                 obs = tracker.last_observation()
                 if obs and obs.get("visible"):
                     return "lock"
-            if self._icon_cfg.enabled and self._capture is not None:
-                if find_ring_icons(self._capture.grab_from_thread(), self._icon_cfg):
-                    return "icon"
+            objectives = self._priority_target_enabled or self._air_superiority_enabled
+            if self._capture is None or not (self._icon_cfg.enabled or objectives):
+                return None
+            frame = self._capture.grab_from_thread()
+            if self._icon_cfg.enabled and find_ring_icons(frame, self._icon_cfg):
+                return "icon"
+            if objectives:
+                kind, marker, _pins = self._scan_marked_objective(frame)
+                if marker is not None:
+                    return self._OBJECTIVE_IN_VIEW[kind]
         except Exception:
             logger.debug("Controller: target-in-view check failed", exc_info=True)
         return None

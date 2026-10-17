@@ -567,6 +567,8 @@ acs_mission: {climb_alt_m: 3000, alt_floor_m: 3000, climb_max_s: 90.0,
 # yield_to_target (operator, 2026-09-26): a tracker lock or a ring icon during the
 # climb or the nose-angle step ends the script and starts the pursuit at once (after
 # the 17:37 respawn the script climbed and held -10 deg past targets it had acquired).
+# It is also looked for before the climb, and a crown or control point marker in view
+# counts (operator, 2026-10-16: "it should not climb if targets are in view").
 behavior_tree:
   mode: active
   disengage_after_s: 30
@@ -1011,14 +1013,25 @@ clear_path:
   # them; one fit over a whole outline is set by its fastest-growing part.
   planner: {clear_px: 60, hold_s: 1.0, escape_tau_s: 3.0, nearer_frac: 0.7, wall_warn_s: 3.0,
             wall_radius_px: 150, wall_min_dots: 8}
+# Code Review 019 cycle 19 (shadow): each death's cause from the game's kill card.
+# After an enemy kill the respawn screen names the killer and the weapon; after a
+# terrain crash (2026-10-17 00:44:18) it had no card. One DEATH CARD line per death
+# and a DEATH CARDS summary at the end; read on the analyzer's OCR pool. Live only.
+kill_card:
+  enabled: true
+
 # Code Review 019 cycle 11 (operator, 2026-10-15: "shadow first"): relative
 # terrain depth from one picture (Depth Anything V2 Small), in a worker process
 # of its own (wingman.depth_worker): this PC has no usable CUDA device and on the
 # CPU a 252 px picture takes 95 to 200 ms with 4 threads. The model is
 # downloaded once (about 100 MB) on the first start. Logged as DEPTH lines and
 # drawn as a small map left of the analysed view; nothing steers on it.
+# Off since 2026-10-16 (operator): overnight its mid_rank was no higher before
+# deaths than in random windows (max at or above 0.9: 21% against 21%; 15% before
+# terrain-classified deaths), and it cost the steering cycle about 6% (median
+# 0.172 s to 0.182 s). On again when a figure that warns is designed.
 depth_view:
-  enabled: true
+  enabled: false
   model: depth-anything/Depth-Anything-V2-Small-hf
   threads: 4
   input_px: 252
@@ -1032,9 +1045,17 @@ depth_view:
 # on a takeover and when the marker loses the steering. Evidence: four of the
 # five climb-out deaths seen on 2026-10-15 passed the marker at 1,134 to 1,299
 # KPH; ADR 159 measured the airbrake at 500 to 600 KPH off per 3 s. Named guesses.
+# Cycle 13 (2026-10-16): control points and crowns too. Overnight, 29 of 68
+# control-point fly-throughs were followed by a death within 10 s, 59 of the 68
+# flown over 850 KPH and 10 of the 16 classified deaths terrain; 7 of 42 crowns,
+# 4 of 6 classified terrain; braked resupply passes 8 of 74, none terrain.
+# A/B (operator, 2026-10-16): alternated between back-to-back one-hour sessions
+# to separate the brake from time of day; see Code Review 019, cycle 14.
 approach_brake:
-  enabled: true
+  enabled: false
   resupply: true
+  control_point: true
+  crown: true
   cap_kph: 850
   target_kph: 800
   decel_kph_s: 150
