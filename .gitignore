@@ -18,7 +18,7 @@ __pycache__/
 *.cache.write
 untrack_todo.md
 to_be_added/
-docs/code-review/
+docs/code-review/*
 docs/FUTURE/
 wingman.log
 wingman_live.log
