@@ -20,8 +20,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.9.1"
-WINGMAN_VERSION_DETAILS = "ACS: Auto resupply, air superiority objectives supported now"
+WINGMAN_VERSION = "1.9.2"
+WINGMAN_VERSION_DETAILS = "ACS: optimization"
 
 from . import capture_budget
 from .capture import Capture
@@ -35,9 +35,13 @@ from .analyzer import GameStateAnalyzer, POPUP_DISMISS_STATES
 from .state import GameState, GameEvent, BATTLE_STATES
 from .config_local import (local_path as local_config_path, merge as merge_config,
                            overlay_keys, read_overlay)
-from .suppressed import suppressed_counts
+from .suppressed import log_suppressed, suppressed_counts
 from .transition_queue import TransitionQueue
 from .hud import HudRenderer
+from .clear_path import PathPerception
+from .depth_view import DepthPerception
+from .kill_card import KillCardReader, read_card
+from .warning_agreement import WarningAgreement
 from .terrain_loom import TerrainLoom
 from .mission_stats import MissionStatsTracker
 from .performance import PerformanceTracker
@@ -914,7 +918,7 @@ def main():
 
     # Target tracker and HUD renderer
     target_tracker = TargetTracker(cfg)
-    hud_renderer = HudRenderer.from_config(cfg)
+    hud_renderer = HudRenderer.from_config(cfg, live=not replay_mode and not capture_mode)
 
     # Initialize controller with config-driven weapon loop interval and exit event
     j20_cfg = cfg.get("j20_mission", {})
@@ -1267,6 +1271,12 @@ def main():
         if live_capture is not None:
             live_capture.on_event(event_name, time.time())
         stats_tracker.on_event(event_name, time.time())
+        # Code Review 019 (CR-019-09): every death leaves the HUD's last seconds.
+        if event_name == "respawn_detected" and hud_renderer is not None:
+            try:
+                hud_renderer.dump_black_box("death")
+            except Exception as exc:
+                log_suppressed(logger, "hud_black_box", exc)
 
     # FSM_TRANSITION subscribers are independent (ADR 060 Phase 1). These were
     # mutually exclusive if/elif/else branches only because the old single-slot
@@ -1348,12 +1358,49 @@ def main():
         behavior_tree.set_terrain_loom(
             TerrainLoom((cfg.get("terrain_avoidance") or {}).get("loom")),
             cap.grab_from_thread)
+        # Code Review 019 step 3a: the same measurement on the pursuit's own
+        # frames, with its own detector instances. Live only, for the reason
+        # above: the pursuit's grabs are scripted screenshots in those lanes.
+        path_perception = PathPerception(
+            (cfg.get("terrain_avoidance") or {}).get("loom"), cfg.get("clear_path"))
+        ctrl.set_path_perception(path_perception)
+        # Code Review 019 cycle 25: the planner's ESCAPE and the tick's LOOM and
+        # SHAPE noted in one tracker; two agreeing start the emergency climb.
+        _agree_cfg = (((cfg.get("behavior_tree") or {}).get("climb") or {})
+                      .get("warning_agreement") or {})
+        if _agree_cfg.get("enabled", schema_default(
+                "behavior_tree.climb.warning_agreement.enabled")):
+            warning_agreement = WarningAgreement(
+                window_s=_agree_cfg.get("window_s", schema_default(
+                    "behavior_tree.climb.warning_agreement.window_s")),
+                hold_s=_agree_cfg.get("hold_s", schema_default(
+                    "behavior_tree.climb.warning_agreement.hold_s")),
+                shadow=_agree_cfg.get("shadow", schema_default(
+                    "behavior_tree.climb.warning_agreement.shadow")))
+            path_perception.agreement = warning_agreement
+            behavior_tree.set_warning_agreement(warning_agreement)
+            ctrl.set_warning_agreement(warning_agreement)
+        # Cycle 11: relative depth from a monocular model, in a worker process
+        # that loads it in the background (shadow; stopped by ctrl.cleanup()).
+        depth_view = DepthPerception(cfg.get("depth_view"))
+        if depth_view.enabled:
+            depth_view.start()
+            ctrl.set_depth_perception(depth_view)
     tracking_hud = TrackingHudHandler(
         target_tracker, hud_renderer, analyzer, ctrl, cfg.get("tracking", {}),
         nav_source=behavior_tree,
         icon_cfg=IconSteeringConfig.from_dict(
             (cfg.get("pursuit_mode") or {}).get("icon_steering")),
     )
+    # Code Review 019 cycle 19 (shadow): each death's cause from the game's kill
+    # card, read on the analyzer's OCR pool. Live only: a replay's respawn
+    # screens are archived screenshots, not this session's deaths.
+    kill_card = KillCardReader(
+        read_fn=lambda frame: analyzer.run_ocr(read_card, frame),
+        enabled=(bool((cfg.get("kill_card") or {}).get(
+            "enabled", schema_default("kill_card.enabled")))
+            and not replay_mode and not capture_mode))
+    kill_card.start()
     respawn = RespawnHandler(
         analyzer, ctrl, mission_cfg,
         enemy_presence=enemy_presence, ammo_events=ammo_events,
@@ -1366,6 +1413,7 @@ def main():
         # config.yaml (crash_capture enabled) — replay is not a live crash,
         # so it must not write real PNGs to disk as a release-gate side effect.
         replay_mode=replay_mode,
+        kill_card=kill_card if kill_card.enabled else None,
     )
     waiting_fallback = WaitingFallbackHandler(
         analyzer, ctrl, mission_cfg, live_capture=live_capture,
@@ -1936,6 +1984,8 @@ def main():
         # emit-before-cleanup rule as the shadow summary above.
         dropout_summary = analyzer.health_dropout_summary()
         logger.info("Health dropout histogram (ADR 080): %s", json.dumps(dropout_summary))
+        # Code Review 019 cycle 19: the session's DEATH CARDS line, before cleanup.
+        kill_card.stop()
         # ADR 099: a first Backspace ends the session but leaves MetalStorm up so
         # the operator can keep flying by hand. The hotkey hooks must therefore
         # survive cleanup(), or the second press has nothing listening for it.

@@ -711,3 +711,78 @@ def test_the_shipped_config_enables_the_recovery(monkeypatch):
     assert cfg["pursuit_mode"]["recovery_max_s"] > 0
     cc = ControllerConfig.from_config(cfg)
     assert cc.pursuit_mode["recovery_max_s"] == cfg["pursuit_mode"]["recovery_max_s"]
+
+
+# --- Code Review 019 cycle 25 (operator, 2026-10-18) -----------------------------
+# Two agreeing terrain warnings break off the chase or objective run: the hold-off
+# above does not apply while they agree.
+
+def test_agreeing_warnings_start_the_recovery_with_the_target_in_view(monkeypatch, caplog):
+    from wingman.warning_agreement import WarningAgreement
+    ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-25.0))
+    agreement = WarningAgreement()
+    agreement.note("LOOM")
+    agreement.note("ESCAPE")
+    ctrl.set_warning_agreement(agreement)
+    ctrl._pursuing.set()
+    ctrl._note_pursuit_objective("target")
+    with caplog.at_level(logging.INFO, logger="wingman.controller"):
+        ctrl.climb_mode(emergency=True)
+    try:
+        assert ctrl.is_climbing()
+        assert not _held_off(caplog)
+        assert any("crash recovery starts with the target in view — two terrain warnings agree"
+                   in r.getMessage() for r in caplog.records)
+    finally:
+        _stop(ctrl)
+
+
+def test_without_an_agreement_the_target_still_holds_it_off(monkeypatch, caplog):
+    from wingman.warning_agreement import WarningAgreement
+    ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-25.0))
+    agreement = WarningAgreement()
+    agreement.note("LOOM")                     # one warning is not agreement
+    ctrl.set_warning_agreement(agreement)
+    ctrl._pursuing.set()
+    ctrl._note_pursuit_objective("target")
+    with caplog.at_level(logging.INFO, logger="wingman.controller"):
+        ctrl.climb_mode(emergency=True)
+    assert not ctrl.is_climbing()
+    assert _held_off(caplog)
+
+
+
+def test_agreeing_warnings_keep_the_recovery_when_a_goal_comes_into_view(monkeypatch):
+    """Live 02:48:33: the agreement's recovery was handed back after 0.3 s for the
+    resupply marker in view, and the tree restarted it a second later."""
+    from wingman.warning_agreement import WarningAgreement
+    ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-25.0))
+    agreement = WarningAgreement(hold_s=3.0)
+    agreement.note("LOOM")
+    agreement.note("SHAPE")
+    ctrl.set_warning_agreement(agreement)
+    ctrl._pursuing.set()
+    ctrl.climb_mode(emergency=True)
+    try:
+        assert _wait(ctrl.pursuit_recovery_active)
+        ctrl._note_pursuit_objective("resupply marker")
+        time.sleep(0.8)
+        assert ctrl.is_climbing(), "handed back while the warnings agree"
+    finally:
+        _stop(ctrl)
+
+
+def test_a_shadow_agreement_leaves_the_hold_off_in_place(monkeypatch, caplog):
+    """Live 2026-10-18 07:13:40: the shadow trigger still broke off the chase."""
+    from wingman.warning_agreement import WarningAgreement
+    ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-25.0))
+    agreement = WarningAgreement(shadow=True)
+    agreement.note("LOOM")
+    agreement.note("ESCAPE")
+    ctrl.set_warning_agreement(agreement)
+    ctrl._pursuing.set()
+    ctrl._note_pursuit_objective("target")
+    with caplog.at_level(logging.INFO, logger="wingman.controller"):
+        ctrl.climb_mode(emergency=True)
+    assert not ctrl.is_climbing()
+    assert _held_off(caplog)

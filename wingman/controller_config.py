@@ -43,9 +43,9 @@ class ControllerConfig:
     capture_stale_inject_s: float = 10.0
     j20_turn_guard_s: float = 10.0      # ADR 132
     # ADR 144: which mission battle entry launches. "j20" is the pre-existing
-    # behaviour; "su30" selects the scripted Su-30 sequence; "jas39" (ADR 145)
-    # selects J20 plus the cloak loop; "f111" (ADR 149) selects su30 plus the
-    # wing sweep. The 'u' hotkey launches the same one.
+    # behaviour; "acs" selects ACS_MISSION, the scripted sequence (ADR 160: it was
+    # "su30", and the other missions were removed). The 'u' hotkey launches the
+    # same one.
     default_mission: str = "j20"
 
     # --- Run-mode flags. Not pure config: replay and capture lanes override
@@ -63,20 +63,12 @@ class ControllerConfig:
     afterburner_cruise: dict = field(default_factory=dict)
     stall_prevention: dict = field(default_factory=dict)
     fuel: dict = field(default_factory=dict)
-    # ADR 116: mission_loiter's block. It was read with
-    # `config.get("loiter_mission")` guarded by `isinstance(config, dict)`,
-    # and `config` is this dataclass — so the guard was always False and the
-    # whole section of config.yaml was dead.
-    loiter: dict = field(default_factory=dict)
-    # Design 017 phase 4b: mission_survey's block.
-    survey: dict = field(default_factory=dict)
-    # ADR 144: mission_su30's block (climb altitude, nose angle, pulse timing).
-    su30: dict = field(default_factory=dict)
-    # ADR 145: mission_jas39's block (turn guard, cloak press interval).
-    jas39: dict = field(default_factory=dict)
-    # ADR 149: mission_f111's block (su30's numbers, the wing-sweep unsweep
-    # altitude and wait, and its own alt_floor_m under ADR 147).
-    f111: dict = field(default_factory=dict)
+    # Code Review 019 step 3e: the clear-path block (`clear_path.steer`).
+    clear_path: dict = field(default_factory=dict)
+    # Code Review 019 cycle 9: the airbrake on objective approaches.
+    approach_brake: dict = field(default_factory=dict)
+    # ADR 144: mission_acs's block (climb altitude, nose angle, pulse timing).
+    acs: dict = field(default_factory=dict)
     # ADR 140: only `confirm_seconds` is read here — the vision fields
     # (region_pct/green_lower/green_upper/min_pixels) belong to
     # TargetTracker, which is constructed directly from the raw config dict
@@ -127,14 +119,12 @@ class ControllerConfig:
             afterburner_cruise=bt.get("afterburner_cruise", {}) or {},
             stall_prevention=bt.get("stall_prevention", {}) or {},
             fuel=cfg.get("fuel", {}) or {},
-            loiter=cfg.get("loiter_mission", {}) or {},
-            survey=cfg.get("survey_mission", {}) or {},
-            su30=cfg.get("su30_mission", {}) or {},
-            jas39=cfg.get("jas39_mission", {}) or {},
-            f111=cfg.get("f111_mission", {}) or {},
+            acs=cfg.get("acs_mission", {}) or {},
             padlock_center_indicator=cfg.get("padlock_center_indicator", {}) or {},
             pursuit_mode=cfg.get("pursuit_mode", {}) or {},
             tracking=cfg.get("tracking", {}) or {},
+            clear_path=cfg.get("clear_path", {}) or {},
+            approach_brake=cfg.get("approach_brake", {}) or {},
         )
         if not overrides:
             return base

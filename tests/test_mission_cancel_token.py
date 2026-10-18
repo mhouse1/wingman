@@ -36,8 +36,7 @@ def ctrl(monkeypatch):
         time.sleep(0.05)
 
 
-@pytest.mark.parametrize("mission", ["mission_j20", "mission_su30", "mission_f111",
-                                     "mission_jas39", "mission_loiter"])
+@pytest.mark.parametrize("mission", ["mission_j20", "mission_acs"])
 def test_a_cancel_after_the_request_stops_the_mission_before_it_starts(ctrl, mission):
     """The race itself: token taken at the launch, cancel, then the entry."""
     token = ctrl.mission_token()
@@ -96,13 +95,13 @@ def test_the_default_launch_takes_its_token_before_the_thread_starts(ctrl, monke
 
 
 def test_the_respawn_restart_takes_its_token_before_the_thread_starts(ctrl, monkeypatch):
-    ctrl._set_last_mission("su30")
+    ctrl._set_last_mission("acs")
     monkeypatch.setattr(controller_module.threading, "Thread", _RecordingThread)
     _RecordingThread.launched = []
     generation = ctrl.mission_token()
     assert ctrl.restart_last_mission() is True
     (target, kwargs), = _RecordingThread.launched
-    assert target == ctrl.mission_su30 and kwargs == {"token": generation}
+    assert target == ctrl.mission_acs and kwargs == {"token": generation}
 
 
 def test_the_flag_is_cleared_in_exactly_one_place():

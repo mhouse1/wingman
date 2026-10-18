@@ -182,3 +182,53 @@ def test_the_yellow_objectives_and_the_red_aircraft_icons_are_not_control_points
 
     assert find_control_point_marker(frame, region_pct=ACQUISITION) is None
     assert find_control_point_ring_icons(frame) == []
+
+
+
+# ---------------------------------------------------------------------------
+# Behind terrain (operator, 2026-10-16): "it flew into terrain trying to capture
+# 'B' ... when objectives are shaded in that color it means its behind terrain,
+# in that case it should ignore that target". Drawn behind terrain the disc is
+# its outline and letter only, paler, with the ground showing through: cut from
+# the operator's two screenshots of that flight (20:49:30 and 20:49:31), one
+# over the desert and one over the own aircraft's tail.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name", ["airsup_marker_behind_terrain.png",
+                                  "airsup_marker_behind_terrain_over_jet.png"])
+def test_a_control_point_behind_terrain_is_not_returned(name):
+    behind = []
+    frame = _frame((name, (900, 500)))
+    assert find_control_point_marker(frame, region_pct=ACQUISITION, occluded=behind) is None
+    if name == "airsup_marker_behind_terrain.png":
+        assert len(behind) == 1 and behind[0].fill < 0.5
+        assert behind[0].x == pytest.approx(950, abs=4)
+
+
+def test_an_objective_in_view_wins_over_a_larger_one_behind_terrain():
+    behind = []
+    frame = _frame(("airsup_marker_behind_terrain.png", (900, 500)),
+                   ("airsup_marker_far.png", (1300, 406)))
+    marker = find_control_point_marker(frame, region_pct=ACQUISITION, occluded=behind)
+    assert marker is not None and marker.x == pytest.approx(1340, abs=3)
+    assert len(behind) == 1
+
+
+@pytest.mark.parametrize("name, origin", [
+    ("airsup_marker_reticle.png", (836, 502)), ("airsup_marker_far.png", (1064, 406)),
+    ("airsup_marker_letter_touching.png", (600, 410)), ("airsup_marker_mid.png", (804, 432))])
+def test_a_disc_in_view_is_its_dark_fill_inside(name, origin):
+    marker = find_control_point_marker(_frame((name, origin)), region_pct=ACQUISITION)
+    assert marker.fill >= 0.9
+
+
+def test_the_pursuit_logs_a_control_point_behind_terrain_and_flies_on(monkeypatch, caplog):
+    from test_pursuit_mode import _make_ctrl
+    ctrl = _make_ctrl(monkeypatch, air_superiority={"enabled": True, "actuate": True})
+    frame = _frame(("airsup_marker_behind_terrain.png", (900, 500)))
+    with caplog.at_level("INFO", logger="wingman.controller"):
+        kind, marker, pins = ctrl._scan_marked_objective(frame)
+        ctrl._scan_marked_objective(frame)            # rate-limited: one line
+    assert marker is None and kind is None
+    lines = [r.getMessage() for r in caplog.records if "behind terrain" in r.getMessage()]
+    assert len(lines) == 1 and lines[0].startswith("AIRSUP: control point at (950,550)")

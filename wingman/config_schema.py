@@ -148,164 +148,6 @@ SCHEMA = Section(
                 "y": Leaf(types=(int,), allow_none=True),
             },
         ),
-        # mission_loiter: the survival hold
-        "loiter_mission": Section(children={
-            "target_alt": _num(0),
-            "hysteresis_m": _num(0),
-            "orbit_direction": STR,
-            "orbit_roll_interval_s": SECONDS,
-            "orbit_roll_hold_s": SECONDS,
-            "orbit_pitch_hold_s": _num(0),
-            "orbit_deadband_m": _num(0),   # ADR 112
-            "level_band_deg": _num(0),     # ADR 114
-            "recover_hold_s": _num(0),
-            "entry_pullup_s": _num(0),     # ADR 123
-                "lock_timeout_s": _num(0),
-                "boundary_avoid_frac": FRACTION,
-                "orbit_window_s": _num(0),
-                "closing_margin": FRACTION,
-                "boundary_max_age_s": _num(0),
-            "tick_s": SECONDS,
-        }),
-        # mission_survey: straight passes across the arena for mapping
-        # (Design 017 phase 4b). Chosen with mission.default_mission: survey.
-        "survey_mission": Section(children={
-            # The passes' altitude. Not 5000: on the first flight (2026-10-04) the
-            # nose-up climb stalled the aircraft every time it passed about
-            # 4000 m and it never got higher than 4321 m. 3500 m is reached in
-            # half a minute and is 1300 m above the highest terrain measured.
-            "target_alt": Leaf(types=NUMBER, minimum=0, default=3500),
-            # Below target minus this the survey only climbs; it steers above it.
-            "hysteresis_m": Leaf(types=NUMBER, minimum=0, default=500),
-            # Pitch. This aircraft keeps the nose where a press leaves it, so
-            # presses on a timer add up (a 74 degree dive, a vertical zoom:
-            # 2026-10-04). The climb rate wanted is the altitude error over
-            # alt_tau_s, held between -descent_rate_ms and climb_rate_ms. One
-            # press at most every pitch_interval_s, sized as the gap between
-            # that and the measured rate over rate_per_press_s (metres a second
-            # of climb rate changed by a second of press), and none inside
-            # rate_deadband_ms.
-            "climb_rate_ms": Leaf(types=NUMBER, minimum=0, default=60),
-            "descent_rate_ms": Leaf(types=NUMBER, minimum=0, default=30),
-            "alt_tau_s": Leaf(types=NUMBER, minimum=1, default=10),
-            "rate_deadband_ms": Leaf(types=NUMBER, minimum=0, default=15),
-            "rate_per_press_s": Leaf(types=NUMBER, minimum=1, default=150),
-            # The share of the climb-rate gap one press corrects. 1 corrects it
-            # all, which over-corrects on a rate that is seconds old: the
-            # eighth flight swung by a median 499 m in the settled part of a
-            # pass (2026-10-04).
-            "rate_gain": Leaf(types=NUMBER, minimum=0.05, maximum=1, default=0.5),
-            "pitch_interval_s": Leaf(types=NUMBER, minimum=0, default=3.0),
-            "press_min_s": Leaf(types=NUMBER, minimum=0, default=0.08),
-            "press_max_s": Leaf(types=NUMBER, minimum=0, default=0.35),
-            # A turn pulls only while the climb rate is under this. Negative:
-            # only to hold up a turn that is sinking. At +20 the pull at the
-            # end of a turn, with the wings rolling level, went straight into
-            # pitch: 970 m gained in 8 s to a stall at 229 KPH, and the dive
-            # out of it was not recovered (2026-10-04 18:31). Pulling does not
-            # make the turn faster: 7.0 s to come round with almost none
-            # against 6.5 s with a pull for most of it.
-            "turn_climb_max_ms": Leaf(types=NUMBER, minimum=-200, default=-30),
-            # Above this altitude a climb that is not an emergency is stopped
-            # while a survey flies; below it the low-altitude climb that lifts
-            # a fresh spawn is left to finish.
-            "takeover_alt_m": Leaf(types=NUMBER, minimum=0, default=1200),
-            # The tree's boundary turn holds its pull for 12 s, which took the
-            # nose to 84 degrees up (2026-10-04). While a survey flies it is
-            # allowed only as the last resort: the edge ahead and nearer than
-            # this, in minimap radii.
-            "backstop_frac": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.3),
-            # A steering turn does not pull above target plus this.
-            "altitude_deadband_m": Leaf(types=NUMBER, minimum=0, default=150),
-            # Nose further than this from level: no bank until it is back.
-            "level_band_deg": Leaf(types=NUMBER, minimum=0, default=25),
-            # Compass heading of the first pass; the next is flown the other way.
-            "heading_deg": Leaf(types=NUMBER, minimum=0, maximum=360, default=0),
-            # How far round each new battle's first pass is from the last
-            # battle's. 0 flies every battle on heading_deg, which is what the
-            # first 27 mission starts did (2026-10-04): one set of lanes, seen
-            # from one direction. 45 gives four pass axes, each flown from
-            # both ends, over eight battles.
-            "heading_step_deg": Leaf(types=NUMBER, minimum=0, maximum=180, default=45),
-            # Which side of the first pass the later passes move over to.
-            "sweep": Leaf(types=(str,), choices=("right", "left"), default="right"),
-            # A correction starts on two reads in a row further off than the
-            # deadband, and is flown until the heading is inside the release.
-            "heading_deadband_deg": Leaf(types=NUMBER, minimum=0, default=8),
-            "heading_release_deg": Leaf(types=NUMBER, minimum=0, default=3),
-            # A turn back at the edge is flown one way until the heading is this
-            # close, then the ordinary steering finishes it.
-            "turn_release_deg": Leaf(types=NUMBER, minimum=0, default=25),
-            "turn_max_s": Leaf(types=NUMBER, minimum=0, default=40),
-            # Turn back when the arena edge is ahead and nearer than this, in
-            # minimap radii. Further out than the tree's boundary turn (0.50),
-            # so the survey's own turn usually comes first and the tree's is
-            # the backstop. Measured turn rate 6.7 degrees a second: half a
-            # turn takes about 27 s.
-            "edge_turn_frac": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.7),
-            # With a position from the full map, the edge is judged from it
-            # and not from the minimap: a pass turns back this far from the
-            # arena's centre, in arena radii, while still heading out. The
-            # tree's boundary turn is refused inside edge_backstop_radius_frac.
-            # A position is used for position_max_age_s after its fix, carried
-            # by heading and speed over an arena of arena_radius_m (measured
-            # 8.8 to 10.3 km on 2026-10-04).
-            "edge_radius_frac": Leaf(types=NUMBER, minimum=0.2, maximum=1, default=0.8),
-            "edge_backstop_radius_frac": Leaf(types=NUMBER, minimum=0.2, maximum=1.2,
-                                              default=0.97),
-            "position_max_age_s": Leaf(types=NUMBER, minimum=5, default=90),
-            # With a position, a turn back puts the next pass this far over
-            # from the last, in arena radii: half the turn, a step across the
-            # passes, the other half. 0 turns straight round, which moves the
-            # pass over by the width of the turn only (0.05 to 0.2 radii
-            # measured). The step is given up after cross_max_s, and cut short
-            # when it reaches cross_edge_radius_frac still heading out, which
-            # also sends the lanes back the other way.
-            "lane_spacing_frac": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.3),
-            # The furthest a pass may lie from the line through the arena's
-            # centre, in radii. A step that would put the next pass beyond it
-            # is made to the other side instead: out there a pass is short, or
-            # runs along the rim.
-            "lane_limit_frac": Leaf(types=NUMBER, minimum=0.1, maximum=1, default=0.6),
-            "cross_max_s": Leaf(types=NUMBER, minimum=1, default=40),
-            "cross_edge_radius_frac": Leaf(types=NUMBER, minimum=0.2, maximum=1.1, default=0.85),
-            "arena_radius_m": Leaf(types=NUMBER, minimum=1000, default=9400),
-            # "Ahead" is the nearest point of the rim within this cone about the
-            # nose (0.7 is 45 degrees either side). Beside the aircraft it is
-            # not a reason to turn, unless it is nearer than edge_close_frac.
-            "edge_cone_cos": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.7),
-            "edge_close_frac": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.35),
-            # And in either case only while the rim is getting nearer: by at
-            # least this much over three readings.
-            "edge_closing_frac": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.03),
-            # After turning back, the edge is not looked at again for this long.
-            "edge_holdoff_s": Leaf(types=NUMBER, minimum=0, default=30),
-            "boundary_max_age_s": Leaf(types=NUMBER, minimum=0, default=4.0),
-            # Two passes in a row shorter than this: the arena has run out on
-            # this side, and the passes move back the other way.
-            "min_leg_s": Leaf(types=NUMBER, minimum=0, default=20),
-            # The loop's period, and how long one bank-and-pull press lasts.
-            "tick_s": Leaf(types=NUMBER, minimum=0, default=0.3),
-            "pulse_s": Leaf(types=NUMBER, minimum=0, default=0.3),
-            "lock_timeout_s": Leaf(types=NUMBER, minimum=0, default=5.0),
-            # One SURVEY status line this often while nothing changes.
-            "status_every_s": Leaf(types=NUMBER, minimum=0, default=5.0),
-            # The look at the full map (Design 017, "The full map"): how often
-            # in cruise the survey opens it to read where it is (0 never
-            # looks), how long it watches the picture for the map to come or go
-            # after a key before deciding the key did nothing, how often it
-            # looks while it waits, and how long the key is held. The game
-            # answers the key in 0.2 s to more than 0.7 s, so the wait is long
-            # and nothing is pressed twice inside it.
-            "map_look_every_s": Leaf(types=NUMBER, minimum=0, default=15),
-            # While there is no position, a look is tried this often and in
-            # a climb too, so a battle's first passes are not left to the
-            # minimap's rim.
-            "map_first_look_s": Leaf(types=NUMBER, minimum=1, default=5),
-            "map_wait_s": Leaf(types=NUMBER, minimum=0.5, default=2.0),
-            "map_poll_s": Leaf(types=NUMBER, minimum=0.02, default=0.1),
-            "map_key_hold_s": Leaf(types=NUMBER, minimum=0.02, default=0.05),
-        }),
         # The game's full map, opened with `m`: a north-up disc in the middle
         # of the screen with the own icon at its true place (wingman/full_map.py).
         # Sizes are fractions of the frame height (radius_frac) or of the disc's
@@ -465,10 +307,9 @@ SCHEMA = Section(
             "starting_health_probe_interval_s": SECONDS,
             "capture_stale_inject_s": SECONDS,
             "j20_turn_guard_s": SECONDS,   # ADR 132
-            # ADR 144: which mission battle entry launches; ADR 145 adds jas39
-            # and makes the 'u' hotkey launch it too; ADR 149 adds f111
-            "default_mission": Leaf(types=(str,),
-                                    choices=("j20", "su30", "jas39", "f111", "survey")),
+            # ADR 144: which mission battle entry launches; ADR 145 makes the
+            # 'u' hotkey launch it too; ADR 160 leaves acs (was su30) and j20
+            "default_mission": Leaf(types=(str,), choices=("j20", "acs")),
             "padlock_spread_missiles": _int(0),
             # ADR 137 D5, pre_crash_buffer_s/pre_crash_freshness_s/
             # pre_crash_lookback_s added D8
@@ -525,10 +366,10 @@ SCHEMA = Section(
             "coarse_cooldown_s": SECONDS,
         }),
 
-        # ADR 144: mission_su30, the scripted Su-30 sequence
-        "su30_mission": Section(children={
+        # ADR 144: mission_acs, ACS_MISSION (mission_su30 until ADR 160)
+        "acs_mission": Section(children={
             "climb_alt_m": _num(0),
-            # ADR 147: the hard altitude floor while su30 is in play; absent
+            # ADR 147: the hard altitude floor while acs is in play; absent
             # leaves the tree's own floor and sustain band in charge.
             "alt_floor_m": _num(0),
             "climb_max_s": SECONDS,
@@ -540,32 +381,6 @@ SCHEMA = Section(
             "tick_s": SECONDS,
             "lock_timeout_s": SECONDS,
             "yield_to_target": BOOL,   # operator, 2026-09-26
-        }),
-
-        # ADR 149: mission_f111, mission_su30 plus the wing sweep
-        "f111_mission": Section(children={
-            "climb_alt_m": _num(0),
-            # ADR 147 extended by ADR 149: the hard altitude floor while f111
-            # is in play; absent leaves the tree's own floor and sustain band.
-            "alt_floor_m": _num(0),
-            "climb_max_s": SECONDS,
-            "nose_angle_deg": _num(-90, 90),
-            "angle_tolerance_deg": _num(0, 90),
-            "angle_confirm_reads": _int(1),
-            "angle_pulse_s": SECONDS,
-            "angle_max_s": SECONDS,
-            "tick_s": SECONDS,
-            "unsweep_alt_m": _num(0),
-            "unsweep_timeout_s": SECONDS,
-            "wingsweep_tap_s": SECONDS,
-        }),
-
-        # ADR 145: mission_jas39, J20 plus the cloak loop
-        "jas39_mission": Section(children={
-            "turn_guard_s": SECONDS,
-            # Floor of 0.5 s: with the 0.1 s tap, anything shorter is holding
-            # the key down rather than retrying it.
-            "cloak_press_interval_s": _num(0.5),
         }),
 
         # ADR 024 / 070 / 073 / 076 / 081 / 083
@@ -638,6 +453,12 @@ SCHEMA = Section(
                 # afterburner. null: never brake.
                 "emergency_airbrake_below_deg": Leaf(
                     types=NUMBER, minimum=-90, maximum=0, allow_none=True, default=-40.0),
+                # Code Review 019 cycle 21: a dive at or above this speed (KPH)
+                # brakes at any angle, until it is down to the release. null: off.
+                "emergency_airbrake_above_kph": Leaf(
+                    types=NUMBER, minimum=0, maximum=3000, allow_none=True, default=None),
+                "emergency_airbrake_release_kph": Leaf(
+                    types=NUMBER, minimum=0, maximum=3000, allow_none=True, default=None),
                 "spawn_guard": Section(children={
                     "enabled": BOOL,
                     "max_hold_s": SECONDS,
@@ -664,6 +485,14 @@ SCHEMA = Section(
                     "capture_max": _int(0),
                     "capture_cooldown_s": _num(0),
                     "capture_dir": STR,
+                }),
+                # Code Review 019 cycle 25: two terrain warnings agreeing within
+                # window_s start the emergency climb, held hold_s.
+                "warning_agreement": Section(children={
+                    "enabled": Leaf(types=(bool,), default=False),
+                    "shadow": Leaf(types=(bool,), default=True),
+                    "window_s": Leaf(types=NUMBER, minimum=0, maximum=10, default=1.0),
+                    "hold_s": Leaf(types=NUMBER, minimum=0, maximum=30, default=3.0),
                 }),
             }),
             # HLDD 013 Phase 1: TACTIC_ATTACK_SUPPORT's fallback roll — own
@@ -832,6 +661,88 @@ SCHEMA = Section(
             }),
         }),
 
+        # Code Review 019 cycle 11 (operator, 2026-10-15: "shadow first"): relative
+        # terrain depth from one picture, from a monocular depth model run in a
+        # process of its own (wingman.depth_worker). Logged and drawn; nothing
+        # steers on it.
+        # Code Review 019 cycle 19: the death's cause from the game's kill card.
+        "kill_card": Section(children={
+            "enabled": Leaf(types=(bool,), default=False),
+        }),
+        "depth_view": Section(children={
+            "enabled": Leaf(types=(bool,), default=False),
+            # A Hugging Face model id or a local directory.
+            "model": Leaf(types=(str,), default="depth-anything/Depth-Anything-V2-Small-hf"),
+            # torch threads in the worker process.
+            "threads": Leaf(types=(int,), minimum=1, maximum=32, default=4),
+            # The picture's height into the model, px.
+            "input_px": Leaf(types=(int,), minimum=56, maximum=1024, default=252),
+            # At most one picture this often.
+            "min_interval_s": Leaf(types=NUMBER, minimum=0, maximum=10, default=0.3),
+        }),
+
+        # Code Review 019 cycle 9 (operator, 2026-10-15): the airbrake while the
+        # resupply marker has the pursuit's steering, dosed on each fresh speed
+        # reading, so the pass is not flown at the cruise burner's speed.
+        "approach_brake": Section(children={
+            "enabled": Leaf(types=(bool,), default=False),
+            # The objectives it brakes for, each by its own switch.
+            "resupply": Leaf(types=(bool,), default=False),
+            "control_point": Leaf(types=(bool,), default=False),
+            "crown": Leaf(types=(bool,), default=False),
+            # A fresh reading above this starts a dose.
+            "cap_kph": Leaf(types=NUMBER, minimum=300, maximum=3000, default=850.0),
+            # The speed a dose aims at.
+            "target_kph": Leaf(types=NUMBER, minimum=300, maximum=3000, default=800.0),
+            # The airbrake's deceleration the dose is worked out with.
+            "decel_kph_s": Leaf(types=NUMBER, minimum=10, maximum=1000, default=150.0),
+            # The longest dose one reading can start.
+            "max_dose_s": Leaf(types=NUMBER, minimum=0.1, maximum=10, default=3.0),
+            # Code Review 019 cycle 27: also brake in a dive steeper than
+            # dive_path_deg below dive_below_m, with no objective steering.
+            "dive": Leaf(types=(bool,), default=False),
+            "dive_path_deg": Leaf(types=NUMBER, minimum=-90, maximum=0, default=-10.0),
+            "dive_below_m": Leaf(types=NUMBER, minimum=0, maximum=20000, default=3000.0),
+        }),
+
+        # Code Review 019 step 3a: the terrain outlines measured on the pursuit's
+        # own frames and drawn on live_hud.png under the picture they came from.
+        # Shadow: it logs PATHVIEW lines and draws; nothing steers on it. Reads
+        # its detector settings from terrain_avoidance.loom.
+        "clear_path": Section(children={
+            "enabled": Leaf(types=(bool,), default=False),
+            # Step 3d: where to aim so the line to the goal stays in free air.
+            # Shadow: PATH lines and the corridor on the HUD; nothing steers.
+            "planner": Section(children={
+                # Free air the goal, or a detour's aim point, must have round it
+                # (full-frame px at 1920 wide).
+                "clear_px": Leaf(types=NUMBER, minimum=0, maximum=400, default=60.0),
+                # A detour keeps its side this long, unless the goal turns direct.
+                "hold_s": Leaf(types=NUMBER, minimum=0, maximum=10, default=1.0),
+                # Flying at something closing faster than this: escape, whatever the goal.
+                "escape_tau_s": Leaf(types=NUMBER, minimum=0, maximum=30, default=3.0),
+                # A closing outline blocks only when it closes sooner than this
+                # fraction of the time of the surface the goal is drawn against.
+                "nearer_frac": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.7),
+                # The surface behind the goal closing faster than this: logged as
+                # a wall and counted. Reported only; no mode depends on it.
+                "wall_warn_s": Leaf(types=NUMBER, minimum=0, maximum=30, default=3.0),
+                # The surface round the goal: the dots within this distance of it
+                # (full-frame px at 1920 wide), on its outline, fitted alone.
+                "wall_radius_px": Leaf(types=NUMBER, minimum=10, maximum=600, default=150.0),
+                # Fewer dots than this there: not measured.
+                "wall_min_dots": Leaf(types=(int,), minimum=3, maximum=200, default=8),
+            }),
+            # Step 3e: the goals whose steering follows the planner's aim while it
+            # detours or escapes. Off for each in the schema.
+            "steer": Section(children={
+                "resupply": Leaf(types=(bool,), default=False),
+                "control_point": Leaf(types=(bool,), default=False),
+                "crown": Leaf(types=(bool,), default=False),
+                "target": Leaf(types=(bool,), default=False),
+            }),
+        }),
+
         "tracking": Section(children={
             "enabled": BOOL,
             "actuate": BOOL,
@@ -895,6 +806,12 @@ SCHEMA = Section(
                 "pitch_rate": Leaf(types=NUMBER, minimum=0.01, default=1.15),
                 "roll_rate": Leaf(types=NUMBER, minimum=0.01, default=0.4),
                 "min_pulse_s": Leaf(types=NUMBER, minimum=0, default=0.08),
+                # The rates above are learned from the pictures, between these
+                # fractions of them, on each axis switched on. Off without the key.
+                "learn_pitch_rate": Leaf(types=(bool,), default=False),
+                "learn_roll_rate": Leaf(types=(bool,), default=False),
+                "learn_rate_min": Leaf(types=NUMBER, minimum=0.01, maximum=1, default=0.1),
+                "learn_rate_max": Leaf(types=NUMBER, minimum=1, default=1.3),
             }),
         }),
 
@@ -955,7 +872,22 @@ SCHEMA = Section(
             "resupply_priority": Section(children={
                 "enabled": Leaf(types=(bool,), default=True),
                 "actuate": Leaf(types=(bool,), default=False),
+                # Nose-up and afterburner after a rearm, for this long.
                 "rearm_climb_s": Leaf(types=NUMBER, minimum=0, default=3.0),
+                # The steering deadband while the resupply marker has the steering,
+                # in half-frames; a target keeps tracking.deadband's 0.05.
+                "deadband": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.025),
+                # Action Item 003: the climb-out started at the pass, the marker
+                # lost while moving outward. Pixels at 1200 px of frame height.
+                "pass_trigger": Section(children={
+                    "enabled": Leaf(types=(bool,), default=False),
+                    "actuate": Leaf(types=(bool,), default=False),
+                    "missing_s": Leaf(types=NUMBER, minimum=0, default=0.5),
+                    "min_off_centre_px": Leaf(types=NUMBER, minimum=0, default=35),
+                    "min_outward_px": Leaf(types=NUMBER, default=5),
+                    "lined_up_px": Leaf(types=NUMBER, minimum=0, default=120),
+                    "min_size_px": Leaf(types=NUMBER, minimum=0, default=50),
+                }),
                 # The frame in which a resupply marker first appears, saved to
                 # tests/test-output/target_tracking, two per pursuit at most.
                 "save_candidate_frames": Leaf(types=(bool,), default=False),
@@ -990,8 +922,9 @@ SCHEMA = Section(
             "search_climb_max_deg": Leaf(types=NUMBER, minimum=0, maximum=90, default=30.0),
             "dive_safety": BOOL,   # operator, 2026-09-26
             "crash_recovery": Leaf(types=(bool,), default=True),   # operator, 2026-10-02
-            # Operator, 2026-10-08: that recovery waits until the target and the
-            # resupply marker have been out of view this long. 0 or null: no wait.
+            # Operator, 2026-10-08: that recovery waits until the target, the
+            # resupply marker and a control point or crown that has the steering
+            # have been out of view this long. 0 or null: no wait.
             "crash_recovery_clear_view_s": Leaf(
                 types=NUMBER, minimum=0, allow_none=True, default=1.0),
             # HLDD 015 Icon-Directed Search, shadow stage (2026-09-26).
@@ -1051,6 +984,21 @@ SCHEMA = Section(
                 # session instead of spending it in the first minutes.
                 "min_interval_s": SECONDS,
                 "max_per_encounter": _int(0),
+            }),
+            # Code Review 019 (CR-019-09): the last `seconds` of annotated HUD
+            # frames, taken `rate_hz` times a second and held in memory, written
+            # to `dir` at each death. Live runs only.
+            "black_box": Section(children={
+                "enabled": Leaf(types=(bool,), default=False),
+                "dir": Leaf(types=(str,), default="test_screenshots/path_blackbox"),
+                "seconds": Leaf(types=NUMBER, minimum=1, maximum=120, default=18.0),
+                "rate_hz": Leaf(types=NUMBER, minimum=0.2, maximum=10, default=3.0),
+                # Cycle 5: a clip of the last alarm_seconds, 1.5 s after each
+                # planner alarm (DETOUR or ESCAPE), to <dir>/alarms. At most one
+                # every alarm_gap_s and alarm_max a session; 0 is off.
+                "alarm_max": Leaf(types=(int,), minimum=0, maximum=1000, default=0),
+                "alarm_gap_s": Leaf(types=NUMBER, minimum=0, maximum=600, default=30.0),
+                "alarm_seconds": Leaf(types=NUMBER, minimum=0.5, maximum=18, default=4.0),
             }),
         }),
 

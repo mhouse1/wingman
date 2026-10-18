@@ -10,6 +10,7 @@ The first half is `wingman/hold_model.py` alone, on a clock the test owns. The
 second is the controller's sustained holds with the model on.
 """
 
+import math
 import threading
 import time
 
@@ -248,12 +249,16 @@ class TestTargetMotion:
 
 
 def _fly(rate_true, model_rate, error0, lag=0.25, tick=0.17, duration=4.0,
-         stale_every=0, deadband=DEADBAND, modelled=True, drift=0.0):
+         stale_every=0, deadband=DEADBAND, modelled=True, drift=0.0, learn=False,
+         models=None, target=None):
     """A point that moves `rate_true` per second of key, `lag` late, steered
-    every `tick`; with `drift` it also moves that much a second by itself.
-    Returns (error at each tick, number of key presses)."""
+    every `tick`; with `drift` it also moves that much a second by itself, or
+    `target(t)` gives where it is. Returns (error at each tick, number of key
+    presses); the model steered with is appended to `models`."""
     truth = HoldModel(rate_true, lag, memory_s=1e9)        # what the keys really did
-    model = HoldModel(model_rate, lag)
+    model = HoldModel(model_rate, lag, learn_rate=learn)
+    if models is not None:
+        models.append(model)
     step = 0.001
     held = 0
     release_at = None
@@ -272,7 +277,8 @@ def _fly(rate_true, model_rate, error0, lag=0.25, tick=0.17, duration=4.0,
         if t >= next_tick:
             next_tick += tick
             n += 1
-            shown = error0 + drift * t - rate_true * truth.key_time(0.0, t - lag)
+            where = target(t) if target is not None else error0 + drift * t
+            shown = where - rate_true * truth.key_time(0.0, t - lag)
             if not (stale_every and n % stale_every == 0):
                 picture = (t, shown)
             errors.append(shown)
@@ -335,6 +341,88 @@ class TestClosedLoop:
         errors, presses = _fly(1.15, 1.15, 0.30, stale_every=3)
         assert presses == 1
         assert min(errors) > -DEADBAND
+
+
+class TestLearnedRate:
+    """Operator, 2026-10-14: "this is a different jet that flies faster, so an
+    auto adjusting rate is better". That day a second of pitch key moved the
+    target 0.15 to 0.23 half-frames at 1,200 to 1,450 KPH, against 1.15 assumed,
+    and 16 nose-down holds in a row were let go too soon on one resupply pass."""
+
+    @staticmethod
+    def _weaving(t):
+        return 0.25 * math.sin(2 * math.pi * t / 6.0) + 0.1 * math.sin(2 * math.pi * t / 2.3)
+
+    def test_a_sluggish_jet_is_learned(self):
+        models = []
+        _fly(0.2, 1.15, 0.0, duration=25.0, learn=True, models=models, target=self._weaving)
+        assert 0.12 <= models[0].rate_per_s <= 0.4
+
+    def test_a_brisk_jet_is_learned_near_its_rate(self):
+        models = []
+        _fly(1.0, 1.15, 0.0, duration=25.0, learn=True, models=models, target=self._weaving)
+        assert 0.7 <= models[0].rate_per_s <= 1.3
+
+    def test_a_falling_marker_is_held_closer_once_the_rate_is_learned(self):
+        """The 05:37 pass: the marker below the nose and sinking faster as the
+        aircraft closes on it."""
+        def sinking(t):
+            return min(0.6, 0.05 + 0.02 * (t % 6.0) ** 2)
+        def late_median(errs):
+            late = sorted(abs(e) for e in errs[len(errs) // 3:])
+            return late[len(late) // 2]
+        fixed, _ = _fly(0.2, 1.15, 0.0, duration=30.0, target=sinking)
+        learned, _ = _fly(0.2, 1.15, 0.0, duration=30.0, learn=True, target=sinking)
+        assert late_median(learned) < 0.8 * late_median(fixed)
+
+    def test_a_pair_with_no_key_teaches_the_motion_and_not_the_rate(self):
+        m = HoldModel(1.0, 0.25, learn_rate=True)
+        t = 10.0
+        for i in range(8):
+            m.plan(0.10 + 0.2 * 0.17 * i, t, t, deadband=DEADBAND)   # drifting, no key held
+            t += 0.17
+        assert m.rate_per_s == 1.0
+        assert m.drift_per_s > 0.1
+
+    def test_the_learned_rate_stays_between_its_limits(self):
+        worse = HoldModel(1.0, 0.25, learn_rate=True, rate_min=0.1, rate_max=1.3)
+        better = HoldModel(1.0, 0.25, learn_rate=True, rate_min=0.1, rate_max=1.3)
+        worse.key(1, 0.0)
+        better.key(1, 0.0)
+        t = 1.0
+        for i in range(30):
+            worse.plan(0.6 + 0.01 * i, t, t, deadband=DEADBAND)    # the key does nothing
+            better.plan(0.6 - 0.25 * i, t, t, deadband=DEADBAND)   # 1.5 a second: beyond the limit
+            t += 0.17
+        assert worse.rate_per_s == 0.1
+        assert better.rate_per_s == 1.3
+
+    def test_without_learning_the_rate_never_moves(self):
+        models = []
+        _fly(0.2, 1.15, 0.0, duration=10.0, models=models, target=self._weaving)
+        assert models[0].rate_per_s == 1.15
+
+    def test_a_bank_that_carries_the_target_round_is_not_learned_on_roll(self):
+        """2026-10-14 06:27:40.668: roll right held, the target right of the
+        bore sight and below it. The bank turned the picture and took the
+        target further right (TRACKPICK x below, one per new picture). Learned,
+        the roll rate fell towards its floor and the next holds were planned at
+        5 to 23 s; the shipped config learns pitch only."""
+        with open("wingman/config.yaml", encoding="utf-8") as f:
+            hm = yaml.safe_load(f)["tracking"]["hold_model"]
+        rate = hm["roll_rate"]
+        limits = dict(rate_min=rate * hm["learn_rate_min"], rate_max=rate * hm["learn_rate_max"])
+        learning = HoldModel(rate, hm["lag_s"], learn_rate=True, **limits)
+        shipped = HoldModel(rate, hm["lag_s"], learn_rate=hm["learn_roll_rate"], **limits)
+        seen = ((0.151, 1090), (0.349, 1106), (0.511, 1119), (0.666, 1131),
+                (0.825, 1140), (1.008, 1161), (1.177, 1173), (1.513, 1194))
+        for m in (learning, shipped):
+            m.plan((1078 - 960) / 960, -0.031, -0.031, deadband=DEADBAND)
+            m.key(1, 0.0)
+            for t, x in seen:
+                m.plan((x - 960) / 960, t, t, deadband=DEADBAND)
+        assert learning.rate_per_s < 0.5 * rate
+        assert shipped.rate_per_s == rate
 
 
 # ---------------------------------------------------------------------------
@@ -436,10 +524,11 @@ class TestTimedHold:
             ctrl.orient_nose_to_target(0.10, sustained_hold=True)
             assert _wait_until(lambda: ctrl._pitch_held is None and ctrl._roll_held is None)
         lines = [r.getMessage() for r in caplog.records]
-        assert "HOLD[pitch]: None -> down (target err_y=+0.100 pred=+0.100 hold=0.10s)" in lines
+        assert ("HOLD[pitch]: None -> down (target err_y=+0.100 pred=+0.100 hold=0.10s "
+                "rate=1.00)") in lines
         assert "HOLD[pitch]: down -> None (timed 0.10s)" in lines
         assert ("HOLD[roll]: None/None -> right/target "
-                "(target err=+0.100 pred=+0.100 hold=0.10s)") in lines
+                "(target err=+0.100 pred=+0.100 hold=0.10s rate=1.00)") in lines
         assert "HOLD[roll]: right/target -> None/None (timed 0.10s)" in lines
 
     def test_a_large_error_is_still_held_at_the_next_tick(self, monkeypatch):
@@ -613,14 +702,33 @@ class TestOffIsAsBefore:
         assert ctrl._hold_timers == {"roll": None, "pitch": None}
         ctrl.release_tracking_holds()
 
+    def test_the_learned_rate_is_configured_per_axis(self, monkeypatch, caplog):
+        ctrl = _make_ctrl(monkeypatch, hold_model={
+            "learn_pitch_rate": True, "learn_roll_rate": True,
+            "learn_rate_min": 0.1, "learn_rate_max": 1.3,
+            "pitch_rate": 1.15, "roll_rate": 0.4})
+        pitch, roll = ctrl._hold_models["pitch"], ctrl._hold_models["roll"]
+        assert pitch.learn_rate and roll.learn_rate
+        assert (pitch.rate_min, pitch.rate_max) == pytest.approx((0.115, 1.495))
+        assert (roll.rate_min, roll.rate_max) == pytest.approx((0.04, 0.52))
+        with caplog.at_level("DEBUG", logger="wingman.controller"):
+            ctrl.orient_pitch_to_target(0.30, sustained_hold=True)
+        assert any("rate=1.15)" in r.getMessage() for r in caplog.records)
+        ctrl.release_tracking_holds()
+
     def test_shipped_values(self):
         with open("wingman/config.yaml", encoding="utf-8") as f:
             shipped = yaml.safe_load(f)["tracking"]["hold_model"]
         assert shipped == {"enabled": True, "lag_s": 0.25, "pitch_rate": 1.15,
-                           "roll_rate": 0.4, "min_pulse_s": 0.08}
+                           "roll_rate": 0.4, "min_pulse_s": 0.08,
+                           "learn_pitch_rate": True, "learn_roll_rate": False,
+                           "learn_rate_min": 0.1, "learn_rate_max": 1.3}
         # A config without the key steers as it did.
         assert schema_default("tracking.hold_model.enabled") is False
-        for key in ("lag_s", "pitch_rate", "roll_rate", "min_pulse_s"):
+        assert schema_default("tracking.hold_model.learn_pitch_rate") is False
+        assert schema_default("tracking.hold_model.learn_roll_rate") is False
+        for key in ("lag_s", "pitch_rate", "roll_rate", "min_pulse_s",
+                    "learn_rate_min", "learn_rate_max"):
             assert schema_default("tracking.hold_model." + key) == shipped[key]
         # The shortest pitch hold must land inside the deadband, not across it.
         assert shipped["pitch_rate"] * shipped["min_pulse_s"] <= 2 * 0.05

@@ -13,9 +13,7 @@ follow, and the files it touches. A mission's own file holds only its spec.
 | `README.md` | this contract; read by Claude, not copied |
 | `_template.md` | the blank spec form; **copy this** |
 | `j20.md` | the form filled in for `mission_j20`, plus how J20 works today |
-| `su30.md` | the operator's own spec, and the layout `_template.md` follows; a scripted hand-off mission |
-| `jas39.md` | a spec written against this contract; the closest worked example of the current wiring (ADR 145) |
-| `f111.md` | `su30.md` plus a wing sweep on `w`; implemented as `mission_f111` (ADR 149) |
+| `acs.md` | ACS_MISSION, the operator's own spec (written as `su30.md`, renamed by ADR 160), and the layout `_template.md` follows; a scripted hand-off mission |
 
 The behavior described here was checked against the code and
 `wingman/config.yaml`, not copied from ADRs. Where an ADR and the code
@@ -47,7 +45,7 @@ Meet the definition of done in section 7 and leave the changes uncommitted.
 ## 2. Writing the sequence
 
 The spec is the `## name` and `## sequence` of the template, in the layout of
-`su30.md`. Nothing else is required.
+`acs.md`. Nothing else is required.
 
 ### 2.1 What goes in a bullet
 
@@ -55,7 +53,7 @@ Bullets run in order. Put numbers and conditions in the bullet ("after reaching
 5000 altitude set nose angle to -10 degrees"); Claude derives the config keys.
 
 * **Engagement is a bullet.** Name `search_and_destroy` (padlock plus fire) or `boresight_engage` (fire only), and put it where it should start. Position matters: the loop fires whatever weapon is selected when it starts, so a loop started before a weapon switch fires the spawn weapon until the switch. If the order matters to you, say why in the bullet.
-* **Altitude and angle targets respect the floor.** Below 4000 m the tree's Climb tactic takes the pitch axis: the hard floor (`behavior_tree.climb.alt_floor_m`) always, and the sustain band (4000 to 5000 m) while the aircraft is armed and a mission runs. A scripted flight path below 4000 m is overridden by a climb, not held. Only `mission_su30` (ADR 147) and `mission_f111` (ADR 149) have their own floor; a new mission that needs one is a shared-behavior change (default 8).
+* **Altitude and angle targets respect the floor.** Below 4000 m the tree's Climb tactic takes the pitch axis: the hard floor (`behavior_tree.climb.alt_floor_m`) always, and the sustain band (4000 to 5000 m) while the aircraft is armed and a mission runs. A scripted flight path below 4000 m is overridden by a climb, not held. Only `mission_acs` (ADR 147) has its own floor; a new mission that needs one is a shared-behavior change (default 8).
 * **A mission that returns early turns off the lock-gated behavior** in section 3.1. A hand-off mission should say what takes over.
 * **A bullet that asks for something shared behavior already does** (climbing, cruise afterburner, evading) is a change to every mission. See default 8.
 
@@ -64,24 +62,23 @@ Bullets run in order. Put numbers and conditions in the bullet ("after reaching
 Claude applies these and records them in the ADR.
 
 1. **Launch.** No hotkey of its own (ADR 145). The mission is added to the `mission.default_mission` choices; `u`, battle entry and the restart fallback all launch whichever mission that key names. A dedicated hotkey is added only when the spec asks for one. Claude then picks an unused key and flags it for you to check against the game's bindings: `test_keybindings` checks only against keys wingman itself injects, and hotkeys are grabbed with `suppress=False`, so the game also receives them.
-2. **Hotkey while a mission runs.** `u` skips: it logs and does nothing while a mission holds the lock. A dedicated hotkey preempts: it cancels the running mission and takes over (ADR 111), as `o` does for `mission_su30`.
+2. **Hotkey while a mission runs.** `u` skips: it logs and does nothing while a mission holds the lock. A dedicated hotkey preempts: it cancels the running mission and takes over (ADR 111), as `o` does for `mission_acs`.
 3. **Shipped default.** The shipped `mission.default_mission` value is not changed unless the spec says so. Selecting the new mission is a one-line config edit for you.
 4. **End.** The mission runs until cancelled, unless the last bullet is a hand-off.
 5. **Waits.** Every wait is bounded. On timeout, log a warning and continue with the next bullet, unless continuing would dive an armed aircraft (rule 13 in section 5), in which case hold until cancelled.
 6. **Logging.** One `step N/M` line per bullet, so a live trial is readable.
 7. **Config.** Numbers from the bullets go in a `<name>_mission` block in `config.yaml` with a schema entry and a comment giving the reason for each. Nothing is hard-coded without saying so.
-8. **Shared behavior.** If a bullet needs a change to shared behavior (section 3), stop and report the options: a global change that affects every mission, or a per-mission exception. The only per-mission exception today is ADR 147's, for `mission_su30` and (ADR 149) `mission_f111`, each named in code; extending it to another mission is a shared-code change. The choice is the operator's each time. Never edit shared code silently.
+8. **Shared behavior.** If a bullet needs a change to shared behavior (section 3), stop and report the options: a global change that affects every mission, or a per-mission exception. The only per-mission exception today is ADR 147's, for `mission_acs`, named in code; extending it to another mission is a shared-code change. The choice is the operator's each time. Never edit shared code silently.
 9. **Acceptance.** Claude reports the log lines to check on a live trial in its reply and in the ADR, as ADR 144 did. The spec carries no acceptance section.
 
 ## 3. What every mission inherits
 
 None of this belongs to a mission. It is shared tree and watchdog code driven
 by global config, read once and applied to whichever mission is flying. The one
-exception is ADR 147 (extended to `mission_f111` by ADR 149): while `mission_su30`
-or `mission_f111` is the mission in play, the tree uses that mission's
+exception is ADR 147: while `mission_acs` is the mission in play, the tree uses that mission's
 `<name>_mission.alt_floor_m` as its floor and the sustain band stands aside
 (`Controller.altitude_floor_override_m`, `sustain_climb_suppressed`). That
-exception names su30 and f111 in code, so it is not a switch a new mission can set. A
+exception names acs in code, so it is not a switch a new mission can set. A
 spec that wants a different value or an opt-out is asking for a shared change
 (default 8 in section 2.2).
 
@@ -120,7 +117,7 @@ ground, and the altitude floor. The sustain band climbs an armed aircraft
 (missiles above zero, mission running) below `climb.sustain.enter_below_alt`
 until `exit_above_alt`. The floor and the sustain entry are both 4000 and a test
 (`test_mission_j20_altitude_doctrine_is_4000m_everywhere`) pins them equal.
-Under ADR 147, `mission_su30` flies with a 3000 m floor and no sustain band, and so, under ADR 149, does `mission_f111`.
+Under ADR 147, `mission_acs` flies with a 3000 m floor and no sustain band.
 
 ### 3.3 Tree-independent, every tick
 
@@ -150,7 +147,7 @@ A restart runs whichever mission was launched last (`_set_last_mission`).
 ## 4. Building blocks
 
 A mission is assembled from these. Do not add new flight code when one fits;
-`mission_su30` and `mission_jas39` each needed exactly one new routine.
+`mission_acs` (as `mission_su30`) needed exactly one new routine.
 
 **Flight and weapon keys** (`Controller`; all take `hold_seconds`, `block`, `ignore_cancel`). Use these rather than `keyboard_module` so the programmatic-key bracket and takeover gate apply.
 
@@ -179,7 +176,6 @@ A mission is assembled from these. Do not add new flight code when one fits;
 |------|------|
 | `start_search_and_destroy_loop` / `stop_...` | padlock plus fire |
 | `start_boresight_engage_loop` / `stop_...` | fire only |
-| `start_cloak_loop` / `stop_cloak_loop` | `activate_special_weapon` every `jas39_mission.cloak_press_interval_s`; safe only on a jet where `q` is not a toggle |
 
 **End of life:**
 
@@ -206,7 +202,7 @@ Rules every mission follows. Each one exists because of a measured failure.
 
 1. **Lock.** Automatic launches (battle entry, respawn, `u`) use `_mission_lock.acquire(blocking=False)` and return when held. A dedicated hotkey that must take over cancels the running mission first and then uses `acquire(timeout=...)`. Release only in `finally`, guarded by `if self._mission_lock.locked()`.
 2. **Reset order.** After acquiring the lock, arm the turn guard, then clear `_mission_complete` and `_mission_cancel`, then start the runner.
-3. **Wait loop.** The calling thread polls `_mission_complete.wait(0.05)`, calls `cancel_mission()` on `_mission_exit_requested()`, joins the runner for 2 s and sleeps 0.2 s. Copy the skeleton from `mission_j20` or `mission_jas39`.
+3. **Wait loop.** The calling thread polls `_mission_complete.wait(0.05)`, calls `cancel_mission()` on `_mission_exit_requested()`, joins the runner for 2 s and sleeps 0.2 s. Copy the skeleton from `mission_j20`.
 4. **Cancel-aware waits.** Inside the mission, wait with `_mission_cancel.wait(timeout)`, never `time.sleep`. Any new daemon thread must stop on a `threading.Event` (the stoppable-thread rule in `CLAUDE.md`).
 5. **Clean up on every exit.** Stop every loop and hold the mission started in `finally`, each stop guarded on its own, so cancel, exception, exit request and hand-off all end them and one failing stop cannot skip the next. A loop that outlives its mission keeps pressing keys into the next life.
 6. **One writer per axis.** Press pitch keys only when no climb hold, spawn guard or eject owns the axis (`is_climbing()`, `is_spawn_guarding()`, `is_ejecting()`). A key with two writers is a bug.
@@ -220,7 +216,7 @@ Rules every mission follows. Each one exists because of a measured failure.
 
 ## 6. Wiring checklist
 
-Taken from what `mission_jas39` touched. `<x>` is the new mission name.
+Taken from what `mission_jas39` touched (ADR 145; the mission was removed by ADR 160, the wiring is unchanged). `<x>` is the new mission name.
 
 | # | File | Change |
 |---|------|--------|
@@ -232,7 +228,7 @@ Taken from what `mission_jas39` touched. `<x>` is the new mission name.
 | 6 | `wingman/config_schema.py` | a `Section` for the block, and `"<x>"` in the `default_mission` `choices`. A misspelt key must fail validation |
 | 7 | `wingman/config.yaml` | the block, with comments giving the reason for each number |
 | 8 | `docs/adr/` | next free number, status `Draft`, per `CLAUDE.md` |
-| 9 | `tests/test_mission_<x>.py` | follow `tests/test_mission_jas39.py` (or `test_mission_su30.py` for a scripted mission): step order, toggles, stale data, cancel at each step, lock release, launch through `default_mission`, restart branch, shipped config matches the spec, schema |
+| 9 | `tests/test_mission_<x>.py` | follow `tests/test_mission_acs.py`: step order, toggles, stale data, cancel at each step, lock release, launch through `default_mission`, restart branch, shipped config matches the spec, schema |
 | 10 | `README.md`, `docs/architecture.md`, `docs/job-aids/001-setup-and-usage.md` | mission description, the `default_mission` choices and the `_last_mission` values |
 
 Rows 4, 5 and 6 each hard-code mission names. Missing one fails silently:
@@ -245,7 +241,7 @@ Only when the spec asks for a dedicated hotkey (default 1), also:
 |---|------|--------|
 | H1 | `wingman/keybindings.py` | `MISSION_<X>_KEY` |
 | H2 | `wingman/controller.py`, `tests/test_keybindings.py` | import the key in the controller's keybindings import, and add its name to the re-export list in the test |
-| H3 | `wingman/controller.py` hotkey section | `start_<x>_mission`, modelled on `start_su30_mission`: debounce 0.5 s, force `GAME_BATTLE` via `manual_force_battle` unless already there, `_set_last_mission("<x>")`, start the thread with `preempt=True` |
+| H3 | `wingman/controller.py` hotkey section | `start_<x>_mission`, modelled on `start_acs_mission`: debounce 0.5 s, force `GAME_BATTLE` via `manual_force_battle` unless already there, `_set_last_mission("<x>")`, start the thread with `preempt=True` |
 | H4 | the three docs in row 10 | a hotkey row |
 
 `wingman/main.py` needs no change for a new hotkey. The nested lane requires
@@ -269,12 +265,11 @@ before a live trial. A live trial is still needed before the ADR leaves `Draft`.
 ## 8. Notes and caveats
 
 * **ADR 075 lists a shorter priority order** (no BoundaryTurn or Regroup). It is Accepted, so it is not edited; `_PRIORITY_ORDER` is current.
-* **`u` launches the configured mission and does not preempt** (ADR 145). Its handler is still named `start_j20_mission` and its key `MISSION_J20_KEY`, but it calls `_start_default_mission()`. Pressing it while a mission holds the lock is a no-op apart from a log line. `o` starts `mission_su30` directly and preempts (ADR 144, ADR 111).
-* **The altitude floor has one per-mission exception** (ADR 147, extended by ADR 149): `mission_su30` flies with `su30_mission.alt_floor_m` (3000) and no sustain band, and `mission_f111` with `f111_mission.alt_floor_m` (3000). It is keyed on the last launched mission being `"su30"` or `"f111"` (`_own_altitude_floor_in_play_m`), not on a mission-level setting. ADR 141 stays Accepted and unchanged.
+* **`u` launches the configured mission and does not preempt** (ADR 145). Its handler is still named `start_j20_mission` and its key `MISSION_J20_KEY`, but it calls `_start_default_mission()`. Pressing it while a mission holds the lock is a no-op apart from a log line. `o` starts `mission_acs` directly and preempts (ADR 144, ADR 111, ADR 160).
+* **The altitude floor has one per-mission exception** (ADR 147): `mission_acs` flies with `acs_mission.alt_floor_m` (3000) and no sustain band. It is keyed on the last launched mission being `"acs"` (`_own_altitude_floor_in_play_m`), not on a mission-level setting. ADR 141 stays Accepted and unchanged.
 * **`j20_mission.*` is mostly shared config despite its name.** Only `target_painting_mode` is J20's (read by the search-and-destroy weapon loop). The rest tunes the shared Engage tactic through `EngageNavigator`, so a new mission that edits it changes J20 too.
 * **`jet_profile.has_padlock` is read but nothing branches on it** (Design 011). A boresight-only jet is still a mission-level choice today.
-* **`mission_su30` is the scripted counterpart** and is still Draft, as are ADR 144 and ADR 147. Read its code for a worked hand-off mission, but not its ADRs as settled.
-* **`mission_loiter` predates this contract.** It has its own hotkey and a `restart_last_mission` branch, but is not a `default_mission` choice. Do not model a new mission on it.
+* **`mission_acs` is the scripted counterpart** (ADR 160; ADR 144 and ADR 147 are still Draft). Read its code for a worked hand-off mission, but not its ADRs as settled.
 * **`docs/missions/` files are not numbered.** The `CLAUDE.md` numbering rule for `docs/` subdirectories does not match these names; they keep the names the operator gave them.
 
 ## 9. Related documents
@@ -286,7 +281,8 @@ before a live trial. A live trial is still needed before the ADR leaves `Draft`.
 * `docs/adr/132-fly-the-spawn-heading-first.md`: the turn guard
 * `docs/adr/138-boundary-turn-requires-mission-running.md`: which tactics read the lock
 * `docs/adr/141-phase1-altitude-floor-stall-prevention-and-emergency-yields.md`: the 4000 m altitude floor
-* `docs/adr/144-mission-su30-scripted-sequence.md`: the scripted counterpart
-* `docs/adr/145-mission-jas39-cloak-and-u-launches-the-configured-mission.md`: `u` and `default_mission` as the launch path; the cloak loop
-* `docs/adr/147-mission-su30-flies-its-own-altitude-doctrine.md`: su30's floor exception
+* `docs/adr/144-mission-su30-scripted-sequence.md`: the scripted counterpart, now ACS_MISSION
+* `docs/adr/145-mission-jas39-cloak-and-u-launches-the-configured-mission.md`: `u` and `default_mission` as the launch path
+* `docs/adr/147-mission-su30-flies-its-own-altitude-doctrine.md`: the ACS floor exception (written for su30)
+* `docs/adr/160-acs-mission-and-j20-are-the-only-missions.md`: su30 renamed ACS_MISSION; loiter, survey, F-111 and JAS39 removed
 * `docs/hldd/015-target-tracking-pursuit-mode-hldd.md`: pursuit mode and its FSM seam

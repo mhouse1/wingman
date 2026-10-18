@@ -8,6 +8,7 @@ from wingman.resupply import (
     MissilePriority,
     ResupplyMarker,
     ResupplyMarkerMemory,
+    ResupplyPassWatch,
     MissileUrgency,
     find_resupply_marker,
     find_resupply_ring_icons,
@@ -218,6 +219,182 @@ def test_confirmed_ammo_increase_while_seeking_resets_before_zero():
     assert rearmed.missiles_spent == 0
 
 
+# ---------------------------------------------------------------------------
+# ResupplyPassWatch (Action Item 003): the climb-out starts at the pass
+# ---------------------------------------------------------------------------
+
+def _fly_marker(watch, offsets, *, start=100.0, step=0.17, steering=True, active=True,
+                height=1200, then_missing_s=0.0, size=55):
+    """Feed sightings `offsets` px right of the centre, one per `step`, then the
+    marker missing tick by tick for `then_missing_s`. Returns every pass signed.
+    `size` is the marker's px across at 1200 px of frame height."""
+    signed = []
+    t = start
+    width = int(height * 1.6)
+    across = round(size * height / 1200)
+    for off in offsets:
+        marker = None if off is None else ResupplyMarker(
+            width / 2 + off * height / 1200, height / 2, across, across, 900, 0)
+        got = watch.update(t, marker, steering=steering, active=active,
+                           frame_width=width, frame_height=height)
+        if got is not None:
+            signed.append(got)
+        t += step
+    end = t + then_missing_s
+    while t < end:
+        got = watch.update(t, None, steering=steering, active=active,
+                           frame_width=width, frame_height=height)
+        if got is not None:
+            signed.append(got)
+        t += step
+    return signed
+
+
+# Twenty ticks steady near the centre, then four moving out: a pass.
+_APPROACH = [20] * 20
+_SWEEP = [40, 70, 110, 160]
+
+
+def test_a_marker_lost_while_moving_outward_is_a_pass_signed_once():
+    signed = _fly_marker(ResupplyPassWatch(), _APPROACH + _SWEEP, then_missing_s=3.0)
+    assert len(signed) == 1
+    assert signed[0].off_centre_px == pytest.approx(160)
+    assert signed[0].outward_px > 100
+    assert 0.5 <= signed[0].since_seen_s < 0.5 + 0.2
+
+
+def test_a_marker_lost_from_the_centre_without_moving_is_not_a_pass():
+    """The dropout: 73 of the 162 times the steered marker went missing on
+    2026-10-13 it was back within 4 s, having sat a median 20 px out."""
+    assert _fly_marker(ResupplyPassWatch(), _APPROACH + [20] * 4, then_missing_s=3.0) == []
+
+
+def test_a_marker_that_was_never_lined_up_is_not_a_pass():
+    """First flight, 2026-10-13 19:51:52: the marker had just taken the steering
+    597 px from the centre and blinked out for 0.6 s, 5 px further out. The
+    climb-out started; the marker was back 0.9 s later, 100 px higher."""
+    turning_in = [640, 630, 620, 612, 606, 600, 596] + [592] * 8 + [594, 597]
+    # Without the condition this is the flight's failure: a pass is signed.
+    assert len(_fly_marker(ResupplyPassWatch(lined_up_px=10_000), turning_in,
+                           then_missing_s=3.0)) == 1
+    assert _fly_marker(ResupplyPassWatch(), turning_in, then_missing_s=3.0) == []
+    # Lined up first and then swept as far out, it is a pass.
+    assert len(_fly_marker(ResupplyPassWatch(), _APPROACH + [80, 200, 400, 597],
+                           then_missing_s=3.0)) == 1
+
+
+def test_a_marker_far_out_but_not_moving_is_not_a_pass():
+    assert _fly_marker(ResupplyPassWatch(), [80] * 24, then_missing_s=3.0) == []
+
+
+def test_nothing_is_signed_before_the_marker_has_been_missing_long_enough():
+    watch = ResupplyPassWatch(missing_s=0.5)
+    assert _fly_marker(watch, _APPROACH + _SWEEP, then_missing_s=0.3) == []
+
+
+def test_a_marker_that_comes_back_in_time_is_not_a_pass_and_a_later_pass_still_is():
+    watch = ResupplyPassWatch(missing_s=0.5)
+    blink = _APPROACH + _SWEEP[:2] + [None, None] + [20] * 8      # two missing ticks: 0.34 s
+    assert _fly_marker(watch, blink) == []
+    carry_on = 100.0 + len(blink) * 0.17
+    assert len(_fly_marker(watch, _SWEEP, start=carry_on, then_missing_s=1.0)) == 1
+
+
+def test_a_short_approach_is_not_a_pass():
+    assert _fly_marker(ResupplyPassWatch(), [20] * 4 + _SWEEP, then_missing_s=3.0) == []
+
+
+def test_a_marker_that_did_not_have_the_steering_is_not_a_pass():
+    assert _fly_marker(ResupplyPassWatch(), _APPROACH + _SWEEP, steering=False,
+                       then_missing_s=3.0) == []
+
+
+def test_no_pass_while_the_pursuit_is_not_steering():
+    """The dive recovery has the airframe, or a climb-out is already flying."""
+    assert _fly_marker(ResupplyPassWatch(), _APPROACH + _SWEEP, active=False,
+                       then_missing_s=3.0) == []
+
+
+def test_the_pixel_limits_are_at_1200_px_of_frame_height():
+    small = _fly_marker(ResupplyPassWatch(), _APPROACH + _SWEEP, height=600, then_missing_s=3.0)
+    assert len(small) == 1 and small[0].off_centre_px == pytest.approx(160)
+
+
+def test_a_marker_still_too_small_to_fly_through_is_not_a_pass():
+    """2026-10-15 12:58:24: the marker dropped out 55 px from the centre, 40 px
+    across; a pass was signed, no rearm came, and the climb-out broke the
+    approach. The passes a rearm followed had it 53 to 67 px across."""
+    assert _fly_marker(ResupplyPassWatch(), _APPROACH + _SWEEP, size=40,
+                       then_missing_s=3.0) == []
+    assert len(_fly_marker(ResupplyPassWatch(), _APPROACH + _SWEEP, size=53,
+                           then_missing_s=3.0)) == 1
+    # The floor is at 1200 px of frame height, as the other limits are.
+    assert _fly_marker(ResupplyPassWatch(), _APPROACH + _SWEEP, size=40, height=600,
+                       then_missing_s=3.0) == []
+    # At 0 the floor is off, the rule as it was.
+    assert len(_fly_marker(ResupplyPassWatch(min_size_px=0), _APPROACH + _SWEEP, size=40,
+                           then_missing_s=3.0)) == 1
+
+
+def test_the_next_pass_needs_its_own_approach():
+    watch = ResupplyPassWatch()
+    assert len(_fly_marker(watch, _APPROACH + _SWEEP, then_missing_s=1.0)) == 1
+    assert _fly_marker(watch, _SWEEP, start=103.0, then_missing_s=3.0) == []
+
+
+def _emptied(confirm_reads=3):
+    urgency = MissileUrgency(confirm_reads=confirm_reads)
+    _observe(urgency, 2, count=confirm_reads)
+    assert _observe(urgency, 0, terminal_zero=True, count=confirm_reads).empty
+    return urgency
+
+
+def test_the_first_count_above_zero_after_empty_shows_the_rearm_before_it_is_confirmed():
+    """Operator, 2026-10-13: "immediate nose up ... after resupply". Measured
+    over 52 rearms: the confirmation came a median 4.6 s after the marker was
+    last seen, the first count above zero 1.5 s after it."""
+    urgency = _emptied()
+    first = _observe(urgency, 4, count=1)
+    assert first.rearm_seen and not first.rearmed and first.empty
+    second = _observe(urgency, 4, count=1)
+    assert second.rearm_seen and not second.rearmed
+    third = _observe(urgency, 4, count=1)
+    assert third.rearmed and not third.empty
+    after = _observe(urgency, 4, count=1)
+    assert not after.rearm_seen and not after.rearmed
+
+
+@pytest.mark.parametrize("misread", [9, 10, 14, 18, 19, 47])
+def test_a_count_no_rack_carries_does_not_show_a_rearm(misread):
+    """The single reads that jumped up and straight back on 2026-10-11 and 10-13."""
+    assert not _observe(_emptied(), misread, count=1).rearm_seen
+
+
+def test_a_count_that_goes_back_to_zero_stops_showing_a_rearm():
+    urgency = _emptied()
+    assert _observe(urgency, 4, count=1).rearm_seen
+    back = _observe(urgency, 0, terminal_zero=True, count=1)
+    assert not back.rearm_seen and not back.rearmed and back.empty
+
+
+def test_a_count_above_the_confirmed_one_shows_a_rearm_only_while_seeking():
+    urgency = MissileUrgency(confirm_reads=3)
+    _observe(urgency, 4, count=3)
+    assert _observe(urgency, 2, count=3).missiles_spent == 2
+    assert not _observe(urgency, 4, resupply_seeking=False, count=1).rearm_seen
+    seeking = _observe(urgency, 4, resupply_seeking=True, count=1)
+    assert seeking.rearm_seen and not seeking.rearmed
+    # The count it already had is no rearm.
+    urgency = MissileUrgency(confirm_reads=3)
+    _observe(urgency, 4, count=3)
+    assert not _observe(urgency, 4, resupply_seeking=True, count=1).rearm_seen
+
+
+def test_an_unreadable_count_shows_nothing():
+    urgency = _emptied()
+    assert not urgency.observe(None, "secondary").rearm_seen
+
+
 def test_unreadable_ammo_breaks_a_confirmation_run_without_losing_priority():
     urgency = MissileUrgency(confirm_reads=3)
     _observe(urgency, 3, count=3)
@@ -351,3 +528,60 @@ def test_emptied_primary_then_secondary_decrease_keeps_adding():
 def test_marker_nearer_than_target_compares_distance_from_the_screen_centre(target_error, nearer):
     marker = ResupplyMarker(1400, 600, 40, 40, 300, 0)      # 440 px right of centre
     assert marker_nearer_than_target(marker, target_error[0], target_error[1], 1920, 1200) is nearer
+
+
+# ---------------------------------------------------------------------------
+# Behind terrain (operator, 2026-10-16): "when resupply is that color it means its
+# behind terrain, in that case it should ignore that target". In view the icon's
+# disc is filled dark; behind terrain it is a duller outline and glyph with the
+# ground showing through. Cut from the operator's screenshots of 23:34:49 and
+# 23:34:50, the aircraft flying at a mountain face it was drawn on.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name", ["resupply_neg_behind_terrain.png",
+                                  "resupply_neg_behind_terrain_near_ring.png"])
+def test_a_resupply_icon_behind_terrain_is_not_returned(name):
+    behind = []
+    assert find_resupply_marker(_live_crop_frame(name, (900, 600)), occluded=behind) is None
+    if name == "resupply_neg_behind_terrain.png":
+        assert len(behind) == 1 and behind[0].fill < 0.5
+
+
+@pytest.mark.parametrize("name, origin", [
+    ("resupply_pos_ring_near.png", (827, 760)), ("resupply_pos_ring_wide.png", (840, 360)),
+    ("resupply_pos_haze.png", (561, 208)), ("resupply_pos_far.png", (1093, 536))])
+def test_a_resupply_icon_in_view_is_its_dark_fill_inside(name, origin):
+    # 0.88 through haze, which lightens part of the disc; 0.96 and more otherwise.
+    assert find_resupply_marker(_live_crop_frame(name, origin)).fill >= 0.8
+
+
+def test_an_icon_in_view_wins_over_a_larger_one_behind_terrain():
+    frame = _live_crop_frame("resupply_neg_behind_terrain.png", (300, 300))
+    far = cv2.imread(str(FIXTURES / "resupply_pos_far.png"))
+    frame[536:536 + far.shape[0], 1093:1093 + far.shape[1]] = far
+    behind = []
+    marker = find_resupply_marker(frame, occluded=behind)
+    assert marker is not None and marker.x == pytest.approx(1173, abs=3)
+    assert len(behind) == 1
+
+
+def test_the_pursuit_logs_a_resupply_icon_behind_terrain(monkeypatch, caplog):
+    from test_pursuit_mode import _make_ctrl
+    ctrl = _make_ctrl(monkeypatch)
+    with caplog.at_level("INFO", logger="wingman.controller"):
+        behind = []
+        find_resupply_marker(_live_crop_frame("resupply_neg_behind_terrain.png", (900, 600)),
+                             occluded=behind)
+        ctrl._note_objective_behind_terrain(behind, "RESUPPLY", "resupply marker")
+        ctrl._note_objective_behind_terrain(behind, "RESUPPLY", "resupply marker")
+        ctrl._note_objective_behind_terrain(behind, "AIRSUP", "control point")
+    lines = [r.getMessage() for r in caplog.records if "behind terrain" in r.getMessage()]
+    assert [m.split(":")[0] for m in lines] == ["RESUPPLY", "AIRSUP"]   # one each, rate-limited
+
+
+def test_the_pursuit_passes_the_occluded_list_to_the_resupply_scan():
+    import inspect
+    from wingman.controller import Controller
+    src = inspect.getsource(Controller.pursue_and_engage)
+    assert "occluded=resupply_behind)" in src
+    assert '"RESUPPLY", "resupply marker")' in src

@@ -51,10 +51,12 @@ _PICK = re.compile(
     r"(?: edges=\S+)?(?: blob=\S+)?(?: clu=(\S+))?")
 _DIED = re.compile(r"DIED ARMED — (\d+) missile\(s\), cause=(\w+)")
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
-# ADR 147: the altitude a chase settles at, and whether mission_su30's -10 degree step ever
+# ADR 147: the altitude a chase settles at, and whether ACS_MISSION's -10 degree step ever
 # holds. The PADLOCK telemetry line lands about every 1.5 s at INFO and carries the altitude.
 _ALT = re.compile(r"Altitude: (\d+) \| Speed: \d+ \| Nose:")
 _FLOOR = re.compile(r"ALTITUDE FLOOR — \d+m below (\d+)m")
+_ACS_HANDOFF = re.compile(r"mission_(?:acs|su30) - step 4/4: activating pursuit mode")
+_ACS_NOSE = re.compile(r"mission_(?:acs|su30) - nose angle")
 
 
 def _when(stamp: str) -> dt.datetime:
@@ -82,7 +84,7 @@ def analyse(lines) -> dict:
                "weapon_presses": 0, "empty_switches": 0, "pursuit_caps": 0, "respawns": 0,
                "died_armed": collections.Counter(), "close_recovery_clicks": 0,
                "roi_follows": 0, "session_summary": [], "floor_events": collections.Counter(),
-               "su30_handoffs": 0, "su30_nose_unconfirmed": 0, "pursuit_alts": [],
+               "acs_handoffs": 0, "acs_nose_unconfirmed": 0, "pursuit_alts": [],
                "lock_runs": [], "lock_dx": [], "lock_dy": []}
     run = 0               # consecutive lock ticks so far
     alts: list = []       # (time, altitude) for every telemetry line
@@ -150,10 +152,11 @@ def analyse(lines) -> dict:
         m = _FLOOR.search(line)
         if m:
             r["floor_events"][int(m.group(1))] += 1
-        if "mission_su30 - step 4/4: activating pursuit mode" in line:
-            r["su30_handoffs"] += 1
-        if "mission_su30 - nose angle" in line and "not confirmed within" in line:
-            r["su30_nose_unconfirmed"] += 1
+        # ADR 160 renamed mission_su30 to mission_acs; older logs carry the old name.
+        if _ACS_HANDOFF.search(line):
+            r["acs_handoffs"] += 1
+        if _ACS_NOSE.search(line) and "not confirmed within" in line:
+            r["acs_nose_unconfirmed"] += 1
         if "switch_weapon - pressing" in line:
             r["weapon_presses"] += 1
         if "selected weapon empty" in line:
@@ -235,7 +238,7 @@ def render(r: dict, name: str = "wingman.log") -> str:
         out.append(f"  nameplate clusters on lock ticks (clu=): {dict(sorted(r['clu'].items())) or 'field absent'}")
         out.append(f"  gate-rejected ticks with some glyphs {r['gate_reject_some_glyphs']}   ROI follows {r['roi_follows']}")
     out.append("")
-    out.append("ALTITUDE (ADR 147: mission_su30 levels off and chases at its own floor, 3000 m)")
+    out.append("ALTITUDE (ADR 147: ACS_MISSION levels off and chases at its own floor, 3000 m)")
     alts = r["pursuit_alts"]
     if alts:
         out.append(f"  pursuit altitude median {alts[len(alts) // 2]} m   10th to 90th percentile "
@@ -244,7 +247,7 @@ def render(r: dict, name: str = "wingman.log") -> str:
     else:
         out.append("  no altitude readings inside a pursuit window")
     out.append(f"  ALTITUDE FLOOR events by floor {dict(sorted(r['floor_events'].items())) or 'none'}"
-               f"   su30 hand-offs {r['su30_handoffs']}, nose angle not confirmed {r['su30_nose_unconfirmed']}")
+               f"   ACS hand-offs {r['acs_handoffs']}, nose angle not confirmed {r['acs_nose_unconfirmed']}")
     out.append("")
     out.append("WEAPON AND LIFE")
     out.append(f"  pursuit caps {r['pursuit_caps']}   switch_weapon presses {r['weapon_presses']}"

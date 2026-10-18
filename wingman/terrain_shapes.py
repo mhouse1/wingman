@@ -74,12 +74,28 @@ class ShapeReading:
     avoid: "str | None" = None      # "left", "right" or "up" for the threat
     tracked: int = 0
     points: np.ndarray = field(default_factory=lambda: np.empty((0, 2), np.float32))
+    # The same dots in the frame before, in the same order (Code Review 019:
+    # the planner fits the growth round its goal from them).
+    points_before: np.ndarray = field(default_factory=lambda: np.empty((0, 2), np.float32))
     blind: bool = False             # something covers the middle and its growth is unknown
     lost: bool = False              # a threat was there and the view has since gone unreadable
+    # The last frame's texture test, for the clear-path HUD (Code Review 019):
+    # 255 where textured, at the tracking scale; where the view sits in the
+    # frame, and that scale. None on a reading that took no outlines.
+    texture: "np.ndarray | None" = None
+    view_origin: "tuple[int, int]" = (0, 0)
+    view_scale: float = 1.0
 
     @property
     def readable(self) -> bool:
         return self.status == "ok"
+
+    @property
+    def free_frac(self) -> "float | None":
+        """Share of the analysed view that is not textured, or None."""
+        if self.texture is None or not self.texture.size:
+            return None
+        return 1.0 - float(np.count_nonzero(self.texture)) / float(self.texture.size)
 
     @property
     def middle(self) -> "Shape | None":
@@ -306,7 +322,10 @@ class TerrainShapes:
             status="ok", span_s=span_s, frames=n, shapes=tuple(shapes), threat=threat,
             avoid=None if threat is None else self._way_out(solid, centre),
             tracked=len(after), points=to_frame(after) if len(after) else
-            np.empty((0, 2), np.float32), blind=blind, lost=lost)
+            np.empty((0, 2), np.float32),
+            points_before=to_frame(before) if len(before) else np.empty((0, 2), np.float32),
+            blind=blind, lost=lost,
+            texture=tex_last, view_origin=(ox, oy), view_scale=s)
 
     def update(self, reading: "ShapeReading | None") -> bool:
         """Advance the cross-tick confirm; the shadow verdict.

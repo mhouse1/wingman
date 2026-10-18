@@ -20,6 +20,7 @@ from wingman.controller import (
 )
 from tests.perception_fake import PerceptionFake
 from wingman.state import GameState
+from wingman.telemetry import TelemetrySignal
 
 CLIMB_KEYS = {NOSE_UP_KEY, AFTERBURNER_KEY}
 
@@ -42,10 +43,13 @@ class _AltSignal:
 
 
 class _Snapshot:
-    def __init__(self, stable_value, ts, fresh=True, angle=None):
+    def __init__(self, stable_value, ts, fresh=True, angle=None, speed=None):
         self.altitude = _AltSignal(stable_value, ts)
         self._fresh = fresh
         self._angle = angle
+        # Cycle 21: the speed as the real snapshot carries it (None: no reading).
+        self.speed = (None if speed is None else
+                      TelemetrySignal(value=speed, stable_value=speed, ts=ts, rate=0.0))
 
     def altitude_fresh(self):
         return self._fresh
@@ -63,14 +67,15 @@ class _FakeTelemetryAnalyzer(PerceptionFake):
     # starting state, GAME_UNKNOWN).
     game_state = GameState.GAME_BATTLE
 
-    def __init__(self, stable_value=None, ts=None, fresh=True, fuel=None, angle=None):
+    def __init__(self, stable_value=None, ts=None, fresh=True, fuel=None, angle=None,
+                 speed=None):
         self._lock = threading.Lock()
         self._fuel = fuel
-        self.set(stable_value, ts, fresh, angle)
+        self.set(stable_value, ts, fresh, angle, speed)
 
-    def set(self, stable_value, ts, fresh=True, angle=None):
+    def set(self, stable_value, ts, fresh=True, angle=None, speed=None):
         with self._lock:
-            self._snap = _Snapshot(stable_value, ts, fresh, angle)
+            self._snap = _Snapshot(stable_value, ts, fresh, angle, speed)
 
     def set_fuel(self, fuel):
         with self._lock:
@@ -1502,3 +1507,117 @@ def test_the_turn_sampler_keys_on_the_reading_not_the_call():
     assert 'getattr(_snap.speed, "ts", None)' in src
     assert "taken_at_s" not in src.split("_last_ts[0]")[0].split("_ts = ")[-1], \
         "taken_at_s changes every call and cannot deduplicate"
+
+
+
+# ---------------------------------------------------------------------------
+# Code Review 019 cycle 21 (ADR 159 amendment): a dive too fast to pull out of
+# brakes at any angle. Over the emergency climbs of 2026-10-17 the nose came up a
+# median 21 deg/s at 400-599 KPH and 3 to 5 deg/s at 1000-1399; at 20:23:37-41
+# the burner the nose-up carried at -29 to -38 degrees took 1067 KPH to 1459.
+# ---------------------------------------------------------------------------
+
+FAST = dict(CFG, emergency_airbrake_above_kph=900, emergency_airbrake_release_kph=750)
+
+
+def test_a_fast_shallow_dive_brakes_instead_of_burning(monkeypatch, caplog):
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=300.0, ts=t0, fuel=100, angle=-25.0, speed=1100)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, FAST)
+    with caplog.at_level("INFO", logger="wingman.controller"):
+        ctrl.climb_mode(emergency=True)
+        time.sleep(0.6)
+    assert _presses(kb, AIRBRAKE_KEY), "a -25 deg dive at 1100 KPH never braked"
+    assert ctrl._climb_emergency_active
+    assert any("at 1100 KPH is too fast to pull out of" in r.getMessage() for r in caplog.records)
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
+def test_the_fast_dive_brake_holds_down_to_the_release_then_lets_the_burner_in(monkeypatch, caplog):
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=300.0, ts=t0, fuel=100, angle=-25.0, speed=1100)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, FAST)
+    with caplog.at_level("INFO", logger="wingman.controller"):
+        ctrl.climb_mode(emergency=True)
+        time.sleep(0.4)
+        analyzer.set(300.0, t0 + 0.1, angle=-25.0, speed=800)     # under 900, over 750
+        time.sleep(0.5)
+        assert ctrl._climb_emergency_active, "let go above the release speed"
+        analyzer.set(300.0, t0 + 0.2, angle=-20.0, speed=700)
+        time.sleep(0.6)
+    assert not ctrl._climb_emergency_active
+    assert _releases(kb, AIRBRAKE_KEY)
+    assert any("700 KPH is slow enough" in r.getMessage() for r in caplog.records)
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
+def test_a_slow_shallow_dive_still_carries_the_burner(monkeypatch):
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=300.0, ts=t0, fuel=100, angle=-25.0, speed=600)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, FAST)
+    ctrl.climb_mode(emergency=True)
+    time.sleep(0.6)
+    assert _presses(kb, AFTERBURNER_KEY) and not _presses(kb, AIRBRAKE_KEY)
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
+def test_a_fast_climb_does_not_brake(monkeypatch):
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=300.0, ts=t0, fuel=100, angle=10.0, speed=1100)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, FAST)
+    ctrl.climb_mode(emergency=True)
+    time.sleep(0.6)
+    assert not _presses(kb, AIRBRAKE_KEY)
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
+def test_without_the_speed_limit_a_fast_shallow_dive_burns_as_before(monkeypatch):
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=300.0, ts=t0, fuel=100, angle=-25.0, speed=1100)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, CFG)
+    ctrl.climb_mode(emergency=True)
+    time.sleep(0.6)
+    assert _presses(kb, AFTERBURNER_KEY) and not _presses(kb, AIRBRAKE_KEY)
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
+def test_a_non_emergency_climb_never_brakes_however_fast(monkeypatch):
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=300.0, ts=t0, fuel=100, angle=-25.0, speed=1300)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, FAST)
+    ctrl.climb_mode(emergency=False)
+    time.sleep(0.6)
+    assert not _presses(kb, AIRBRAKE_KEY)
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+
+
+
+def test_a_dive_that_ends_is_released_as_no_longer_a_dive(monkeypatch, caplog):
+    """21:11:57: the brake let go at +90 deg and the line said '1090 KPH is slow
+    enough'; the release was the dive ending, not the speed."""
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=300.0, ts=t0, fuel=100, angle=-25.0, speed=1100)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, FAST)
+    with caplog.at_level("INFO", logger="wingman.controller"):
+        ctrl.climb_mode(emergency=True)
+        time.sleep(0.4)
+        analyzer.set(300.0, t0 + 0.1, angle=30.0, speed=1090)
+        time.sleep(0.6)
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("path +30 deg is no longer a dive: airbrake released" in m for m in messages)
+    assert not any("slow enough" in m for m in messages)
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)

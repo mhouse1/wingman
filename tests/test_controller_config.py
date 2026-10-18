@@ -106,32 +106,17 @@ def test_tuning_values_are_no_longer_constructor_arguments():
         Controller((0, 0, 1920, 1200), disable_hotkeys=True)
 
 
-def test_su30_floor_is_a_lowering_and_sits_at_or_below_its_own_level_off(shipped_cfg):
-    """ADR 147. mission_su30 levels off at climb_alt_m, below the tree's floor, so it
+def test_acs_floor_is_a_lowering_and_sits_at_or_below_its_own_level_off(shipped_cfg):
+    """ADR 147. mission_acs levels off at climb_alt_m, below the tree's floor, so it
     carries its own floor. Above climb_alt_m the tree would restart the climb the
     script just stopped (the 2026-09-24 18:59:27 incident); at or above the tree's
     floor it would override nothing. Either drift is a config mistake this catches."""
-    su30 = shipped_cfg["su30_mission"]
+    acs = shipped_cfg["acs_mission"]
     tree_floor = shipped_cfg["behavior_tree"]["climb"]["alt_floor_m"]
-    assert su30["alt_floor_m"] <= su30["climb_alt_m"]
-    assert su30["alt_floor_m"] < tree_floor
+    assert acs["alt_floor_m"] <= acs["climb_alt_m"]
+    assert acs["alt_floor_m"] < tree_floor
 
 
-def test_the_shipped_su30_floor_reaches_the_controller(shipped_cfg):
+def test_the_shipped_acs_floor_reaches_the_controller(shipped_cfg):
     cc = ControllerConfig.from_config(shipped_cfg)
-    assert cc.su30["alt_floor_m"] == shipped_cfg["su30_mission"]["alt_floor_m"]
-
-
-def test_f111_floor_is_a_lowering_and_sits_at_or_below_its_own_level_off(shipped_cfg):
-    """ADR 149 extends ADR 147's relation to mission_f111's own block: its floor at
-    or below its level-off (above it the tree restarts the climb the script just
-    stopped) and below the tree's floor (otherwise it overrides nothing)."""
-    f111 = shipped_cfg["f111_mission"]
-    tree_floor = shipped_cfg["behavior_tree"]["climb"]["alt_floor_m"]
-    assert f111["alt_floor_m"] <= f111["climb_alt_m"]
-    assert f111["alt_floor_m"] < tree_floor
-
-
-def test_the_shipped_f111_floor_reaches_the_controller(shipped_cfg):
-    cc = ControllerConfig.from_config(shipped_cfg)
-    assert cc.f111["alt_floor_m"] == shipped_cfg["f111_mission"]["alt_floor_m"]
+    assert cc.acs["alt_floor_m"] == shipped_cfg["acs_mission"]["alt_floor_m"]

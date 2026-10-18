@@ -2470,66 +2470,6 @@ def test_each_kind_counts_against_its_own_budget(tmp_path):
     assert len(list(tmp_path.glob("rtb_*.png"))) == 1
 
 
-# --- ADR 110: the combat branch yields to a survival hold ---------------------
-
-def test_the_combat_branch_is_gated_at_the_actuation():
-    """2026-09-04: a five-minute loiter took 203 EngageNav commands. `_may_fly`
-    only asks whether a mission is running, and loiter IS one — so the navigator
-    steered at the enemy throughout a hold whose objective is to stay away from
-    it, toward long-ring contacts sitting at the arena edge.
-
-    Gated at the actuation rather than in the conditions, so the tree still
-    reports what it would have chosen."""
-    import inspect
-    from wingman.tick_handlers import BehaviorTreeHandler
-    src = inspect.getsource(BehaviorTreeHandler)
-    assert "_combat_ok = _may_fly and not snap.survival_hold" in src
-    assert "if _combat_ok and selection in (TACTIC_ENGAGE, TACTIC_REGROUP):" in src
-    # BOTH callers of _actuate_engage. The ADR 028 rev 5 path steers roll while
-    # Climb owns pitch, and loiter climbs — so Climb is the selection for most
-    # of a hold. Gating only the Engage/Regroup branch let 9 EngageNav commands
-    # through on 2026-09-04 15:31.
-    assert src.count("self._actuate_engage(") == 2, "a third caller needs gating too"
-    assert "if not snap.survival_hold:\n                self._actuate_engage(" in src
-
-
-def test_disengage_cannot_cancel_a_survival_hold():
-    """`disengage_roll_right` opens with cancel_mission(), and the condition is
-    30 s without an enemy — exactly the state a survival hold produces. Without
-    this gate loiter is built to eventually cancel itself."""
-    from wingman.tick_handlers import BehaviorTreeHandler
-    h = BehaviorTreeHandler.__new__(BehaviorTreeHandler)
-    calls = []
-    h._ctrl = type("C", (), {
-        "is_survival_hold": staticmethod(lambda: True),
-        "disengage_roll_right": staticmethod(lambda: calls.append("fired")),
-    })()
-    h._enemy_last_seen_ts = 0.0
-    h._start_disengage()
-    assert calls == [], "Disengage cancelled the mission during a survival hold"
-
-    h._ctrl = type("C", (), {
-        "is_survival_hold": staticmethod(lambda: False),
-        "disengage_roll_right": staticmethod(lambda: calls.append("fired")),
-    })()
-    h._start_disengage()
-    assert calls == ["fired"], "Disengage must still work outside a hold"
-
-
-def test_boundary_turn_stays_live_during_a_hold():
-    """Staying in bounds is the one steering job the hold does NOT take over —
-    it is why gating Regroup costs nothing.
-
-    ADR 139 D5: the per-tick range/bearing recording moved to
-    BoundaryPerceptionHandler.record_turn_tick(), but the actuation-gating
-    stop check below is what this test actually guards, and it stays here."""
-    import inspect
-    from wingman.tick_handlers import BehaviorTreeHandler
-    src = inspect.getsource(BehaviorTreeHandler)
-    turn = src.split("if (selection != TACTIC_BOUNDARY_TURN")[1][:300]
-    assert "survival_hold" not in turn
-
-
 def test_trace_writer_records_on_the_same_edge_as_the_selection_log():
     """Design 012: the JSONL trace is a third sink on the exact selection-
     change edge that already drives the BT[...] INFO log line — never a
@@ -3152,23 +3092,6 @@ def test_seek_center_shadow_log_is_rate_limited():
         th.logger.info = real_info
 
 
-def test_seek_center_branch_carries_its_own_survival_hold_gate():
-    """HLDD 013: unlike Climb, TACTIC_ATTACK_SUPPORT has no other reason to
-    run during a hold, so the exclusion belongs in this branch's own
-    condition rather than a separate inner check — the same regression
-    class ADR 110 already fixed once for Climb (9 EngageNav commands
-    reaching a loitering aircraft, 2026-09-04)."""
-    import pathlib
-    src = pathlib.Path("wingman/tick_handlers.py").read_text()
-    marker = "and selection == TACTIC_ATTACK_SUPPORT):"
-    assert marker in src
-    branch_start = src.index("elif (_may_fly and not snap.survival_hold")
-    condition = src[branch_start:src.index(marker) + len(marker)]
-    assert "not snap.survival_hold" in condition
-    branch = src[branch_start:src.index("return False", branch_start)]
-    assert "self._actuate_seek_center(_b_dist, _b_fwd, _b_lat)" in branch
-
-
 def test_seek_center_reuses_this_ticks_destructured_boundary_locals():
     """HLDD 013: must reuse the _b_dist/_b_fwd/_b_lat locals tick() already
     destructured from self._boundary.perceive() this tick, not redo the
@@ -3280,3 +3203,52 @@ def test_the_tree_records_the_navigation_roll_it_commanded():
     assert bt.last_nav_roll is not None
     assert bt.last_nav_roll["dir"] == "right"      # the ctrl stub always answers "right"
     assert bt.last_nav_roll["kind"] == "steer" and bt.last_nav_roll["mode"] == "regroup"
+
+
+class TestKillCardHook:
+    """Code Review 019 cycle 19: the respawn handler hands the kill card reader
+    each frame of a latched respawn screen and closes the death when gameplay
+    resumes; re-detections inside the restart cooldown are not a new death."""
+
+    class _Card:
+        def __init__(self):
+            self.frames = []
+            self.ends = 0
+
+        def submit(self, frame):
+            self.frames.append(frame)
+
+        def end(self):
+            self.ends += 1
+
+    @staticmethod
+    def _gs(respawning=True):
+        return {"is_respawning": respawning, "respawn_confidence": 1.0}
+
+    def test_each_respawn_screen_frame_is_read_and_the_death_closed_once(self):
+        h, a, c = _respawn()
+        card = self._Card()
+        h._kill_card = card
+        first, second = object(), object()
+        h.tick_detect(first, self._gs(True), GameState.GAME_BATTLE)
+        h.tick_detect(second, self._gs(True), GameState.GAME_BATTLE)
+        assert card.frames == [first, second]
+        h.note_gameplay_resumed()
+        h.note_gameplay_resumed()
+        assert card.ends == 1
+
+    def test_a_re_detection_inside_the_cooldown_is_not_read(self):
+        h, a, c = _respawn()
+        card = self._Card()
+        h._kill_card = card
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)
+        h.note_gameplay_resumed()
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE)   # cooldown
+        assert len(card.frames) == 1 and card.ends == 1
+
+    def test_no_respawn_reads_nothing(self):
+        h, a, c = _respawn()
+        card = self._Card()
+        h._kill_card = card
+        h.tick_detect(object(), self._gs(False), GameState.GAME_BATTLE)
+        assert card.frames == []

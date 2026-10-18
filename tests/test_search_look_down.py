@@ -52,7 +52,7 @@ def _make_ctrl(monkeypatch, analyzer, *, search_floor=2300.0, pulse=0.15, captur
             simulate_os_input=True,
             disable_hotkeys=True,
             climb={"alt_floor_m": 4000},
-            su30={"alt_floor_m": 3000},
+            acs={"alt_floor_m": 3000},
             tracking={"sustained_hold_enabled": True, "pitch_lead_s": 0.0},
             pursuit_mode={"enabled": True, "pursuit_max_duration_s": 0.0,
                           "pursuit_padlock_verify": False, "ammo_zero_grace_s": 0.0,
@@ -63,7 +63,7 @@ def _make_ctrl(monkeypatch, analyzer, *, search_floor=2300.0, pulse=0.15, captur
                           "search_look_down_min_deg": -20.0},
         ),
     )
-    ctrl._set_last_mission("su30")
+    ctrl._set_last_mission("acs")
     return ctrl
 
 

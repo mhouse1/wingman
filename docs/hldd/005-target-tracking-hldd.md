@@ -2254,6 +2254,233 @@ measured: the steadier hold flies through low objectives more often (resupply fl
 so the aircraft is armed more of the time), and those are where the ground is. Terrain avoidance owns that, not
 a limit on this hold (operator, 2026-10-02).
 
+### Change 3: the rate is learned (2026-10-14, uncommitted on `d45d4c5`)
+
+Operator, 2026-10-14, on a jet that flies faster: "an auto adjusting rate is
+better". `tracking.hold_model.learn_rate`: each axis learns its rate from the
+pictures, between 0.1 and 1.3 times the configured rate. A picture pair with no
+key held updates the target's own motion; a pair with key time updates the rate,
+the travel the keys made with that motion taken out, against the key time held,
+over about the last 5 s of steering. The press lines end in `rate=`.
+
+Before, on that jet with the fixed rates (2026-10-14 04:56 to 06:11, `make r2`,
+account 2, 12 missions; measured):
+
+| Measure | Value |
+|---|---|
+| Travel per second of key, isolated pulses | pitch 0.17 to 0.23, roll 0.10 to 0.26 (fixed rates 1.15 and 0.4) |
+| Settled lock inside 0.05 / 0.10, both axes | 33% / 67% (the 10-11 jet: 50% / 86%) |
+| 90th percentile of the error on a settled lock, x / y | 0.14 / 0.23 (the 10-11 jet: 0.10 / 0.09) |
+| Close resupply passes, picked up | 0 of 5 |
+
+One of those passes, 05:37:03 to 05:37:09: 16 nose-down holds in a row let go
+after 0.08 to 0.33 s, by the timer or the prediction, with the marker 40 to 60 px
+below the bore sight, and the aircraft flew over it at 1,300 KPH.
+
+Simulated on a plant shaped like the measured pulse response: a jet answering at
+0.2 is learned as 0.21 to 0.40, and a marker sinking below the nose is held at a
+median 0.100 instead of 0.175. A jet answering at 1.5 is learned low, 0.97 to
+1.21, with more reversals on a weaving target (47 against 32 percent): the cost
+to watch on a fast-answering jet.
+
+What the next run should show: `rate=` falling toward 0.2 on pitch within the
+first minute of steering, the settled-lock figures above improving, and pickups
+on close passes.
+
+### Live check 3: roll cannot be learned this way (2026-10-14 06:25 to 06:37, measured)
+
+`make r2`, account 2, the same fast jet, 11 min 51 s, 2 missions, stopped with `z`
+after the finding below. No close resupply pass was classified, so the run says
+nothing about pickups.
+
+| Axis | Learned rate seen on the press lines | Longest hold planned |
+|---|---|---|
+| Pitch | 0.11 to 0.89, mostly 0.14 to 0.50; at the 0.115 floor at 06:28:50 and 06:35:04, both in pursuit dives | 7.12 s (06:28:50, `err_y=+0.834`) |
+| Roll | 0.40 to the 0.04 floor by 06:28:12, and again at 06:37:04 | 22.76 s (06:29:09, `err=-0.922`) |
+
+Why roll falls to its floor: the roll key banks the aircraft, and the bank turns
+the picture about the bore sight. How far that moves a target across the screen
+depends on where the target is, and a target below the bore sight moves away
+from the side being rolled to. 06:27:40.668 to 06:27:42.4: roll right held, the
+target right of the bore and below it, TRACKPICK x went 1078, 1090, 1106, 1119,
+1131, 1140, 1161, 1173, 1194, further right on every picture, while y rose from
+679 to 636. The learner read that as the keys moving the target backwards.
+`tests/test_hold_model.py::test_a_bank_that_carries_the_target_round_is_not_learned_on_roll`
+replays those pictures.
+
+Change: the switch is per axis, `learn_pitch_rate: true` and
+`learn_roll_rate: false`. Roll keeps the fixed 0.4. Pitch's floor episodes are
+the next thing to watch: a hold of several seconds planned on a dive's large
+error, which the next steering tick replans, but which holds the key until the
+picture or the prediction ends it.
+
+### Live check 4: pitch learned, roll fixed (2026-10-14 06:44 onward, first 18 min, measured)
+
+`make r2`, account 2, the same jet, still running when this was written.
+
+| Measure | Value |
+|---|---|
+| Learned pitch rate on the press lines | 0.13 to 0.65; 06:44 to 06:51, p10 0.34, median 0.44, p90 0.63 over 65 presses |
+| Roll rate | 0.40 on every press, as configured |
+| Rearms confirmed by the objective tally | 3 (06:53:06, 06:57:08, 06:59:54), against 0 of 5 close passes in the fixed-rate session |
+
+Three rearms are too few to call; the comparison needs a longer run.
+
+By 08:14 (90 minutes), from each climb-out and the counts around it:
+
+| Outcome | Count | Notes |
+|---|---|---|
+| Rearm, confirmed | 5 | 4 by the objective tally; 08:03:20 by both racks reading 0 and then 4 with no respawn (the death 8 s later is taken to have cut off the tally) |
+| Rearm by the count only | 3 | 06:54:24 (48 s after a respawn, so possibly the fresh rack), 07:14:29, 08:11:32 (1 to 4, no respawn) |
+| Miss | 2 | 06:59:19 passed under the point; 08:02:21 passed 854 px wide |
+| Approach broken by the climb-out | 1 | 07:51:22: the marker dropped out for 0.6 s twice within 130 px of the bore sight, the second gap signed a pass, and the climb-out pushed the marker off the bottom of the frame |
+| Climb-out on a respawn's fresh rack | 1 | 08:01:11.5, 0.4 s before the respawn was detected |
+
+08:14 to 08:54 added: 2 more rearms by the count (08:45:23, the selected
+secondary 1 to 2, possibly a misread; 08:51:56, 1 to 4 on a pass signed 860 px
+wide, so most likely flown through just before), 2 more misses (08:34:42 at
+282 px, 08:44:29 at 383 px) and a second broken approach (08:53:21, both racks
+empty, the marker 72 px off). Both broken approaches had the marker gone for
+1.3 to 1.4 s counting the time after the pass, against the 0.5 s
+`pass_trigger.missing_s` that signs one; that is the next change to make.
+
+09:19 to 09:22: a rearm at 09:19:03 (both racks 0, then 4, no respawn) got no
+climb-out, and the switch to the refilled secondary 12 s later read `count 2`
+and started one in the middle of the fight (09:19:15): the late climb-out after
+a rack switch, still unguarded. 09:22:07, a lined-up pass 91 px off with the
+selected secondary already full and the primary empty, cannot be judged: a
+refill of the rack not selected does not show on the HUD, and the aircraft died
+7 s later.
+
+09:25 to 09:55: rearms by the count at 09:25:03 (both racks 0, then 4) and
+09:40:40 (2 to 4, a partial refill); one confirmed by the tally at 09:50:27 (1
+to 4, a pass 111 px off); a miss at 09:28:39 (499 px wide); and a second
+climb-out after a rack switch, 09:43:29, where the secondary's `count 1` after
+the switch press read as a rearm.
+
+Totals 06:44 to 09:55 (3 h 11 min): 6 rearms confirmed, 8 by the count, 5
+misses, 2 approaches broken by the climb-out, 3 climb-outs that were not after
+a rearm (one on a respawn's fresh rack, two after a rack switch), and one pass
+that cannot be judged.
+
+09:55 to 10:25 added a confirmed rearm (10:15:26, 1 to 4 on a pass 229 px off)
+and two misses, both wide (10:03:43 at 454 px, 10:09:13 at 552 px). Of the 7
+misses so far, 6 passed 280 to 860 px wide and one passed under the point.
+
+10:25 to 10:55: a confirmed rearm (10:50:44, 0 to 4 on a pass 81 px off); four
+by the count (10:38:40, 10:45:15, 10:48:56, 10:53:51; the last read 4 on the
+rack selected after a switch, 14 s after the 10:53:37 pass counted as a miss,
+so that miss may have been a pickup the HUD did not show); three wide misses
+(10:42:03 at 864 px, 10:42:29 at 438 px, 10:53:37 at 537 px); and a third
+broken approach (10:44:07, 133 px off, the marker back 1.1 s after the pass).
+
+Totals 06:44 to 10:55 (4 h 11 min): 8 rearms confirmed, 12 by the count, 10
+misses (9 wide or under, one perhaps a pickup), 3 broken approaches, 3
+climb-outs not after a rearm.
+
+10:55 to 11:25:
+- **A pickup the HUD did not show.** 10:57:20, a lined-up pass (109 px off)
+  with the secondary selected and full: no count changed. The primary read 4
+  when it came back after the 10:57:53 switch, and the tally confirmed the
+  rearm at 10:57:57. The 10:53:37 "miss" fits the same case.
+- **The count-triggered climb-out comes late when the refill lands on the rack
+  not selected.** The 10:57:20 rearm's climb-out began at 10:57:54, 34 s later,
+  when the switch brought the refilled rack up.
+- **A misread starts a climb-out.** 11:05:19 read `count 5`, which no rack
+  holds, then 0; `REARM_SIGN_MAX_COUNT` (8) lets it through. Misreads of 7, 9
+  and 72 were seen during the run.
+- A confirmed rearm at 11:05:54 (the secondary 0 to 2, a pass 208 px off).
+
+Totals 06:44 to 11:25 (4 h 41 min): 10 rearms confirmed, 12 by the count, 9
+or 10 misses, 3 broken approaches, 5 climb-outs not after a rearm (one on a
+respawn, three after a rack switch, one on a misread). 11:26:41 added a fourth
+after a rack switch (the secondary's 2 read 2 s after the switch press), and
+nothing else by 11:55. 11:55 to 12:25: a confirmed rearm (12:14:14, 0 to 4 on
+a pass 81 px off) and three wide passes (12:00:36 at 626 px, 12:02:18 at 580
+px, 12:23:55 at 575 px). 12:25 to 12:55: two confirmed rearms (12:38:08 and
+12:55:25), each shown only when a switch brought up the refilled rack, so the
+12:37:47 pass counted as 931 px wide was in fact a pickup: a "miss" made just
+after a switch may be one the HUD did not show, and the miss count is an upper
+bound. A fourth broken approach at 12:50:15 (114 px off, the marker back 0.9 s
+after the pass).
+
+Totals 06:44 to 12:55 (6 h 11 min): 13 rearms confirmed, 12 by the count, at
+most 13 misses, 4 broken approaches, 6 climb-outs not after a rearm.
+12:55 to 13:25 added a confirmed rearm (12:56:32, 95 px off) and a near miss
+(13:19:59, 142 px off, the rack at 1). 13:25 to 13:55: two lined-up passes that
+cannot be judged (13:34:46 at 81 px, 13:49:05 at 68 px; the secondary selected
+and full each time, and a death within 7 s), and a rearm by the count (13:52:14,
+the secondary 1 to 2 after a pass 122 px off). 13:55 to 14:25: a fifth broken
+approach (14:25:28, 97 px off, the marker back 0.8 s after the pass).
+
+Totals 06:44 to 14:25 (7 h 41 min): 14 rearms confirmed, 13 by the count, at
+most 14 misses, 5 broken approaches, 6 climb-outs not after a rearm, 3 passes
+that cannot be judged. 14:25 to 14:55 added three rearms by the count
+(14:42:14, 14:48:01, 14:51:18), each followed by a death within 8 s; 14:55 to
+15:25 three more (14:58:47 at 105 px, 15:00:21 at 122 px, 15:01:47).
+
+Session totals 06:44 to 16:57 (10 h 13 min, 103 rounds, 496 respawns), from
+the log: 16 rearms confirmed by the objective tally, 70 climb-outs (48 started
+at a signed pass, 22 by the count). The count-only rearms and the misses after
+14:55 were not classified one by one; the patterns above held. The operator
+stopped the session with Backspace at 17:45:49 (11 h 01 min, 110 missions).
+
+**Against the fixed-rate session** (04:56 to 06:11, 12 rounds; the same
+scripts on both logs, the same jet and account):
+
+| Measure | Fixed rates | Pitch learned |
+|---|---|---|
+| Settled lock inside 0.05, both axes | 33% | 45% |
+| Settled lock inside 0.10, both axes | 67% | 77% |
+| Vertical error, median / 90th percentile | 0.053 / 0.230 | 0.042 / 0.128 |
+| Horizontal error, median / 90th percentile | 0.042 / 0.140 | 0.036 / 0.146 |
+| Close resupply passes, count rose | 0 of 5 | 20 of 38 (53%); 8 died before the tally confirmed |
+| Rearms confirmed by the tally, per round | 0.17 (2 of 12) | 0.15 (16 of 109) |
+| Deaths per hour | 37 | 49 |
+| Armed deaths per round, terrain / enemy fire | 2.7 / 0.25 | 1.3 / 1.15 |
+
+The vertical figures and the close-pass pickups improved (0 of 5 at a true 53
+percent has a chance of about 2 percent); horizontal, which still uses the
+fixed roll rate, did not move. Confirmed rearms per round did not change, and
+the death mix moved from terrain to enemy fire, which the 12-round baseline
+cannot separate from a change of opponents.
+
+**Deaths after a climb-out are mostly terrain, and come from the dive into the
+point.** Of 60 climb-outs by 14:55, 31 were followed by a death within 12 s,
+against about 15 percent for any 12 s window (384 deaths in 8 h 11 min). Of the
+19 of those classed as died armed, 14 were terrain (74 percent, against 43
+percent of all classified armed deaths in the session). The aircraft was
+already beyond recovery when the climb-out began: at 14:42:14 it was at 495 m,
+nose -34 degrees, 1,703 KPH, descending at 263 m/s; at 10:53:51, 2,389 m
+descending at 229 m/s; at 12:14:10 the shadow looming check had just reported
+0.9 s to contact. Each time the climb-out's nose-up yielded at once to the dive
+recovery (`yield to dive recovery`). The operator's call of 2026-10-02 puts
+low-rearm crashes with terrain avoidance rather than a limit on the resupply
+steering, so this is evidence for that work, not a change here.
+
+Three things seen in the same minutes, not acted on:
+
+- **A closing approach runs low.** 06:59:14 to 06:59:18: the marker sat 30 to 40
+  px above the bore sight for 3 s, every nose-up pulse let go early by the
+  prediction (`lead err_y=-0.052 pred=-0.004`), while the marker kept rising in
+  the picture as the range closed, then left the top of the frame. The aircraft
+  passed under it. The learned pitch rate fell 0.29 to 0.21 over those seconds,
+  which is the closing geometry read as a slow airframe.
+- **A marker read at the frame's bottom edge drives a long hold.** 06:59:18.9:
+  the marker read (1200, 1117), `err_y=+0.862`, and a 6.84 s nose-down hold was
+  planned at 0.13 at about 950 m. The climb-out from the signed pass replaced
+  it 0.6 s later.
+- **Long roll holds come from the motion floor, not the rate.** At the fixed
+  0.40, roll holds of 3.2 to 6.1 s were planned (06:52:29 `err=+0.407`): a
+  target moving away cuts the closing rate to its floor, 0.25 times the rate.
+  Pitch shows the same at normal learned rates (07:07:14, `rate=0.44`, 3.78 s).
+- **Replanning holds a key through a dive.** 07:30:33.3 to 07:30:37.9: nose-down
+  stayed held 4.5 s, each of 29 steering ticks replanning it, with the target 50
+  to 100 px below the bore sight (y 630 to 663), the nose at -37 to -51 degrees,
+  and the crash recovery standing off because the pursuit had the target in view
+  (ADR 148). The learned pitch rate fell 0.25 to 0.11 over it. The aircraft
+  pulled out at 1030 m and died 7 s later; the log does not say what of.
+
 ## Adaptive Optimization (Future, Non-V1)
 
 This capability is a follow-on optimization phase and is **not required** for initial delivery.

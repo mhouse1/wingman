@@ -34,8 +34,8 @@ detail:
 - **Boundary-turn tuning** (ADR 101-127) — the crossings-per-mission series in
   ADR 106 has stayed flat across nine days of changes as of this document's
   last major revision; the geometry, not the firing rate, is still suspected.
-- **ACS consolidation** (Design 011) — the per-jet missions (su30, jas39,
-  f111) are expected to merge into one ACS mode. Lock confirmation, the
+- **ACS consolidation** (Design 011) — ACS_MISSION (`mission_acs`, ADR 160) is
+  the one ACS mission. Lock confirmation, the
   `BoresightEngage` leaf chosen by the jet profile, and objective selection are
   not built. See [ACS](#acs--autonomy-core-system-design-011-partly-built).
 - **ACS pursuit terrain risk** (Design 015, ADR 148) — the dive guard is off
@@ -182,7 +182,7 @@ The actuation layer. Holds the mission lock, fires keys/clicks, manages the game
 | `_auto_respawn_restart` | Bool: cleared by `End` key or maneuver key press; restored when a mission starts |
 | `_eject_stop` | Event: set by `End` key or respawn detection to abort `eject_and_dive` early |
 | `_game_battle_since` | Timestamp of last `GAME_BATTLE` entry; 2s maneuver-key grace period suppresses false manual-takeover triggers at mission start |
-| `_last_mission` | String (`"j20"` / `"loiter"` / `"su30"` / `"jas39"` / `"f111"`): used by `restart_last_mission()` |
+| `_last_mission` | String (`"j20"` / `"acs"`): used by `restart_last_mission()` |
 | `_target_painting_mode` | Bool: when True, J20 mission includes target-lock painting phase |
 
 **Mission execution** (`mission_j20`) — the scripted maneuver script described
@@ -208,25 +208,19 @@ No scripted maneuver, afterburner schedule, or fixed mission window remains
 in this method — see Cruise Afterburner (ADR 134) below for where afterburner
 scheduling actually lives now, and Behavior Tree for climb/engage/evade/eject.
 
-**Per-jet missions** (`mission_su30`, `mission_f111`, `mission_jas39`). These
-are interim. Each flies one airframe and adds one jet-specific action to shared
-building blocks. They are expected to merge into a single ACS mode (see
-[ACS](#acs--autonomy-core-system-design-011-partly-built) below).
-
-| Mission | Built on | Adds | Spec |
-|---|---|---|---|
-| `mission_su30` | A once-per-life script: climb to `climb_alt_m`, boresight fire loop, set the nose angle, hand over to pursuit | `yield_to_target`: a lock or ring icon during the climb starts the pursuit early | ADR 144/147, `docs/missions/su30.md` |
-| `mission_f111` | The su30 script | Wing sweep: one `w` tap as the climb starts, one more to unsweep at `unsweep_alt_m` or after `unsweep_timeout_s` | ADR 149, `docs/missions/f111.md` |
-| `mission_jas39` | `mission_j20`, the padlock path | Cloak loop: `q` at once, then every `cloak_press_interval_s` | ADR 145, `docs/missions/jas39.md` |
-
-Rules the scripted missions share:
+**ACS_MISSION** (`mission_acs`, ADR 144/147, renamed from `mission_su30` by
+[ADR 160](adr/160-acs-mission-and-j20-are-the-only-missions.md), which also
+removed the loiter, survey, F-111 and JAS39 missions). A once-per-life script:
+climb to `climb_alt_m`, boresight fire loop, set the nose angle, hand over to
+pursuit. `yield_to_target`: a lock or ring icon during the climb starts the
+pursuit early. Spec: `docs/missions/acs.md`.
 
 - **Boresight fire loop.** `start_boresight_engage_loop()` is the weapon-fire
   loop without the padlock loop. It is a separate pair from
-  `start_search_and_destroy_loop()` and shares no state with it. While su30 is
+  `start_search_and_destroy_loop()` and shares no state with it. While acs is
   the mission in play, `is_padlock_blocked()` is true and no padlock logic runs.
 - **Shared steps.** The climb wait, nose-angle step and pursuit hand-off are
-  the `_scripted_*` helpers. The pursuit cancels the mission, so a script ends
+  the `_scripted_*` helpers. The pursuit cancels the mission, so the script ends
   at the hand-off.
 - **Weapon switch.** The spawn weapon stays selected until it reads empty.
   `SWITCH_WEAPON` is a toggle. It is pressed by the missiles-empty response, or
@@ -236,33 +230,13 @@ Rules the scripted missions share:
   2026-10-05): a resupply refills the rack that is not selected without the HUD
   showing it. A rack that shows no count after it is selected presses nothing,
   so two empty racks do not toggle.
-- **Altitude floor (ADR 147).** While su30 or f111 is in play, the tree's hard
-  floor is the mission's own `alt_floor_m`, and the armed sustain climb stands
-  aside (`altitude_floor_override_m`, `sustain_climb_suppressed`).
+- **Altitude floor (ADR 147).** While acs is in play, the tree's hard floor is
+  the mission's own `alt_floor_m`, and the armed sustain climb stands aside
+  (`altitude_floor_override_m`, `sustain_climb_suppressed`).
 
-Apart from `o` (su30) and `y` (loiter), no mission has a hotkey to itself:
+Apart from `o` (acs), no mission has a hotkey to itself:
 `mission.default_mission` picks the mission, and battle entry, the `u` hotkey and
 the no-prior-mission restart all launch it through `_start_default_mission()`.
-
-**Mission execution** (`mission_loiter`) — survival hold, ADR 028-style closed
-loop rather than a script:
-
-```
-acquire _mission_lock
-loop until cancelled:
-    read telemetry altitude
-    stale or missing  → command nothing (a climb ordered blind is still blind)
-    below hold band   → climb_mode()  (ADR 073 owns pitch, fuel floor, duration cap)
-    inside hold band  → periodic roll pulses to hold the turn
-release _mission_lock (in finally)
-```
-
-Altitude buys reaction time and a continuous turn denies a firing solution;
-nothing else contributes to staying alive, so nothing else is in the loop.
-Flares are deliberately absent — they belong to the incoming-missile detector,
-which knows when one is actually inbound. The previous implementation was
-thirteen scripted manoeuvres run once with no feedback, ending after roughly
-ninety seconds wherever the script had left the aircraft.
 
 **Eject and dive** (`eject_and_dive`, ADR 069):
 
@@ -489,18 +463,20 @@ and stall prevention still re-press every tick, which now only renews their leas
 | Owner | Kind | Yields to | Holds over | How it wins | Source |
 |---|---|---|---|---|---|
 | `stall_prevention` | per-tick reflex | manual takeover | everything, including the emergency airbrake | re-press every tick | operator directive, Phase 1 |
-| `cruise` | per-tick reflex | manual takeover, the emergency climb's airbrake | climb, missile evade, eject | re-press every tick | ADR 134 D9, ADR 159 |
+| `cruise` | per-tick reflex | manual takeover, the emergency climb's airbrake, the approach brake (paused, not ended: it re-presses on the first tick after the brake lets go) | climb, missile evade, eject | re-press every tick | ADR 134 D9, ADR 159, Code Review 019 cycle 9 |
 | `evade` (afterburner evade) | per-tick reflex | manual takeover, the emergency climb's airbrake | climb | re-press every 1 s | ADR 128 D7, D8, ADR 159 |
 | `climb` | tactic hold | stops on its stop event; an emergency in a steep dive swaps it for the airbrake | nothing | presses at start, emergency or not | ADR 073, ADR 159 |
 | `missile_evade` | tactic hold | eject (ADR 070 d11) | nothing | presses at start | ADR 070, ADR 075 |
 | `eject_and_dive` | eject sequence | nothing | nothing; its descent control cuts the burner | presses at phase start | ADR 056, ADR 134 D9 |
+| `rearm_climb` | pursuit hold, `pursuit_mode.resupply_priority.rearm_climb_s` after a rearm | manual takeover, the emergency climb's airbrake | nothing; it adds its lease to whoever else holds | presses at the first count that shows the rearm, re-presses every steering tick | operator, 2026-10-13 |
 
 **Airbrake, `AIRBRAKE_KEY`.**
 
 | Owner | Kind | Yields to | Holds over | Source |
 |---|---|---|---|---|
 | `stall_prevention` | per-tick reflex | manual takeover | the emergency airbrake: releases it | operator directive |
-| `climb_emergency` | climb hold, emergency only, and only while the flight path is steeper than `climb.emergency_airbrake_below_deg` (-40): shallower than that it is released and the nose-up carries the afterburner; a missing angle keeps the current state, and a hold that starts with none does not brake | stall prevention | cruise and the afterburner evade, which yield to it | ADR 137, ADR 159 |
+| `climb_emergency` | climb hold, emergency only, and only while the flight path is steeper than `climb.emergency_airbrake_below_deg` (-40) or, in any dive, while the speed is at or above `climb.emergency_airbrake_above_kph` (900) until it is down to `emergency_airbrake_release_kph` (750): otherwise it is released and the nose-up carries the afterburner; a missing angle keeps the current state, and a hold that starts with none does not brake | stall prevention | cruise and the afterburner evade, which yield to it | ADR 137, ADR 159 (amendment 1) |
+| `approach_brake` | pursuit hold while a resupply marker, control point or crown has the steering (`approach_brake.resupply`, `control_point`, `crown`), or with none steering in a dive of `dive_path_deg` (-10) or steeper under `dive_below_m` (3,000 m; `approach_brake.dive`, cycle 27): a fresh speed reading above `approach_brake.cap_kph` starts a dose of (reading - `target_kph`) / `decel_kph_s` seconds, at most `max_dose_s` | manual takeover, any climb (the emergency climb takes the key and releases it), an eject, a missile evade or the afterburner evade, the rearm climb-out, the marker losing the steering | cruise, which pauses for it | Code Review 019 cycles 9 and 27, operator 2026-10-15 |
 
 **Pitch, `NOSE_UP_KEY` and `NOSE_DOWN_KEY`.**
 
@@ -512,7 +488,7 @@ and stall prevention still re-press every tick, which now only renews their leas
 | `climb` | tactic hold | eject, missile evade, a running pursuit unless `pursuit_mode.dive_safety`; a hard emergency inside a pursuit flies through and the pursuit yields (`pursuit_mode.crash_recovery`), until a fresh flight path is level or climbing, capped by `recovery_max_s` | ADR 073, ADR 148 |
 | `spawn_guard` | tactic hold from death to hand-off | a running climb hold, which owns the pitch key | ADR 076 |
 | `tracking_pitch` | pursuit tracking hold | stopped with the mission on cancel | HLDD 005 |
-| mission steps (`nose_up`, `nose_down` verbs) | mission scripts | refused in manual; a mission cancel | ADR 144, ADR 149, ADR 109 |
+| mission steps (`nose_up`, `nose_down` verbs) | mission scripts | refused in manual; a mission cancel | ADR 144 |
 
 **Roll, `ROLL_LEFT_KEY` and `ROLL_RIGHT_KEY`.**
 
@@ -522,7 +498,7 @@ and stall prevention still re-press every tick, which now only renews their leas
 | `boundary` | tactic hold | eject, missile evade, the turn guard | ADR 107, ADR 132 |
 | `disengage_roll` | tactic hold | takeover and shutdown only (not a mission cancel), the turn guard | SAF-001 2026-09-09 |
 | `tracking_roll` | pursuit tracking hold | stopped with the mission on cancel | HLDD 005 |
-| mission steps (roll verbs, the loiter orbit) | mission scripts | refused in manual; the turn guard; a mission cancel | ADR 111, ADR 132 |
+| mission steps (roll verbs) | mission scripts | refused in manual; the turn guard; a mission cancel | ADR 132 |
 
 **Yaw, `YAW_LEFT`.** `missile_evade` only.
 
@@ -551,7 +527,7 @@ target, engage, assess.
 | Target tracking | `tracker.py` (Design 005) | Live. Senses every battle tick; steers only inside a pursuit |
 | Icon-directed search | `icon_steering.py` (Design 015) | Live inside pursuits |
 | Pursuit | `Controller.pursue_and_engage` (Design 015) | Live, `pursuit_mode.enabled: true` |
-| Boresight firing | `start_boresight_engage_loop()` | Live in the su30 and f111 scripts. Fires on a fixed cadence, with no lock confirmation |
+| Boresight firing | `start_boresight_engage_loop()` | Live in ACS_MISSION. Fires on a fixed cadence, with no lock confirmation |
 | Assess | `PURSUIT SUMMARY` log line | Logged only; no decision reads it |
 | Weapon-lock confirmation | Design 011 `ToneWait` and `LockConfirmed` | Not built: no lock-indicator detector exists |
 | `BoresightEngage` tree leaf, chosen by `has_padlock` | Design 011 | Not built |
@@ -560,12 +536,12 @@ target, engage, assess.
 **How ACS is reached today.** The pursuit starts in two places:
 
 - the missiles-empty response, on any mission;
-- the hand-off at the end of the su30 and f111 scripts.
+- the hand-off at the end of ACS_MISSION's script.
 
-The per-jet missions are interim and are expected to merge into one ACS mode.
 Design 011's end state selects the engagement tactic from the jet profile
-inside the behavior tree. How jet-specific actions such as the JAS39 cloak and
-the F-111 wing sweep fit into that is not designed yet.
+inside the behavior tree. How jet-specific actions such as a cloak or a wing
+sweep fit into that is not designed yet; the per-jet missions that had them
+were removed (ADR 160).
 
 **Normal battle measures, it does not steer.** In `GAME_BATTLE`,
 `tracking.actuate` is `false` and the minimap navigation steers.
@@ -625,8 +601,9 @@ rule stops a recovery from starting on a level or climbing path.
 The recovery executes only after the target or the resupply disappears (operator,
 2026-10-08, `pursuit_mode.crash_recovery_clear_view_s`, shipped at 1.0). Each
 steering cycle the pursuit reports what it is flying at and can see: its target,
-or the resupply marker when the resupply has the steering. The recovery does
-not start until neither has been in view for that long, and a recovery that is
+the resupply marker when the resupply has the steering, or a control point or
+the crown when its marker has the steering (2026-10-12). The recovery does
+not start until none has been in view for that long, and a recovery that is
 flying hands back when one comes into view. Evidence and the cost:
 [Action Item 002](action-item/002-emergency-climb-abandons-resupply.md).
 
@@ -891,12 +868,11 @@ All tunable values live in `wingman/config.yaml`. Key bindings are module-level 
 | `telemetry` | Plausibility bounds, smoothing, `eject_closed_loop` thresholds (ADR 038/067/069) |
 | `nested` | Nested display lane: `enabled`, `display`, `size` (ADR 099). Override one run with `make rd NESTED=0` |
 | `minimap` | Ring mask and EMA, plus `regroup_enabled` and `friendly_hsv` (ADR 028 rev 4) and the Design 010 boundary instrumentation (`boundary_hsv`, `boundary_near_frac`, `boundary_trace_ticks`) |
-| `loiter_mission` | Survival hold: `target_alt`, hysteresis, orbit cadence and hold |
 | `jet_profile` | ACS (Design 011): the active airframe profile and its `has_padlock`, meaning whether the jet uses the padlock to fire. Read at startup; nothing branches on it yet |
 | `tracking` | ACS target tracker (Design 005): acquisition region, HUD exclusion zones, nameplate cluster gates, roll and pitch gains. `actuate: false` keeps it sensing only in normal battle. `battle_priority_shadow` logs `BATTLEPRI:` |
 | `pursuit_mode` | ACS pursuit (Design 015): `enabled`, `pursuit_max_duration_s` (0 = no cap), steering and engage cadences, search-resume delays, ammo confirmation, `dive_safety`, `crash_recovery` and `recovery_max_s` (ADR 148), the `resupply_priority` block (ADR 152), and the `icon_steering` block |
-| `su30_mission`, `f111_mission`, `jas39_mission` | Per-jet mission scripts (interim, see Per-jet missions): climb and nose-angle numbers, `yield_to_target` (su30), wing sweep (f111), cloak interval (jas39) |
-| `mission.default_mission` | Which mission battle entry and the `u` hotkey launch: `su30` (shipped), `j20`, `jas39` or `f111` (ADR 145) |
+| `acs_mission` | ACS_MISSION's script: climb and nose-angle numbers, `alt_floor_m`, `yield_to_target` |
+| `mission.default_mission` | Which mission battle entry and the `u` hotkey launch: `acs` (shipped) or `j20` (ADR 145, ADR 160) |
 | `hud` | Live HUD snapshot output path and archive |
 | `capture_budget` | Free-space floor and per-directory file and size limits for every capture writer |
 | `game_unknown_close` | Close-button recovery (ADR 146): `min_stuck_s`, retry interval, click budget, match score |
@@ -1140,6 +1116,7 @@ held afterburner and pitch key, and the operator could not fly.
 | [151](adr/151-one-actuator-and-throttle-leases.md) | One Actuator, and leases for the throttle (CR-018-09) |
 | [152](adr/152-pursuit-resupply-priority.md) | Escalating resupply priority in pursuit mode |
 | [159](adr/159-the-emergency-climbs-nose-up-carries-the-afterburner.md) | The emergency climb's nose-up carries the afterburner; the airbrake is for a steep dive only |
+| [160](adr/160-acs-mission-and-j20-are-the-only-missions.md) | ACS_MISSION (was mission_su30) and J20 are the only missions; loiter, survey, F-111 and JAS39 removed |
 | [Design 001](hldd/001-terrain-avoidance-hldd.md) | Terrain avoidance: shadow sky-occlusion check, and the Phase 2 motion-based looming design |
 | [Design 011](hldd/011-acs-mode-hldd.md) | ACS: the airframe-independent combat layer |
 | [Design 015](hldd/015-target-tracking-pursuit-mode-hldd.md) | ACS pursuit and icon-directed search |

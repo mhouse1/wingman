@@ -65,8 +65,7 @@ _WATCHED_MANEUVER_KEYS = (NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_
 TOGGLE_WEAPON_LOOP_KEY = 'x'   # toggle the weapon firing loop
 MISSION_J20_KEY = 'u'          # start the configured mission
                                # (mission.default_mission, ADR 145)
-MISSION_LOITER_KEY = 'y'       # start loiter mission
-MISSION_SU30_KEY = 'o'         # start SU-30 mission (docs/missions/su30.md)
+MISSION_ACS_KEY = 'o'          # start ACS_MISSION (docs/missions/acs.md, ADR 160)
 CANCEL_MISSION_KEY = 'end'     # cancel the active mission
 CAPTURE_SCREEN_SHOT = 'v'      # capture a screenshot (testing/debugging)
 AUTO_MISSION_KEY = 'n'         # start unattended mode: click PLAY/READY from the

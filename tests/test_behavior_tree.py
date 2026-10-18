@@ -1623,38 +1623,6 @@ def test_the_bearing_gate_applies_only_to_entry():
     assert c(_bsnap(0.28, +0.001)) is True, "bearing swung, but hold on range"
 
 
-# --- ADR 109: Eject yields to a survival hold ---------------------------------
-
-def test_eject_does_not_fire_during_a_survival_hold(harness):
-    """2026-09-04 09:58:45. With the rack empty during mission_loiter, Eject dove
-    the aircraft at -71 degrees and -660 m/s, logged "climb suppressed — eject in
-    progress" for four seconds while loiter tried to climb, and killed it.
-
-    Loiter's entire objective is staying alive; an empty rack is irrelevant to
-    that. Eject exists to trade a spent aircraft for a rearmed one, which is the
-    opposite trade."""
-    assert tick(harness, make_snap(missiles=0)) == TACTIC_EJECT
-    assert tick(harness, make_snap(missiles=0, survival_hold=True)) != TACTIC_EJECT
-
-
-def test_the_confirmed_eject_path_yields_too():
-    """The debounced condition is what runs once the leaf actuates, so gating
-    only the raw read would leave the live path unchanged."""
-    from wingman.behavior_tree import is_eject_confirmed, is_missiles_empty
-    assert is_missiles_empty(make_snap(missiles=0)) is True
-    assert is_missiles_empty(make_snap(missiles=0, survival_hold=True)) is False
-    assert is_eject_confirmed(make_snap(missiles_empty_confirmed=True)) is True
-    assert is_eject_confirmed(
-        make_snap(missiles_empty_confirmed=True, survival_hold=True)) is False
-
-
-def test_a_survival_hold_does_not_disarm_the_defensive_tactics(harness):
-    """Yielding is specific to Eject. RespawnWait and MissileEvade protect the
-    aircraft rather than spend it, so they still outrank the hold."""
-    assert tick(harness, make_snap(is_respawning=True,
-                                   survival_hold=True)) == TACTIC_RESPAWN_WAIT
-
-
 # --- ADR 120: release on the nearest reading, enter on the filtered one -------
 
 def test_the_turn_does_not_release_on_a_filtered_reading_while_a_near_one_stands():
@@ -1930,7 +1898,7 @@ def test_boundary_condition_state_is_introspectable_via_named_attributes():
 
 # --- ADR 147: a mission's own altitude doctrine -------------------------------
 #
-# Measured 2026-09-24 18:59:27-28: mission_su30 stopped its climb at 3192 m
+# Measured 2026-09-24 18:59:27-28: mission_acs stopped its climb at 3192 m
 # ("altitude 3192 m at or above 3000 m", "climb complete") and the tree started
 # a new climb to 5000 m 1.3 s later, because 3192 m is under both the 4000 m
 # floor and the 4000 m armed sustain band. The -10 degree step then waited behind
@@ -2042,18 +2010,18 @@ class TestSustainSuppression:
         assert sustain(make_snap(altitude=3192.0)) is True
 
 
-class TestSu30LevelOffIsNotRestartedByTheTree:
+class TestAcsLevelOffIsNotRestartedByTheTree:
     """The 2026-09-24 18:59:27 altitude (3192 m, armed, mission running)."""
 
     def test_the_trees_own_doctrine_restarts_the_climb_as_measured(self):
         tree, writer = _doctrine_tree(_Doctrine())
         assert tick((tree, writer), make_snap(altitude=3192.0)) == TACTIC_CLIMB
 
-    def test_with_the_su30_doctrine_the_tree_leaves_the_level_off_alone(self):
+    def test_with_the_acs_doctrine_the_tree_leaves_the_level_off_alone(self):
         tree, writer = _doctrine_tree(_Doctrine(floor=3000.0, suppressed=True))
         assert tick((tree, writer), make_snap(altitude=3192.0)) != TACTIC_CLIMB
 
-    def test_the_su30_floor_still_catches_a_low_aircraft(self):
+    def test_the_acs_floor_still_catches_a_low_aircraft(self):
         tree, writer = _doctrine_tree(_Doctrine(floor=3000.0, suppressed=True))
         assert tick((tree, writer), make_snap(altitude=2900.0)) == TACTIC_CLIMB
 
@@ -2071,7 +2039,7 @@ class TestSu30LevelOffIsNotRestartedByTheTree:
         assert tick((tree, writer), make_snap(altitude=3192.0)) == TACTIC_CLIMB
 
 
-def test_the_handler_gives_the_tree_the_controllers_su30_doctrine(monkeypatch):
+def test_the_handler_gives_the_tree_the_controllers_acs_doctrine(monkeypatch):
     """The wiring, end to end: a real Controller answers the tree's two questions
     through BehaviorTreeHandler, and the answer follows the mission in play."""
     import threading
@@ -2085,7 +2053,7 @@ def test_the_handler_gives_the_tree_the_controllers_su30_doctrine(monkeypatch):
     ctrl = Controller(
         (0, 0, 1920, 1200), exit_event=threading.Event(),
         config=ControllerConfig(simulate_os_input=True, disable_hotkeys=True,
-                                su30={"alt_floor_m": 3000}))
+                                acs={"alt_floor_m": 3000}))
     handler = BehaviorTreeHandler(
         None, ctrl, dict(BT_CFG, mode="shadow", climb=dict(_DOCTRINE_CLIMB)))
     writer = make_snapshot_writer()
@@ -2097,6 +2065,6 @@ def test_the_handler_gives_the_tree_the_controllers_su30_doctrine(monkeypatch):
 
     ctrl._set_last_mission("j20")
     assert selected(make_snap(altitude=3192.0)) == TACTIC_CLIMB
-    ctrl._set_last_mission("su30")
+    ctrl._set_last_mission("acs")
     assert selected(make_snap(altitude=3192.0)) != TACTIC_CLIMB
     assert selected(make_snap(altitude=2900.0)) == TACTIC_CLIMB

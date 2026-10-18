@@ -15,7 +15,7 @@ import time
 import wingman.controller as controller_module
 from wingman.controller_config import ControllerConfig
 from wingman.controller import (
-    Controller, FIRE_ACTIVE_WEAPON, NOSE_DOWN_KEY, NOSE_UP_KEY,
+    AFTERBURNER_KEY, Controller, FIRE_ACTIVE_WEAPON, NOSE_DOWN_KEY, NOSE_UP_KEY,
     ROLL_LEFT_KEY, ROLL_RIGHT_KEY, SWITCH_WEAPON,
 )
 from tests.perception_fake import PerceptionFake
@@ -95,7 +95,7 @@ def _make_ctrl(monkeypatch, analyzer=None, capture=None, pursuit_enabled=False,
                 search_resume_centre_delay_s=0.0, icon_steering=None, dive_safety=None,
                 resupply_priority_enabled=True, resupply_priority_actuate=False,
                 rearm_climb_s=0.0, search_climb_alt_m=0.0, save_candidate_frames=None,
-                priority_target=None, air_superiority=None):
+                priority_target=None, air_superiority=None, pass_trigger=None):
     monkeypatch.setattr(controller_module, "keyboard_module", None)
     return Controller(
         (0, 0, 1920, 1200),
@@ -144,6 +144,8 @@ def _make_ctrl(monkeypatch, analyzer=None, capture=None, pursuit_enabled=False,
                     # Left out unless a test sets it, so the schema default applies.
                     **({"save_candidate_frames": save_candidate_frames}
                        if save_candidate_frames is not None else {}),
+                    # Left out unless a test sets it: off is the schema default.
+                    **({"pass_trigger": pass_trigger} if pass_trigger is not None else {}),
                 },
                 # 0.0 by default here (not config.yaml's shipped 7000): the blind
                 # search rolls, as before; the climb's own tests set it.
@@ -1007,18 +1009,21 @@ def test_the_pursuit_reports_the_resupply_marker_it_flies_to(monkeypatch):
     assert ctrl._pursuit_objective_in_view() is None, "nothing is in view once the pursuit ends"
 
 
-def _rearm_with_a_target_low_and_left(monkeypatch, **ctrl_kwargs):
+def _rearm_with_a_target_low_and_left(monkeypatch, confirm_reads=1, **ctrl_kwargs):
     """Two missiles spent, a marker seen once, then the count rises to 6. The
-    target sits low and left, so target steering rolls left and pushes down."""
+    target sits low and left, so target steering rolls left and pushes down.
+    Each count is read `confirm_reads` times before the next."""
     seen = []
     monkeypatch.setattr(
         controller_module, "find_resupply_marker",
         lambda _frame, **_kw: (seen.append(1) or len(seen) == 1)
         and ResupplyMarker(1400, 600, 70, 70, 1500, 0) or None)
+    script = [4, 2, 2, 6, 6] if confirm_reads == 1 else (
+        [4] * confirm_reads + [2] * confirm_reads + [6] * confirm_reads)
     ctrl = _make_ctrl(
-        monkeypatch, analyzer=_SequenceAnalyzer([4, 2, 2, 6, 6]), capture=_FrameCapture(),
-        pursuit_enabled=True, pursuit_max_duration_s=8.0, empty_confirm_reads=1,
-        **ctrl_kwargs)
+        monkeypatch, analyzer=_SequenceAnalyzer(script), capture=_FrameCapture(),
+        pursuit_enabled=True, pursuit_max_duration_s=8.0,
+        empty_confirm_reads=confirm_reads, **ctrl_kwargs)
     ctrl.set_target_tracker(_TrackerStub(visible=True, error_norm=-0.5, error_norm_y=0.5))
     return ctrl
 
@@ -1040,7 +1045,8 @@ def test_a_rearm_is_followed_by_a_nose_up_hold_then_steering_resumes(monkeypatch
         _wait_for_pursuit_to_settle(ctrl)
 
     rearm_at = logs.index("RESUPPLY: confirmed ammo=6")
-    climb_at = logs.index("RESUPPLY: rearm climb-out, nose up for 0.6s")
+    climb_at = logs.index(
+        "RESUPPLY: rearm climb-out, nose up and afterburner for 0.6s (rearm confirmed)")
     over_at = logs.index("up -> None (rearm climb-out over)")
     assert rearm_at < climb_at < over_at
     climb = logs[climb_at:over_at]
@@ -1068,6 +1074,161 @@ def test_shadow_mode_rearm_has_no_climb_out(monkeypatch, caplog):
     assert "RESUPPLY: confirmed ammo=6" in logs
     assert "climb-out" not in logs
     assert ("key_press", NOSE_UP_KEY) not in keys
+    assert ("key_press", AFTERBURNER_KEY) not in keys
+
+
+def test_the_climb_out_starts_on_the_first_count_that_shows_the_rearm(monkeypatch, caplog):
+    """Operator, 2026-10-13: "immediate nose up with full afterburner for
+    3seconds after resupply". With three reads to confirm a count, as shipped,
+    the climb-out used to start on the third; measured, that was a median 4.6 s
+    after the marker was last seen, against 1.5 s for the first."""
+    caplog.set_level("DEBUG", logger="wingman.controller")
+    ctrl = _rearm_with_a_target_low_and_left(
+        monkeypatch, confirm_reads=3, resupply_priority_actuate=True, rearm_climb_s=0.4)
+
+    ctrl.pursue_and_engage(weapon_already_switched=True)
+    try:
+        time.sleep(4.2)
+        logs = caplog.text
+        keys = _keys(ctrl)
+    finally:
+        ctrl._eject_stop.set()
+        _wait_for_pursuit_to_settle(ctrl)
+
+    climb_at = logs.index("RESUPPLY: rearm climb-out, nose up and afterburner for 0.4s "
+                          "(count 6 read, not confirmed yet)")
+    rearm_at = logs.index("RESUPPLY: confirmed ammo=6")
+    assert climb_at < rearm_at, "the climb-out does not wait for the confirmation"
+    assert logs.count("RESUPPLY: rearm climb-out") == 1, "the confirmation starts no second one"
+    assert "-> up (rearm climb-out)" in logs[climb_at:rearm_at], "pressed at once"
+    assert keys.count(("key_press", NOSE_UP_KEY)) >= 1
+    assert ("key_press", AFTERBURNER_KEY) in keys
+
+
+def test_the_climb_out_holds_the_afterburner_and_lets_it_go(monkeypatch, caplog):
+    caplog.set_level("DEBUG", logger="wingman.controller")
+    ctrl = _rearm_with_a_target_low_and_left(
+        monkeypatch, resupply_priority_actuate=True, rearm_climb_s=0.6)
+
+    ctrl.pursue_and_engage(weapon_already_switched=True)
+    try:
+        time.sleep(2.8)
+        keys = _keys(ctrl)
+        held_after = ctrl._rearm_ab_held
+    finally:
+        ctrl._eject_stop.set()
+        _wait_for_pursuit_to_settle(ctrl)
+
+    press = keys.index(("key_press", AFTERBURNER_KEY))
+    nose = keys.index(("key_press", NOSE_UP_KEY))
+    release = len(keys) - 1 - keys[::-1].index(("key_release", AFTERBURNER_KEY))
+    assert abs(press - nose) <= 2, "the afterburner goes down with the nose-up"
+    assert press < release
+    assert not held_after, "and comes up when the climb-out is over"
+
+
+def _fly_past_a_marker(monkeypatch, caplog, *, sweep, pass_trigger, seconds=5.0,
+                       ammo_script=(0,), rearm_climb_s=0.6):
+    """Every rack empty. The marker sits 25 px right of the centre for 2.6 s from
+    its first scan, then (with `sweep`) moves out for 0.6 s, then is gone."""
+    caplog.set_level("DEBUG", logger="wingman.controller")
+    first = []
+
+    def _marker(_frame, **_kw):
+        first.append(time.time())
+        since = time.time() - first[0]
+        if since < 2.6:
+            return ResupplyMarker(985, 600, 55, 55, 900, 0)
+        if sweep and since < 3.2:
+            return ResupplyMarker(985 + 500 * (since - 2.6), 600, 55, 55, 900, 0)
+        return None
+
+    monkeypatch.setattr(controller_module, "find_resupply_marker", _marker)
+    ctrl = _make_ctrl(
+        monkeypatch, analyzer=_SequenceAnalyzer(list(ammo_script)), capture=_FrameCapture(),
+        pursuit_enabled=True, pursuit_max_duration_s=9.0, empty_confirm_reads=1,
+        sustained_hold_enabled=True, resupply_priority_actuate=True,
+        rearm_climb_s=rearm_climb_s, pass_trigger=pass_trigger)
+    ctrl.set_target_tracker(_TrackerStub(visible=False, error_norm=None, error_norm_y=None))
+    ctrl.pursue_and_engage()
+    try:
+        time.sleep(seconds)
+        return caplog.text, _keys(ctrl)
+    finally:
+        ctrl._eject_stop.set()
+        _wait_for_pursuit_to_settle(ctrl)
+
+
+_PASS_ON = {"enabled": True, "actuate": True}
+
+
+def test_the_climb_out_starts_at_the_pass_without_waiting_for_the_count(monkeypatch, caplog):
+    """Action Item 003. The racks stay empty in this script, so no count ever
+    shows a rearm: the climb-out can only have come from the pass."""
+    logs, keys = _fly_past_a_marker(monkeypatch, caplog, sweep=True, pass_trigger=_PASS_ON)
+    assert "rearm focus begins" in logs
+    assert logs.count("RESUPPLY: rearm climb-out, nose up and afterburner for 0.6s "
+                      "(marker passed: last seen 0.") == 1
+    assert ("key_press", NOSE_UP_KEY) in keys
+    assert ("key_press", AFTERBURNER_KEY) in keys
+    assert ("key_release", AFTERBURNER_KEY) in keys
+    assert "up -> None (rearm climb-out over)" in logs
+
+
+def test_a_marker_that_vanishes_from_the_centre_starts_no_climb_out(monkeypatch, caplog):
+    """The dropout: lost dead ahead without moving, 73 times in one session."""
+    logs, keys = _fly_past_a_marker(monkeypatch, caplog, sweep=False, pass_trigger=_PASS_ON)
+    assert "rearm focus begins" in logs
+    assert "climb-out" not in logs and "pass seen" not in logs
+    assert ("key_press", AFTERBURNER_KEY) not in keys
+
+
+def test_the_pass_in_shadow_is_logged_and_presses_nothing(monkeypatch, caplog):
+    logs, keys = _fly_past_a_marker(
+        monkeypatch, caplog, sweep=True, pass_trigger={"enabled": True, "actuate": False})
+    assert logs.count("RESUPPLY: pass seen, shadow (marker passed:") == 1
+    assert "climb-out" not in logs
+    assert ("key_press", AFTERBURNER_KEY) not in keys
+
+
+def test_without_the_key_the_pass_is_not_watched(monkeypatch, caplog):
+    logs, keys = _fly_past_a_marker(monkeypatch, caplog, sweep=True, pass_trigger=None)
+    assert "marker passed" not in logs
+    assert ("key_press", AFTERBURNER_KEY) not in keys
+
+
+def test_the_count_after_a_pass_starts_no_second_climb_out(monkeypatch, caplog):
+    """The pass starts it; the count that shows the rearm about 1.4 s later logs
+    the lead it had and starts nothing."""
+    # About 0.3 s a read: empty until well after the pass (about 4.3 s), then 4.
+    script = [0] * 18 + [4]
+    logs, _keys_ = _fly_past_a_marker(
+        monkeypatch, caplog, sweep=True, pass_trigger=_PASS_ON, ammo_script=script,
+        seconds=7.5)
+    assert logs.count("RESUPPLY: rearm climb-out, nose up and afterburner") == 1
+    assert "(marker passed:" in logs
+    assert "read" in logs and "after the climb-out started at the pass" in logs
+    assert "RESUPPLY: confirmed ammo=4" in logs
+
+
+def test_the_climb_outs_afterburner_yields_and_is_given_back(monkeypatch):
+    ctrl = _make_ctrl(monkeypatch, resupply_priority_actuate=True)
+    ctrl._rearm_afterburner(True)
+    assert ctrl._rearm_ab_held and _keys(ctrl) == [("key_press", AFTERBURNER_KEY)]
+    ctrl.release_tracking_holds(why="cancel_mission")
+    assert not ctrl._rearm_ab_held
+    assert _keys(ctrl)[-1] == ("key_release", AFTERBURNER_KEY)
+
+    # Not taken during a manual takeover, nor under the emergency climb, which
+    # may want the airbrake.
+    manual = _make_ctrl(monkeypatch, resupply_priority_actuate=True)
+    monkeypatch.setattr(manual, "_manual_takeover_active", lambda: True)
+    manual._rearm_afterburner(True)
+    assert not manual._rearm_ab_held and _keys(manual) == []
+    emergency = _make_ctrl(monkeypatch, resupply_priority_actuate=True)
+    emergency._climb_emergency_active = True
+    emergency._rearm_afterburner(True)
+    assert not emergency._rearm_ab_held and _keys(emergency) == []
 
 
 def test_after_a_rearm_the_other_rack_is_used_before_declaring_exhaustion(monkeypatch, caplog):
@@ -2129,7 +2290,7 @@ def _priority_pursuit(monkeypatch, caplog, *, marker=None, pins=(), tracker=None
 
     def find_marker(_frame, **_kw):
         calls["marker"] += 1
-        return marker
+        return marker() if callable(marker) else marker
 
     def find_pins(_frame, _cfg=None):
         calls["pins"] += 1
@@ -2241,12 +2402,20 @@ def test_the_marker_nearer_the_centre_than_the_target_takes_the_steering(monkeyp
 
 
 def test_the_resupply_marker_comes_before_the_priority_target(monkeypatch, caplog):
-    """Two missiles spent and the resupply marker in view on the left, the
-    priority target on the right: the resupply has the steering."""
-    monkeypatch.setattr(controller_module, "find_resupply_marker",
-                        lambda _frame, **_kw: ResupplyMarker(500, 600, 40, 40, 300, 180))
+    """Two missiles spent, and the resupply marker on the left and the priority
+    target on the right come into view together: the resupply has the steering."""
+    resupply_scans = []
+
+    def find_resupply(_frame, **_kw):
+        resupply_scans.append(1)
+        return ResupplyMarker(500, 600, 40, 40, 300, 180)
+
+    monkeypatch.setattr(controller_module, "find_resupply_marker", find_resupply)
+    # The resupply is looked for once a missile is spent; the crown comes into
+    # view in that same cycle, so neither has had the steering before.
     _ctrl, messages, _calls = _priority_pursuit(
-        monkeypatch, caplog, marker=_priority_marker(1400, 600),
+        monkeypatch, caplog,
+        marker=lambda: _priority_marker(1400, 600) if resupply_scans else None,
         analyzer=_SequenceAnalyzer([4, 2, 2]), empty_confirm_reads=1,
         resupply_priority_actuate=True, run_s=1.4,
         pursue_kwargs={"weapon_already_switched": True})
@@ -2255,6 +2424,32 @@ def test_the_resupply_marker_comes_before_the_priority_target(monkeypatch, caplo
     after = "\n".join(messages[focus_at:])
     assert "roll_left - pressing" in after
     assert "roll_right - pressing" not in after
+
+
+def test_the_marked_objective_being_flown_at_keeps_the_steering_from_the_resupply(
+        monkeypatch, caplog):
+    """Operator, 2026-10-15: "it should have prioritized the objective that's
+    already in view". At 12:58:34.9 the pursuit had flown at control point C
+    for 4.4 s; the resupply marker came into view at the left edge, took the
+    steering, and C slid off the screen. Here the crown on the right has the
+    steering before the second missile is spent; the resupply marker on the
+    left waits for it."""
+    monkeypatch.setattr(controller_module, "find_resupply_marker",
+                        lambda _frame, **_kw: ResupplyMarker(500, 600, 40, 40, 300, 180))
+    _ctrl, messages, _calls = _priority_pursuit(
+        monkeypatch, caplog, marker=_priority_marker(1400, 600),
+        analyzer=_SequenceAnalyzer([4, 2, 2]), empty_confirm_reads=1,
+        resupply_priority_actuate=True, run_s=1.4,
+        pursue_kwargs={"weapon_already_switched": True})
+
+    joined = "\n".join(messages)
+    assert ("PRIORITY: marker at (1400,600) keeps the steering; "
+            "resupply marker at (500,600) waits") in messages
+    assert sum("keeps the steering; resupply marker" in m for m in messages) == 1, (
+        "logged once per wait")
+    assert "roll_right - pressing" in joined
+    assert "roll_left - pressing" not in joined
+    assert not any("rearm focus begins" in m for m in messages)
 
 
 def _pin(angle_deg):
@@ -2535,6 +2730,50 @@ def test_a_red_control_point_in_view_is_flown_at(monkeypatch, caplog):
     assert "AIR SUPERIORITY: marker in view at (600,300) (steering to it)" in messages
     assert any(m.startswith("AIRSUP: marker=(600,300)") and "control=True" in m
                and "mode=actuate" in m for m in messages)
+
+
+def _report_to_the_crash_recovery(monkeypatch, want, *, finder, marker, **ctrl_kwargs):
+    """What the pursuit reports having in view, which the crash recovery waits
+    on, while `finder` returns `marker` and a target is visible further from
+    the centre: `want` as soon as it is reported, or the last report after 3 s."""
+    monkeypatch.setattr(controller_module, finder, lambda _frame, **_kw: marker)
+    for pins in ("find_control_point_ring_icons", "find_priority_ring_icons"):
+        monkeypatch.setattr(controller_module, pins, lambda _f, _c=None: [])
+    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2), capture=_BlankCapture(),
+                      pursuit_enabled=True, pursuit_max_duration_s=0.0, **ctrl_kwargs)
+    ctrl.set_target_tracker(_TrackerStub(visible=True, error_norm=-0.9, error_norm_y=0.9))
+    ctrl.pursue_and_engage(defer_switch_until_empty=True)
+    try:
+        deadline = time.time() + 3.0
+        while ctrl._pursuit_objective_in_view() != want and time.time() < deadline:
+            time.sleep(0.02)
+        return ctrl._pursuit_objective_in_view()
+    finally:
+        ctrl.stop_eject_sequence("respawn_detected")
+        _wait_for_pursuit_to_settle(ctrl)
+
+
+def test_the_pursuit_reports_the_control_point_it_flies_to(monkeypatch):
+    """2026-10-12 14:36:56: A had the steering 12 px off the centre, the pursuit
+    reported nothing in view, and the crash recovery it had held off for the
+    target took the airframe a second later."""
+    assert _report_to_the_crash_recovery(
+        monkeypatch, "control point", finder="find_control_point_marker",
+        marker=_point(600, 300), air_superiority=_PT_ON) == "control point"
+
+
+def test_the_pursuit_reports_the_crown_it_flies_to(monkeypatch):
+    assert _report_to_the_crash_recovery(
+        monkeypatch, "priority target", finder="find_priority_marker",
+        marker=_priority_marker(1400, 800), priority_target=_PT_ON) == "priority target"
+
+
+def test_a_control_point_in_shadow_is_not_what_the_pursuit_reports(monkeypatch):
+    """In shadow the marker steers nothing, so the target is still flown at."""
+    assert _report_to_the_crash_recovery(
+        monkeypatch, "target", finder="find_control_point_marker",
+        marker=_point(600, 300),
+        air_superiority={"enabled": True, "actuate": False}) == "target"
 
 
 def test_the_point_in_view_is_flown_at_whatever_the_pins_say(monkeypatch, caplog):

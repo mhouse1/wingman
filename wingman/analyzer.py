@@ -51,10 +51,16 @@ POPUP_DISMISS_STATES = (GameState.GAME_LOBBY, GameState.GAME_WAITING,
 # pressed 'u' and probed health, until the starting timeout fired.
 LOBBY_RECHECK_STATES = (GameState.GAME_STARTING,)
 # Consecutive agreeing reads before the state is walked back. The quick-scan
-# runs at roughly a 1 s cadence, so this is ~3 s of PLAY being continuously
-# visible — enough that a single stray read cannot abort a match that really is
-# starting, and still 50x faster than the 150 s timeout it replaces.
-STARTING_PLAY_CONFIRM_READS = 3
+# runs at roughly a 1 s cadence, so this is ~6 s of PLAY being continuously
+# visible, still 20x faster than the 150 s timeout it replaces.
+# ADR 161 (Code Review 019 cycle 29): a match that really is starting can
+# show PLAY or READY for a few reads. Over 1,056 GAME_STARTING phases of
+# 2026-10-15 to 10-18, 21 that went on to a battle showed it for 1 read (13)
+# or 2 (8), and the 3-read rule walked back real starts whose button went dark
+# on the very next read: the match then started with wingman in the lobby
+# (2026-10-18 08:09:13, 09:42:39, 12:55:09). A real failed start keeps the
+# button up until it is clicked, so the longer streak costs it ~3 s.
+STARTING_PLAY_CONFIRM_READS = 6
 # ADR 102 rev 2: the lowest health a GAME_STARTING probe may launch a mission
 # on. The probe reads the HEALTH crop before the match has drawn a HUD, so on
 # the lobby and on loading screens it reads digit fragments off other UI (0, 3,
@@ -1447,6 +1453,27 @@ class GameStateAnalyzer:
                 if self._background_ocr_lock.locked():
                     self._background_ocr_lock.release()
         return self._ocr_executor
+
+    def run_ocr(self, fn, *args, timeout: float = 10.0):
+        """Run ``fn(reader, *args)`` on one of the OCR pool's threads, with that
+        thread's EasyOCR reader, and return its result. None without a pool or a
+        reader, on a timeout or when ``fn`` raises. Blocks: call it off the main
+        loop (Code Review 019 cycle 19, the kill card reader). The pool's readers
+        are reused: a reader of its own costs about 300 MB (Performance 008)."""
+        executor = self.ocr_executor
+        if executor is None:
+            return None
+
+        def _job():
+            reader = _get_thread_ocr_reader()
+            return None if reader is None else fn(reader, *args)
+
+        try:
+            return executor.submit(_job).result(timeout=timeout)
+        except Exception:
+            logger.debug("Analyzer: run_ocr(%s) failed", getattr(fn, "__name__", fn),
+                         exc_info=True)
+            return None
 
     def _trigger(self, trigger_name: str) -> bool:
         """Thread-safe FSM trigger dispatch. Returns False on invalid transitions.

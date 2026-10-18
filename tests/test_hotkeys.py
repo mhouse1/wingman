@@ -17,7 +17,7 @@ from wingman.controller import Controller
 from wingman.controller_config import ControllerConfig
 from wingman.keybindings import (
     AUTO_MISSION_KEY, CANCEL_MISSION_KEY, CAPTURE_SCREEN_SHOT, FINISH_ROUND_THEN_EXIT,
-    MISSION_J20_KEY, MISSION_LOITER_KEY, MISSION_SU30_KEY, PADLOCK_CAMERA,
+    MISSION_J20_KEY, MISSION_ACS_KEY, PADLOCK_CAMERA,
     SIMULATE_RESPAWN_KEY, TOGGLE_WEAPON_LOOP_KEY, _WATCHED_MANEUVER_KEYS,
 )
 
@@ -57,8 +57,8 @@ def test_register_hotkeys_registers_every_operator_key(monkeypatch):
     kb = _RecordingKeyboard()
     ctrl = _ctrl(monkeypatch, kb)
     ctrl.register_hotkeys()
-    expected = ({"backspace", CANCEL_MISSION_KEY, MISSION_J20_KEY, MISSION_LOITER_KEY,
-                 MISSION_SU30_KEY, FINISH_ROUND_THEN_EXIT, SIMULATE_RESPAWN_KEY,
+    expected = ({"backspace", CANCEL_MISSION_KEY, MISSION_J20_KEY,
+                 MISSION_ACS_KEY, FINISH_ROUND_THEN_EXIT, SIMULATE_RESPAWN_KEY,
                  CAPTURE_SCREEN_SHOT, PADLOCK_CAMERA, AUTO_MISSION_KEY}
                 | set(_WATCHED_MANEUVER_KEYS))
     assert set(kb.pressed_keys) == expected

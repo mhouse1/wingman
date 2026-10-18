@@ -119,3 +119,35 @@ stall trip, 35 never read steeper than -40 degrees.
   an emergency climb (was 47 of 54), with terrain deaths in the session summary
   no higher than before. `CLIMB — holding nose up + afterburner (EMERGENCY` marks
   each hold, and `is a steep dive: airbrake` each time D2 brakes.
+
+## Amendment 1 (2026-10-17, Code Review 019 cycle 21): a fast dive brakes at any angle
+
+The decision above keyed the airbrake on the angle alone. On 2026-10-17 the
+kill card (Code Review 019 cycle 19) counted 92 crashes in the operator's 10-hour
+account-2 session (`logs/wingman_20261017_192826.log`); an emergency climb had
+started before 71 of them, 31 of those 3 to 12 s before the impact, and in most
+of the 31 the dive got steeper while the nose-up ran. Measured over the emergency
+climbs of six logs that day (320 pairs of consecutive HUD samples in a dive): the
+nose came up a median 21 deg/s at 400 to 599 KPH, 8 at 600 to 799, 7 at 800 to
+999, 5 at 1,000 to 1,199 and 3 at 1,200 to 1,399. A dive shallower than the -40
+limit carried the burner and gained speed, losing the pitch authority it needed:
+
+```
+20:23:36,712 PADLOCK: OFF | Altitude: 1524 | Speed: 1067 | Nose: -29° (dive)
+20:23:36,783 ⬆️  CLIMB — holding nose up + afterburner (EMERGENCY, airbrake only in a steep dive)
+20:23:38,213 PADLOCK: OFF | Altitude: 1231 | Speed: 1152 | Nose: -38° (dive)
+20:23:39,709 PADLOCK: OFF | Altitude: 841 | Speed: 1329 | Nose: -45° (dive)
+20:23:40,042 Controller: climb — path -45 deg is a steep dive: airbrake on, afterburner off
+20:23:41,210 PADLOCK: OFF | Altitude: 409 | Speed: 1459 | Nose: -45° (dive)
+```
+
+Amendment: a dive (path below 0) at or above `emergency_airbrake_above_kph` (900)
+brakes too, at any angle, and holds until the speed is down to
+`emergency_airbrake_release_kph` (750). The stall the decision above was written
+against (1,116 KPH braked to 266) is braking past that release; at the airbrake's
+measured 500 to 600 KPH per 3 s and a speed reading about 1.5 s old, the release
+lands near 450 KPH, above stall prevention's 300. Both keys null: the decision
+above, unchanged. Tests: the `cycle 21` block of `tests/test_climb_mode.py`.
+Validation, live: the crashes that follow an emergency climb started 3 s or more
+before them (31 of 92, 34%, before), and the stall-prevention trips that follow an
+emergency climb.

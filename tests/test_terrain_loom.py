@@ -285,18 +285,19 @@ def _reading_with_points():
                        on_course=True, inliers=3, tracked=3, points=pts)
 
 
-def test_hud_draws_the_points_the_reading_tracked(tmp_path):
+def test_hud_does_not_draw_the_tracked_points(tmp_path):
+    """Operator, 2026-10-15: the white dots were drawn and used by nothing."""
     renderer = _hud(tmp_path)
     renderer.set_loom_reading(_reading_with_points(), True, 100.0)
     canvas = np.zeros((_H, _W, 3), np.uint8)
     renderer._draw_loom(canvas, 100.0)
     for x, y in ((300, 200), (500, 250), (640, 180)):
-        assert tuple(int(c) for c in canvas[y, x]) == hud_module._WHITE
+        assert tuple(int(c) for c in canvas[y, x]) == (0, 0, 0)
     x1, y1 = int(_W * 0.38), int(_H * 0.30)
     assert tuple(int(c) for c in canvas[y1, x1 + 40]) == hud_module._RED
 
 
-def test_hud_drops_the_points_of_a_stale_reading(tmp_path):
+def test_hud_draws_a_stale_readings_box_grey(tmp_path):
     renderer = _hud(tmp_path)
     renderer.set_loom_reading(_reading_with_points(), True, 100.0)
     canvas = np.zeros((_H, _W, 3), np.uint8)

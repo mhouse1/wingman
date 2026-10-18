@@ -14,7 +14,7 @@ that this class and GameStateAnalyzer both provide every member of the port.
 
 import time
 
-from wingman.state import FSM_TRANSITIONS, NOSE_UNKNOWN, GameState
+from wingman.state import FSM_TRANSITIONS, GameState
 
 
 def _sources(transition):
@@ -50,21 +50,6 @@ class PerceptionFake:
         return (False, 0.0, None)
 
     def get_afterburner_fuel_pct(self):
-        return None
-
-    def nose_direction(self) -> str:
-        return NOSE_UNKNOWN
-
-    def read_compass_heading(self, frame):
-        return None
-
-    def full_map_shown(self, frame) -> bool:
-        return False
-
-    def full_map_covering(self, frame) -> bool:
-        return False
-
-    def read_full_map(self, frame):
         return None
 
     def scan_region_for_good_luck(self, frame) -> bool:

@@ -42,7 +42,7 @@ def _make_ctrl(monkeypatch, analyzer, *, margin=500.0, ttg=60.0, tree_floor=4000
             simulate_os_input=True,
             disable_hotkeys=True,
             climb={"alt_floor_m": tree_floor},
-            su30={"alt_floor_m": 3000},
+            acs={"alt_floor_m": 3000},
             tracking={"sustained_hold_enabled": True, "pitch_lead_s": 0.0},
             pursuit_mode={"enabled": True, "pursuit_max_duration_s": 0.0,
                           "pursuit_padlock_verify": False, "ammo_zero_grace_s": 0.0,
@@ -62,8 +62,8 @@ class TestVerdict:
 
     def test_the_mission_floor_in_play_replaces_the_tree_floor(self, monkeypatch):
         ctrl = _make_ctrl(monkeypatch, _TelemetryAnalyzer(_snap(3700)))
-        ctrl._set_last_mission("su30")
-        assert ctrl._pursuit_dive_guard() is None, "3700 m is above su30's 3000 + 500"
+        ctrl._set_last_mission("acs")
+        assert ctrl._pursuit_dive_guard() is None, "3700 m is above acs's 3000 + 500"
         ctrl._analyzer.snap = _snap(3400)
         assert "3500" in ctrl._pursuit_dive_guard()
 

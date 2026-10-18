@@ -213,6 +213,56 @@ def test_start_survives_xwayland_missing_from_path():
         assert nd.start(":3", "1920x1200") == 1
 
 
+# --- a snap terminal's toolkit must not reach Xwayland -----------------------
+
+_SNAP_TERMINAL_ENV = {
+    "WAYLAND_DISPLAY": "wayland-0",
+    "GSETTINGS_SCHEMA_DIR": "/home/op/snap/code/271/.local/share/glib-2.0/schemas",
+    "GTK_PATH": "/snap/code/271/usr/lib/x86_64-linux-gnu/gtk-3.0",
+    "GIO_MODULE_DIR": "/home/op/snap/code/common/.cache/gio-modules",
+    "XDG_DATA_DIRS": "/snap/code/271/usr/share:/usr/share",
+    "XDG_DATA_DIRS_VSCODE_SNAP_ORIG": "/usr/share/ubuntu:/usr/share",
+    "XDG_CONFIG_DIRS": "/snap/code/271/etc/xdg",
+    "XDG_CONFIG_DIRS_VSCODE_SNAP_ORIG": "",
+}
+
+
+def test_snap_toolkit_overrides_are_undone():
+    """2026-10-15: the code snap refresh shipped GSettings schemas that GTK
+    could not read, and Xwayland -decorate aborted before :3 answered."""
+    env = nd.host_session_env(_SNAP_TERMINAL_ENV)
+    assert "GSETTINGS_SCHEMA_DIR" not in env
+    assert "GTK_PATH" not in env
+    assert "GIO_MODULE_DIR" not in env
+    assert env["XDG_DATA_DIRS"] == "/usr/share/ubuntu:/usr/share"
+    assert env["WAYLAND_DISPLAY"] == "wayland-0"
+    assert not any(k.endswith("_VSCODE_SNAP_ORIG") for k in env)
+
+
+def test_an_empty_saved_value_means_the_variable_was_unset():
+    assert "XDG_CONFIG_DIRS" not in nd.host_session_env(_SNAP_TERMINAL_ENV)
+
+
+def test_a_toolkit_variable_outside_a_snap_is_left_alone():
+    env = nd.host_session_env({"GSETTINGS_SCHEMA_DIR": "/opt/schemas"})
+    assert env["GSETTINGS_SCHEMA_DIR"] == "/opt/schemas"
+
+
+def test_start_spawns_xwayland_without_the_snap_toolkit():
+    with mock.patch.object(nd, "probe_display", return_value="down"), \
+         mock.patch.dict("os.environ", _SNAP_TERMINAL_ENV, clear=True), \
+         mock.patch.object(nd, "display_is_up", return_value=True), \
+         mock.patch.object(nd, "host_output_size", return_value=None), \
+         mock.patch("os.path.exists", return_value=False), \
+         mock.patch("builtins.open", mock.mock_open()), \
+         mock.patch("subprocess.Popen") as popen, \
+         mock.patch("time.sleep"):
+        assert nd.start(":3", "1920x1200") == 0
+    env = popen.call_args.kwargs["env"]
+    assert "GSETTINGS_SCHEMA_DIR" not in env
+    assert env["WAYLAND_DISPLAY"] == "wayland-0"
+
+
 # --- focus reports rather than hangs -----------------------------------------
 
 def test_focus_fails_cleanly_when_the_display_is_down():

@@ -54,8 +54,7 @@ def _make_ctrl(monkeypatch, analyzer=None, capture=None):
 
 def _started_missions(monkeypatch, ctrl):
     started = []
-    for name in ("mission_j20", "mission_loiter", "mission_su30", "mission_jas39",
-                 "mission_f111"):
+    for name in ("mission_j20", "mission_acs"):
         monkeypatch.setattr(ctrl, name, lambda *a, _n=name, **k: started.append(_n))
     return started
 

@@ -1,4 +1,4 @@
-"""mission_su30 (ADR 144, docs/missions/su30.md): the scripted Su-30 sequence.
+"""mission_acs (ADR 144, docs/missions/acs.md): ACS_MISSION, the scripted sequence written for the Su-30.
 
   1. nose up on battle start or respawn
   2. NO weapon switch: the spawn weapon stays selected until it runs out
@@ -27,7 +27,7 @@ import yaml
 import wingman.controller as controller_module
 from wingman.analyzer import GameState
 from wingman.config_schema import validate_config
-from wingman.controller import Controller, MISSION_SU30_KEY
+from wingman.controller import Controller, MISSION_ACS_KEY
 from wingman.controller_config import ControllerConfig
 from wingman.telemetry import TelemetrySignal, TelemetrySnapshot
 from tests.perception_fake import PerceptionFake
@@ -41,8 +41,8 @@ def _snap(alt, angle_deg=0.0, ts=None):
     """A REAL TelemetrySnapshot whose flight-path angle is `angle_deg`.
 
     Altitude rate is derived from speed and the angle so that the real
-    `pitch_angle_deg()` derivation runs (see test_mission_loiter._Snap for why
-    a hand-written fake would only prove the code agrees with itself).
+    `pitch_angle_deg()` derivation runs: a hand-written fake would only prove
+    the code agrees with itself.
     """
     ts = time.time() if ts is None else ts
     rate = (_SPEED_KPH / 3.6) * math.sin(math.radians(angle_deg))
@@ -96,14 +96,14 @@ _FAST = {"tick_s": 0.005, "angle_pulse_s": 0.01, "angle_max_s": 2.0,
          "climb_alt_m": 3000, "nose_angle_deg": -10, "lock_timeout_s": 1.0}
 
 
-def _make_ctrl(monkeypatch, analyzer=None, tracker=None, su30=None, **cfg):
+def _make_ctrl(monkeypatch, analyzer=None, tracker=None, acs=None, **cfg):
     monkeypatch.setattr(controller_module, "keyboard_module", None)
     ctrl = Controller(
         (0, 0, 1920, 1200),
         analyzer=analyzer,
         exit_event=threading.Event(),
         config=ControllerConfig(simulate_os_input=True, disable_hotkeys=True,
-                                su30={**_FAST, **(su30 or {})}, **cfg),
+                                acs={**_FAST, **(acs or {})}, **cfg),
     )
     if tracker is not None:
         ctrl.set_target_tracker(tracker)
@@ -139,7 +139,7 @@ def _record(ctrl, monkeypatch):
 
 
 def _run_mission(ctrl, **kwargs):
-    t = threading.Thread(target=ctrl.mission_su30, kwargs=kwargs, daemon=True)
+    t = threading.Thread(target=ctrl.mission_acs, kwargs=kwargs, daemon=True)
     t.start()
     return t
 
@@ -154,7 +154,7 @@ def _wait(pred, timeout=3.0):
 
 
 def _drain(ctrl, thread):
-    """Cancel and wait the mission out (mission_su30 clears the cancel on entry,
+    """Cancel and wait the mission out (mission_acs clears the cancel on entry,
     so keep re-asserting it until the lock is actually free)."""
     deadline = time.time() + 5.0
     while ctrl.is_mission_running() and time.time() < deadline:
@@ -182,7 +182,7 @@ def test_the_four_steps_run_in_the_documented_order(monkeypatch):
 
     t = _run_mission(ctrl)
     t.join(timeout=5.0)
-    assert not t.is_alive(), "mission_su30 did not finish"
+    assert not t.is_alive(), "mission_acs did not finish"
 
     kinds = [e[0] for e in log]
     assert kinds[0] == "climb", "step 1 (nose up) must come first"
@@ -314,12 +314,12 @@ def test_nose_angle_step_stands_aside_for_a_climb_hold(monkeypatch):
     its NOSE_UP would be two writers on one axis."""
     analyzer = _Analyzer([(3100, 30)])
     ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, tracker=_Tracker(),
-                      su30={"angle_max_s": 0.3})
+                      acs={"angle_max_s": 0.3})
     log = _record(ctrl, monkeypatch)
     ctrl._climbing.set()                 # a climb hold is running
 
     ctrl._mission_cancel.clear()
-    result = ctrl._su30_set_nose_angle()
+    result = ctrl._acs_set_nose_angle()
 
     assert result is False, "a step that never got the axis cannot report success"
     assert [e for e in log if e[0] in ("nose_down", "nose_up")] == []
@@ -331,7 +331,7 @@ def test_nose_angle_step_pulses_in_the_direction_of_the_error(monkeypatch):
     log = _record(ctrl, monkeypatch)
 
     ctrl._mission_cancel.clear()
-    assert ctrl._su30_set_nose_angle() is True
+    assert ctrl._acs_set_nose_angle() is True
 
     assert [e[0] for e in log] == ["nose_down", "nose_up"], (
         "+30 is too high (pulse down), -40 is too low (pulse up), -10 is on target")
@@ -344,11 +344,11 @@ def test_nose_angle_step_acts_on_new_samples_only(monkeypatch):
     fixed = _snap(3100, 30, ts=5000.0)
     analyzer.get_telemetry = lambda: fixed          # same timestamp every tick
     ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, tracker=_Tracker(),
-                      su30={"angle_max_s": 0.3})
+                      acs={"angle_max_s": 0.3})
     log = _record(ctrl, monkeypatch)
 
     ctrl._mission_cancel.clear()
-    ctrl._su30_set_nose_angle()
+    ctrl._acs_set_nose_angle()
 
     assert [e[0] for e in log].count("nose_down") == 1
 
@@ -357,12 +357,12 @@ def test_nose_angle_step_is_bounded(monkeypatch):
     """A reading that never converges must not hold the script forever."""
     analyzer = _Analyzer([(3100, 40)])
     ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, tracker=_Tracker(),
-                      su30={"angle_max_s": 0.2})
+                      acs={"angle_max_s": 0.2})
     _record(ctrl, monkeypatch)
 
     ctrl._mission_cancel.clear()
     started = time.time()
-    assert ctrl._su30_set_nose_angle() is False
+    assert ctrl._acs_set_nose_angle() is False
     assert time.time() - started < 2.0
 
 
@@ -373,10 +373,10 @@ def test_a_climb_hold_that_never_lets_go_does_not_wedge_the_script(monkeypatch):
     wait forever — pressing no pitch key in the meantime."""
     analyzer = _Analyzer([(3100, 30)])
     ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, tracker=_Tracker(),
-                      su30={"angle_max_s": 0.2})
+                      acs={"angle_max_s": 0.2})
     log = _record(ctrl, monkeypatch)
     ctrl._climbing.set()                 # the floor climb is always running
-    monkeypatch.setattr(ctrl, "_su30_stop_climb", lambda: None)   # tree restarts it
+    monkeypatch.setattr(ctrl, "_acs_stop_climb", lambda: None)   # tree restarts it
 
     t = _run_mission(ctrl)
     t.join(timeout=5.0)
@@ -466,7 +466,7 @@ def test_engagement_is_boresight_only_and_never_search_and_destroy(monkeypatch):
     kinds = [e[0] for e in log]
     assert "boresight_start" in kinds, "the mission never started boresight_engage"
     assert "sdl_start" not in kinds, \
-        "search_and_destroy presses the padlock camera; su30 must never start it"
+        "search_and_destroy presses the padlock camera; acs must never start it"
 
 
 def test_boresight_starts_without_any_weapon_switch_before_it(monkeypatch):
@@ -581,7 +581,7 @@ def test_the_real_loop_fires_without_switching_and_never_presses_padlock(monkeyp
     keys = _keys()
     _drain(ctrl, t)
 
-    assert PADLOCK_CAMERA not in keys, "su30 must never toggle the padlock camera"
+    assert PADLOCK_CAMERA not in keys, "acs must never toggle the padlock camera"
     assert SWITCH_WEAPON not in keys, \
         "the mission must not switch weapons; the spawn weapon fires until empty"
     assert ctrl._boresight_thread is None, "the loop outlived the mission"
@@ -591,13 +591,13 @@ def test_the_real_loop_fires_without_switching_and_never_presses_padlock(monkeyp
 # No padlock at all — and mission_j20 keeps its padlock
 #
 # search_and_destroy is not the only thing that presses the padlock camera. Two
-# shared paths do it on their own, and mission_su30 triggers both:
+# shared paths do it on their own, and mission_acs triggers both:
 #   * ADR 140 D6 presses to "correct" an Unknown padlock state whenever the
-#     secondary weapon is active — which su30 has from the moment its spawn
+#     secondary weapon is active — which acs has from the moment its spawn
 #     weapon runs out and is switched away from;
 #   * the missile target-spread handler presses twice after two missiles "fire",
 #     and a primary rack of 4 reading 2 after the weapon switch looks like two.
-# The rule is one check: while su30 is the mission in play, none of it runs.
+# The rule is one check: while acs is the mission in play, none of it runs.
 # ---------------------------------------------------------------------------
 
 def _padlock_presses(ctrl):
@@ -613,25 +613,23 @@ def _plain_ctrl(monkeypatch, mission):
         (0, 0, 1920, 1200),
         exit_event=threading.Event(),
         config=ControllerConfig(simulate_os_input=True, disable_hotkeys=True,
-                                su30=dict(_FAST)),
+                                acs=dict(_FAST)),
     )
     ctrl._set_last_mission(mission)
     return ctrl
 
 
-def test_the_padlock_is_blocked_only_while_su30_is_the_mission(monkeypatch):
+def test_the_padlock_is_blocked_only_while_acs_is_the_mission(monkeypatch):
     ctrl = _plain_ctrl(monkeypatch, "j20")
     assert ctrl.is_padlock_blocked() is False
-    ctrl._set_last_mission("su30")
+    ctrl._set_last_mission("acs")
     assert ctrl.is_padlock_blocked() is True
-    ctrl._set_last_mission("loiter")
-    assert ctrl.is_padlock_blocked() is False
     ctrl._set_last_mission("j20")
     assert ctrl.is_padlock_blocked() is False
 
 
-def test_padlock_camera_presses_nothing_during_su30(monkeypatch):
-    ctrl = _plain_ctrl(monkeypatch, "su30")
+def test_padlock_camera_presses_nothing_during_acs(monkeypatch):
+    ctrl = _plain_ctrl(monkeypatch, "acs")
     ctrl._padlock_engaged = False
 
     ctrl.padlock_camera(hold_seconds=0.01)
@@ -652,10 +650,10 @@ def test_padlock_camera_still_presses_for_j20(monkeypatch):
     assert ctrl.padlock_state() is None
 
 
-def test_a_search_and_destroy_loop_under_su30_never_presses_padlock(monkeypatch):
+def test_a_search_and_destroy_loop_under_acs_never_presses_padlock(monkeypatch):
     """disengage_roll_right starts search_and_destroy itself; it is inert today
     only because the cancel it issued is still set."""
-    ctrl = _plain_ctrl(monkeypatch, "su30")
+    ctrl = _plain_ctrl(monkeypatch, "acs")
 
     ctrl.start_search_and_destroy_loop()
     time.sleep(0.4)
@@ -664,9 +662,9 @@ def test_a_search_and_destroy_loop_under_su30_never_presses_padlock(monkeypatch)
     assert _padlock_presses(ctrl) == []
 
 
-def test_the_unknown_state_correction_does_not_run_during_su30(monkeypatch):
+def test_the_unknown_state_correction_does_not_run_during_acs(monkeypatch):
     """ADR 140 D6 — the first of the two shared paths."""
-    ctrl = _plain_ctrl(monkeypatch, "su30")
+    ctrl = _plain_ctrl(monkeypatch, "acs")
     ctrl._eject_weapon_switched = True          # set once the spawn weapon has run out
     ctrl._padlock_engaged = None                # Unknown, as it starts a life
 
@@ -687,13 +685,13 @@ def test_the_unknown_state_correction_still_runs_for_j20(monkeypatch):
     assert len(_padlock_presses(ctrl)) == 1
 
 
-def test_the_missile_spread_handler_does_not_run_during_su30(monkeypatch, caplog):
+def test_the_missile_spread_handler_does_not_run_during_acs(monkeypatch, caplog):
     """The second shared path. A weapon switch from a 4-missile primary rack to a
     2-missile secondary reads as two missiles fired. Nothing is pressed and
     nothing is logged: 'switching padlock target' would look like padlock use."""
     import logging
     from wingman.tick_handlers import AmmoEventsHandler
-    ctrl = _plain_ctrl(monkeypatch, "su30")
+    ctrl = _plain_ctrl(monkeypatch, "acs")
     handler = AmmoEventsHandler(object(), ctrl, {"no_missiles_abort_grace_s": 0.0})
 
     with caplog.at_level(logging.DEBUG):
@@ -727,7 +725,7 @@ def test_automatic_launch_skips_when_a_mission_is_running(monkeypatch):
     log = _record(ctrl, monkeypatch)
     assert ctrl._mission_lock.acquire(blocking=False)
     try:
-        ctrl.mission_su30()
+        ctrl.mission_acs()
     finally:
         ctrl._mission_lock.release()
 
@@ -801,29 +799,29 @@ def _hotkey_ctrl(monkeypatch, state):
     return ctrl, keyboard, analyzer
 
 
-def test_su30_hotkey_starts_a_preempting_mission_and_forces_battle(monkeypatch):
+def test_acs_hotkey_starts_a_preempting_mission_and_forces_battle(monkeypatch):
     ctrl, keyboard, analyzer = _hotkey_ctrl(monkeypatch, GameState.GAME_LOBBY)
-    ctrl.mission_su30 = lambda **k: None
+    ctrl.mission_acs = lambda **k: None
 
-    keyboard.handlers[MISSION_SU30_KEY](object())
+    keyboard.handlers[MISSION_ACS_KEY](object())
 
     assert analyzer.trigger_calls == ["manual_force_battle"]
-    assert ctrl._last_mission == "su30", "respawn restarts whichever mission ran last"
+    assert ctrl._last_mission == "acs", "respawn restarts whichever mission ran last"
     assert len(_ThreadStub.started) == 1
     target, kwargs = _ThreadStub.started[0]
-    assert target == ctrl.mission_su30
+    assert target == ctrl.mission_acs
     assert kwargs == {"preempt": True}
 
 
-def test_su30_hotkey_from_battle_does_not_force_the_fsm(monkeypatch):
+def test_acs_hotkey_from_battle_does_not_force_the_fsm(monkeypatch):
     ctrl, keyboard, analyzer = _hotkey_ctrl(monkeypatch, GameState.GAME_BATTLE)
-    keyboard.handlers[MISSION_SU30_KEY](object())
+    keyboard.handlers[MISSION_ACS_KEY](object())
     assert analyzer.trigger_calls == []
 
 
-def test_su30_hotkey_ignores_key_repeat(monkeypatch):
+def test_acs_hotkey_ignores_key_repeat(monkeypatch):
     ctrl, keyboard, _ = _hotkey_ctrl(monkeypatch, GameState.GAME_BATTLE)
-    handler = keyboard.handlers[MISSION_SU30_KEY]
+    handler = keyboard.handlers[MISSION_ACS_KEY]
     handler(object())
     handler(object())
     assert len(_ThreadStub.started) == 1
@@ -835,40 +833,39 @@ def _restart_ctrl(monkeypatch, **cfg):
                       config=ControllerConfig(disable_hotkeys=True, **cfg))
     launched = []
     monkeypatch.setattr(ctrl, "mission_j20", lambda **_: launched.append("j20"))
-    monkeypatch.setattr(ctrl, "mission_su30", lambda **_: launched.append("su30"))
-    monkeypatch.setattr(ctrl, "mission_loiter", lambda **_: launched.append("loiter"))
+    monkeypatch.setattr(ctrl, "mission_acs", lambda **_: launched.append("acs"))
     return ctrl, launched
 
 
-def test_respawn_restart_resumes_the_su30_mission(monkeypatch):
+def test_respawn_restart_resumes_the_acs_mission(monkeypatch):
     ctrl, launched = _restart_ctrl(monkeypatch)
-    ctrl._set_last_mission("su30")
+    ctrl._set_last_mission("acs")
 
     assert ctrl.restart_last_mission() is True
-    assert _wait(lambda: launched == ["su30"])
+    assert _wait(lambda: launched == ["acs"])
 
 
 def test_battle_entry_launches_the_configured_default_mission(monkeypatch):
-    ctrl, launched = _restart_ctrl(monkeypatch, default_mission="su30")
+    ctrl, launched = _restart_ctrl(monkeypatch, default_mission="acs")
 
     ctrl._start_default_mission()
 
-    assert _wait(lambda: launched == ["su30"])
-    assert ctrl._last_mission == "su30"
+    assert _wait(lambda: launched == ["acs"])
+    assert ctrl._last_mission == "acs"
 
 
 def test_restart_with_no_prior_mission_uses_the_default(monkeypatch):
-    ctrl, launched = _restart_ctrl(monkeypatch, default_mission="su30")
+    ctrl, launched = _restart_ctrl(monkeypatch, default_mission="acs")
     assert ctrl._last_mission is None
 
     assert ctrl.restart_last_mission() is True
 
-    assert _wait(lambda: launched == ["su30"])
+    assert _wait(lambda: launched == ["acs"])
 
 
 def test_the_code_level_default_is_j20_when_the_config_names_none(monkeypatch):
     """A ControllerConfig built without the key (tests, replay lanes) still
-    launches J20; only the shipped config.yaml selects su30."""
+    launches J20; only the shipped config.yaml selects acs."""
     ctrl, launched = _restart_ctrl(monkeypatch)
 
     ctrl._start_default_mission()
@@ -886,55 +883,55 @@ def shipped_cfg():
     return yaml.safe_load((_ROOT / "wingman" / "config.yaml").read_text(encoding="utf-8"))
 
 
-def test_shipped_su30_block_matches_the_mission_document(shipped_cfg):
-    """docs/missions/su30.md: reach 3000 altitude, then a -10 degree nose."""
-    su30 = shipped_cfg["su30_mission"]
-    assert su30["climb_alt_m"] == 3000
-    assert su30["nose_angle_deg"] == -10
+def test_shipped_acs_block_matches_the_mission_document(shipped_cfg):
+    """docs/missions/acs.md: reach 3000 altitude, then a -10 degree nose."""
+    acs = shipped_cfg["acs_mission"]
+    assert acs["climb_alt_m"] == 3000
+    assert acs["nose_angle_deg"] == -10
 
 
-def test_shipped_default_mission_is_su30(shipped_cfg):
-    """Operator decision, 2026-09-24: battle entry launches mission_su30. Set
+def test_shipped_default_mission_is_acs(shipped_cfg):
+    """Operator decision, 2026-09-24: battle entry launches mission_acs. Set
     `mission.default_mission: j20` to get J20 at battle entry again."""
-    assert shipped_cfg["mission"]["default_mission"] == "su30"
+    assert shipped_cfg["mission"]["default_mission"] == "acs"
 
 
-def test_the_controller_reads_the_shipped_su30_block(shipped_cfg, monkeypatch):
+def test_the_controller_reads_the_shipped_acs_block(shipped_cfg, monkeypatch):
     monkeypatch.setattr(controller_module, "keyboard_module", None)
     ctrl = Controller((0, 0, 1920, 1200),
                       config=ControllerConfig.from_config(
                           shipped_cfg, disable_hotkeys=True))
-    assert ctrl._su30_climb_alt_m == 3000.0
-    assert ctrl._su30_nose_angle_deg == -10.0
-    assert ctrl._default_mission == "su30"
+    assert ctrl._acs_climb_alt_m == 3000.0
+    assert ctrl._acs_nose_angle_deg == -10.0
+    assert ctrl._default_mission == "acs"
 
 
-def test_the_schema_accepts_su30_and_rejects_unknown_missions(shipped_cfg):
+def test_the_schema_accepts_acs_and_rejects_unknown_missions(shipped_cfg):
     assert validate_config(shipped_cfg) == []
     bad = yaml.safe_load(yaml.safe_dump(shipped_cfg))
     bad["mission"]["default_mission"] = "mig29"
     assert any("default_mission" in e for e in validate_config(bad))
     bad = yaml.safe_load(yaml.safe_dump(shipped_cfg))
-    bad["su30_mission"]["nose_angel_deg"] = -10        # typo
-    assert validate_config(bad), "a misspelt su30_mission key must be caught"
+    bad["acs_mission"]["nose_angel_deg"] = -10        # typo
+    assert validate_config(bad), "a misspelt acs_mission key must be caught"
 
 
 # ---------------------------------------------------------------------------
-# ADR 147: su30's own altitude doctrine. The tree's 4000 m floor and armed
+# ADR 147: acs's own altitude doctrine. The tree's 4000 m floor and armed
 # sustain band sit above this mission's 3000 m level-off, so the tree restarted
 # the climb 1.3 s after the script stopped it (measured 2026-09-24 18:59:27-28).
-# While su30 is the mission in play the Controller answers the tree with its own
+# While acs is the mission in play the Controller answers the tree with its own
 # floor and asks the sustain band to stand aside; every other mission gets None
 # and False, the tree's configured doctrine.
 # ---------------------------------------------------------------------------
 
-def test_the_su30_altitude_doctrine_applies_only_while_su30_is_the_mission(monkeypatch):
-    ctrl = _make_ctrl(monkeypatch, su30={"alt_floor_m": 3000})
-    for mission in ("j20", "loiter", "jas39"):
+def test_the_acs_altitude_doctrine_applies_only_while_acs_is_the_mission(monkeypatch):
+    ctrl = _make_ctrl(monkeypatch, acs={"alt_floor_m": 3000})
+    for mission in ("j20",):
         ctrl._set_last_mission(mission)
         assert ctrl.altitude_floor_override_m() is None, mission
         assert ctrl.sustain_climb_suppressed() is False, mission
-    ctrl._set_last_mission("su30")
+    ctrl._set_last_mission("acs")
     assert ctrl.altitude_floor_override_m() == 3000.0
     assert ctrl.sustain_climb_suppressed() is True
     ctrl._set_last_mission("j20")
@@ -942,17 +939,17 @@ def test_the_su30_altitude_doctrine_applies_only_while_su30_is_the_mission(monke
 
 
 def test_before_any_mission_has_launched_there_is_no_override(monkeypatch):
-    ctrl = _make_ctrl(monkeypatch, su30={"alt_floor_m": 3000})
+    ctrl = _make_ctrl(monkeypatch, acs={"alt_floor_m": 3000})
     assert ctrl._last_mission is None
     assert ctrl.altitude_floor_override_m() is None
     assert ctrl.sustain_climb_suppressed() is False
 
 
-def test_without_an_alt_floor_key_su30_leaves_the_trees_doctrine_alone(monkeypatch):
-    """Removing the key is how the operator restores the 4000 m doctrine for su30."""
+def test_without_an_alt_floor_key_acs_leaves_the_trees_doctrine_alone(monkeypatch):
+    """Removing the key is how the operator restores the 4000 m doctrine for acs."""
     ctrl = _make_ctrl(monkeypatch)
     assert "alt_floor_m" not in _FAST
-    ctrl._set_last_mission("su30")
+    ctrl._set_last_mission("acs")
     assert ctrl.altitude_floor_override_m() is None
     assert ctrl.sustain_climb_suppressed() is False
 
@@ -965,8 +962,8 @@ def test_a_stuck_last_mission_lock_costs_the_override_for_a_tick_not_the_tick(mo
         def release(self):
             raise AssertionError("released a lock it never acquired")
 
-    ctrl = _make_ctrl(monkeypatch, su30={"alt_floor_m": 3000})
-    ctrl._set_last_mission("su30")
+    ctrl = _make_ctrl(monkeypatch, acs={"alt_floor_m": 3000})
+    ctrl._set_last_mission("acs")
     monkeypatch.setattr(ctrl, "_last_mission_lock", _StuckLock())
     with caplog.at_level("WARNING"):
         assert ctrl.altitude_floor_override_m() is None
@@ -994,15 +991,17 @@ class _SeenTracker(_Tracker):
 
 def test_a_lock_during_the_climb_goes_straight_to_the_pursuit(monkeypatch, caplog):
     analyzer = _Analyzer([(1500, 30)])            # never reaches 3000 m
-    ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, tracker=_SeenTracker(),
-                      su30={"yield_to_target": True})
+    # The lock comes after the look before the climb: a lock already there
+    # skips the climb (test_a_lock_at_the_start_skips_the_climb).
+    ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, tracker=_SeenTracker(after=1),
+                      acs={"yield_to_target": True})
     log = _record(ctrl, monkeypatch)
     with caplog.at_level("INFO", logger="wingman.controller"):
         t = _run_mission(ctrl)
         t.join(timeout=5.0)
     assert not t.is_alive()
     kinds = [e[0] for e in log]
-    assert "pursue" in kinds
+    assert kinds.index("climb") < kinds.index("pursue")
     assert "nose_down" not in kinds and "nose_up" not in kinds, "the nose-angle step is skipped"
     assert any("target in view (lock) during the climb" in r.getMessage() for r in caplog.records)
 
@@ -1010,7 +1009,7 @@ def test_a_lock_during_the_climb_goes_straight_to_the_pursuit(monkeypatch, caplo
 def test_a_lock_during_the_nose_angle_step_goes_straight_to_the_pursuit(monkeypatch):
     analyzer = _Analyzer([(3100, 30)])            # reached, nose far from -10 deg
     ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, tracker=_SeenTracker(after=1),
-                      su30={"yield_to_target": True})
+                      acs={"yield_to_target": True})
     log = _record(ctrl, monkeypatch)
     t = _run_mission(ctrl)
     t.join(timeout=5.0)
@@ -1031,7 +1030,7 @@ def test_a_ring_icon_also_ends_the_script(monkeypatch, caplog):
 
     analyzer = _Analyzer([(1500, 30)])
     ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, tracker=_SeenTracker(after=10 ** 6),
-                      su30={"yield_to_target": True},
+                      acs={"yield_to_target": True},
                       pursuit_mode={"icon_steering": {"enabled": True}})
     ctrl._capture = _Cap()
     log = _record(ctrl, monkeypatch)
@@ -1045,9 +1044,189 @@ def test_a_ring_icon_also_ends_the_script(monkeypatch, caplog):
 def test_without_yield_the_script_keeps_climbing_past_a_lock(monkeypatch):
     analyzer = _Analyzer([(1500, 30)])
     ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, tracker=_SeenTracker(),
-                      su30={"yield_to_target": False})
+                      acs={"yield_to_target": False})
     log = _record(ctrl, monkeypatch)
     t = _run_mission(ctrl)
     time.sleep(0.4)
+    kinds = [e[0] for e in log]
+    assert "climb" in kinds and "pursue" not in kinds
+    _drain(ctrl, t)
+
+
+# ---------------------------------------------------------------------------
+# No climb with a target in view (operator, 2026-10-16: "it should not climb if
+# targets are in view"). At 23:52:42 the crown was in view from the spawn
+# (screenshot 23:52:41, cut into priority_marker_at_spawn.png), the climb held
+# the nose up for 1.6 s until a ring icon ended it, the crown went under the
+# airframe and the pursuit reached it 19 s later.
+# ---------------------------------------------------------------------------
+
+_FIXTURES = pathlib.Path(__file__).parent / "fixtures"
+
+
+class _FrameCapture:
+    """grab_from_thread returns a 1920x1200 frame holding each fixture crop
+    centred on its own (x, y)."""
+
+    def __init__(self, *placed):
+        import cv2
+        import numpy as np
+        self.frame = np.zeros((1200, 1920, 3), np.uint8)
+        for name, (x, y) in placed:
+            crop = cv2.imread(str(_FIXTURES / name))
+            top, left = y - crop.shape[0] // 2, x - crop.shape[1] // 2
+            self.frame[top:top + crop.shape[0], left:left + crop.shape[1]] = crop
+        self.grabs = 0
+
+    def grab_from_thread(self):
+        self.grabs += 1
+        return self.frame
+
+
+def _objective_ctrl(monkeypatch, capture, yield_to_target=True, tracker=None):
+    ctrl = _make_ctrl(monkeypatch, analyzer=_Analyzer([(1500, 30)]),
+                      tracker=tracker or _SeenTracker(after=10 ** 6),
+                      acs={"yield_to_target": yield_to_target},
+                      pursuit_mode={"priority_target": {"enabled": True, "actuate": True},
+                                    "air_superiority": {"enabled": True, "actuate": True}})
+    ctrl._capture = capture
+    return ctrl
+
+
+def test_a_crown_in_view_at_the_start_skips_the_climb(monkeypatch, caplog):
+    ctrl = _objective_ctrl(monkeypatch, _FrameCapture(("priority_marker_at_spawn.png", (960, 650))))
+    log = _record(ctrl, monkeypatch)
+    with caplog.at_level("INFO", logger="wingman.controller"):
+        t = _run_mission(ctrl)
+        t.join(timeout=5.0)
+    assert not t.is_alive()
+    kinds = [e[0] for e in log]
+    assert "pursue" in kinds
+    assert "climb" not in kinds and "nose_up" not in kinds and "nose_down" not in kinds
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("target in view (crown) at the start, no climb" in m for m in messages)
+    assert not any("step 1/4" in m for m in messages)
+
+
+def test_a_lock_at_the_start_skips_the_climb(monkeypatch):
+    ctrl = _make_ctrl(monkeypatch, analyzer=_Analyzer([(1500, 30)]), tracker=_SeenTracker(),
+                      acs={"yield_to_target": True})
+    log = _record(ctrl, monkeypatch)
+    t = _run_mission(ctrl)
+    t.join(timeout=5.0)
+    kinds = [e[0] for e in log]
+    assert "pursue" in kinds and "climb" not in kinds
+
+
+def test_a_control_point_behind_terrain_at_the_start_does_not_skip_the_climb(monkeypatch):
+    # Operator, 2026-10-16: a marker drawn behind terrain is not flown at, so it
+    # is no reason to skip the climb either.
+    ctrl = _objective_ctrl(monkeypatch, _FrameCapture(("airsup_marker_behind_terrain.png",
+                                                       (950, 550))))
+    log = _record(ctrl, monkeypatch)
+    t = _run_mission(ctrl)
+    assert _wait(lambda: ("climb", 3000) in log)
+    time.sleep(0.1)
     assert "pursue" not in [e[0] for e in log]
     _drain(ctrl, t)
+
+
+def test_a_crown_that_comes_into_view_during_the_climb_ends_it(monkeypatch, caplog):
+    capture = _FrameCapture()
+    ctrl = _objective_ctrl(monkeypatch, capture)
+    log = _record(ctrl, monkeypatch)
+    with caplog.at_level("INFO", logger="wingman.controller"):
+        t = _run_mission(ctrl)
+        assert _wait(lambda: ("climb", 3000) in log)
+        capture.frame = _FrameCapture(("priority_marker_at_spawn.png", (960, 650))).frame
+        t.join(timeout=5.0)
+    kinds = [e[0] for e in log]
+    assert kinds.index("climb") < kinds.index("pursue")
+    assert any("target in view (crown) during the climb" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_without_yield_a_crown_in_view_at_the_start_still_climbs(monkeypatch):
+    ctrl = _objective_ctrl(monkeypatch, _FrameCapture(("priority_marker_at_spawn.png", (960, 650))),
+                           yield_to_target=False)
+    log = _record(ctrl, monkeypatch)
+    t = _run_mission(ctrl)
+    assert _wait(lambda: ("climb", 3000) in log)
+    assert ctrl._capture.grabs == 0, "without yield_to_target nothing is looked for"
+    _drain(ctrl, t)
+
+
+# ---------------------------------------------------------------------------
+# Cycle 18: the climb asked for between missions waits for a target in view.
+# After a respawn the tree's altitude floor selected Climb about 1.5 s before
+# mission_acs restarted, on 66 of 66 respawns (2026-10-16 22:44 session); at
+# 00:17:02 it had the nose at +90 deg by the time the pursuit stopped it.
+# ---------------------------------------------------------------------------
+
+def _between_missions(monkeypatch, *placed, last="acs", yield_to_target=True):
+    ctrl = _objective_ctrl(monkeypatch, _FrameCapture(*placed), yield_to_target=yield_to_target)
+    ctrl._set_last_mission(last)
+    return ctrl
+
+
+def _stop_climb(ctrl):
+    ctrl._climb_stop.set()
+    assert _wait(lambda: not ctrl.is_climbing())
+
+
+_CROWN = ("priority_marker_at_spawn.png", (960, 650))
+
+
+def test_the_floor_climb_after_a_respawn_waits_for_a_crown_in_view(monkeypatch, caplog):
+    ctrl = _between_missions(monkeypatch, _CROWN)
+    with caplog.at_level("INFO", logger="wingman.controller"):
+        ctrl.climb_mode(target_alt=5000)
+        ctrl.climb_mode(target_alt=5000)      # the next tick asks again: one log line
+    assert not ctrl.is_climbing()
+    lines = [r.getMessage() for r in caplog.records if "climb waits" in r.getMessage()]
+    assert lines == ["Controller: climb waits — target in view (crown) before the mission restarts"]
+
+
+def test_the_floor_climb_starts_once_nothing_is_in_view(monkeypatch):
+    ctrl = _between_missions(monkeypatch, _CROWN)
+    ctrl.climb_mode(target_alt=5000)
+    assert not ctrl.is_climbing()
+    ctrl._capture.frame = _FrameCapture().frame
+    ctrl.climb_mode(target_alt=5000)
+    try:
+        assert ctrl.is_climbing()
+    finally:
+        _stop_climb(ctrl)
+
+
+def test_a_hard_emergency_climbs_whatever_is_in_view(monkeypatch):
+    ctrl = _between_missions(monkeypatch, _CROWN)
+    ctrl.climb_mode(target_alt=5000, emergency=True)
+    try:
+        assert ctrl.is_climbing()
+        assert ctrl._capture.grabs == 0, "an emergency does not even look"
+    finally:
+        _stop_climb(ctrl)
+
+
+@pytest.mark.parametrize("last, yield_to_target", [("j20", True), ("acs", False)])
+def test_only_acs_with_yield_to_target_waits(monkeypatch, last, yield_to_target):
+    ctrl = _between_missions(monkeypatch, _CROWN, last=last, yield_to_target=yield_to_target)
+    ctrl.climb_mode(target_alt=5000)
+    try:
+        assert ctrl.is_climbing()
+    finally:
+        _stop_climb(ctrl)
+
+
+def test_a_running_mission_climbs_without_the_wait(monkeypatch):
+    # The mission looks for itself, before its climb and through it (cycle 17).
+    ctrl = _between_missions(monkeypatch, _CROWN)
+    assert ctrl._mission_lock.acquire(timeout=1.0)
+    try:
+        ctrl.climb_mode(target_alt=3000)
+        assert ctrl.is_climbing()
+        assert ctrl._capture.grabs == 0
+    finally:
+        _stop_climb(ctrl)
+        ctrl._mission_lock.release()

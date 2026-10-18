@@ -36,6 +36,7 @@ Two invariants this file must keep:
 import contextlib
 import logging
 import os
+import socket
 import sys
 import threading
 import time
@@ -848,6 +849,28 @@ class _XKeyEvent:
 
 # How often a listener reports its tally (see _KeyTally). A named guess.
 _TALLY_INTERVAL_S = 60.0
+# How long the deaf-listener watchdog waits for the recording to return after
+# disabling it, and again after shutting its connection down.
+_DEAF_RESTART_WAIT_S = 5.0
+
+
+def _wake_record_connection(d_rec, display_name: str) -> None:
+    """Wake the listener thread blocked reading `d_rec`'s X connection.
+
+    Closing a socket does not wake a thread blocked reading it on Linux, and
+    python-xlib's close() flushes first, under the lock that blocked read holds:
+    on 2026-10-15 at 21:42 the deaf-listener watchdog's close left the :3
+    listener blocked, and the operator's keys on the game window unheard, for 19
+    minutes (Code Review 019 CR-019-16). Shutting the socket down does wake the
+    reader, without python-xlib's locks; its read then fails, and the loop's
+    error path closes the connection and reconnects."""
+    sock = getattr(getattr(d_rec, "display", None), "socket", None)
+    if sock is not None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError as e:
+            logger.debug("XKey[%s]: watchdog could not shut the record connection down: %s",
+                         display_name, e)
 
 
 class _KeyTally:
@@ -1012,6 +1035,8 @@ class _LinuxXTestKeyboard:
             d_rec = None
             d_ctrl = None
             iter_done = threading.Event()  # wakes _stop_watcher when this iteration ends, so it can't outlive its Display connections
+            # Set by the deaf-listener watchdog; read by the error path below too.
+            deaf_restart = threading.Event()
             try:
                 from Xlib import display as _xdisplay, X as _X, XK as _XK
                 from Xlib.ext import record as _record
@@ -1078,7 +1103,6 @@ class _LinuxXTestKeyboard:
                 # silently killing hotkeys — and with them the SAF-001 manual
                 # takeover path. Found by ruff B023 (Research 006).
                 tally = _KeyTally(display_name)
-                deaf_restart = threading.Event()
 
                 def _stop_watcher(iter_done=iter_done, d_ctrl=d_ctrl, d_rec=d_rec, ctx=ctx,
                                   tally=tally, deaf_restart=deaf_restart):
@@ -1105,14 +1129,16 @@ class _LinuxXTestKeyboard:
                                 except Exception as e:
                                     logger.debug("XKey: watchdog could not disable the "
                                                  "record context: %s", e)
-                                # If the blocked recording does not return, close its
-                                # connection: the loop then reconnects on the error.
-                                if not iter_done.wait(timeout=5.0):
-                                    try:
-                                        d_rec.close()
-                                    except Exception as e:
-                                        logger.debug("XKey: watchdog could not close the "
-                                                     "record connection: %s", e)
+                                # If the blocked recording does not return, shut its
+                                # connection down: its read fails and the loop
+                                # reconnects on the error (_wake_record_connection).
+                                if not iter_done.wait(timeout=_DEAF_RESTART_WAIT_S):
+                                    _wake_record_connection(d_rec, display_name)
+                                    if not iter_done.wait(timeout=_DEAF_RESTART_WAIT_S):
+                                        logger.error(
+                                            "XKey[%s]: the deaf listener did not restart - keys "
+                                            "on %s are not heard (SAF-001 takeover path)",
+                                            display_name, display_name)
                                 return
                     if iter_done.is_set() and not self._stop.is_set():
                         return
@@ -1208,6 +1234,10 @@ class _LinuxXTestKeyboard:
                 if _expected:
                     logger.info("XKey: %s closed as expected — listener stopping",
                                 display_name)
+                elif deaf_restart.is_set() and not self._stop.is_set():
+                    # The watchdog shut this recording's connection down.
+                    logger.info("XKey: restarting the %s listener after the deaf watchdog "
+                                "(its recording was shut down: %s)", display_name, e)
                 else:
                     logger.error("XKey listener thread died: %s", e)
                 iter_done.set()  # let this iteration's _stop_watcher exit instead of leaking
