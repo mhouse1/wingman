@@ -51,10 +51,16 @@ POPUP_DISMISS_STATES = (GameState.GAME_LOBBY, GameState.GAME_WAITING,
 # pressed 'u' and probed health, until the starting timeout fired.
 LOBBY_RECHECK_STATES = (GameState.GAME_STARTING,)
 # Consecutive agreeing reads before the state is walked back. The quick-scan
-# runs at roughly a 1 s cadence, so this is ~3 s of PLAY being continuously
-# visible — enough that a single stray read cannot abort a match that really is
-# starting, and still 50x faster than the 150 s timeout it replaces.
-STARTING_PLAY_CONFIRM_READS = 3
+# runs at roughly a 1 s cadence, so this is ~6 s of PLAY being continuously
+# visible, still 20x faster than the 150 s timeout it replaces.
+# ADR 161 (Code Review 019 cycle 29): a match that really is starting can
+# show PLAY or READY for a few reads. Over 1,056 GAME_STARTING phases of
+# 2026-10-15 to 10-18, 21 that went on to a battle showed it for 1 read (13)
+# or 2 (8), and the 3-read rule walked back real starts whose button went dark
+# on the very next read: the match then started with wingman in the lobby
+# (2026-10-18 08:09:13, 09:42:39, 12:55:09). A real failed start keeps the
+# button up until it is clicked, so the longer streak costs it ~3 s.
+STARTING_PLAY_CONFIRM_READS = 6
 # ADR 102 rev 2: the lowest health a GAME_STARTING probe may launch a mission
 # on. The probe reads the HEALTH crop before the match has drawn a HUD, so on
 # the lobby and on loading screens it reads digit fragments off other UI (0, 3,

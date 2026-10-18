@@ -4,6 +4,9 @@
 |--------|------------|-----------------|
 | Draft  | 2026-09-01 | 1.8.8           |
 
+D5's count of three reads is superseded by [ADR 161](161-the-lobby-walk-back-waits-six-reads.md)
+(six reads, 2026-10-18): a match that is starting can show the button for three.
+
 ## Context
 
 On 2026-09-01 a session spent 141.7 s convinced a match was starting while the

@@ -88,5 +88,23 @@ def test_a_single_read_cannot_abort_a_starting_match():
 
 
 def test_the_debounce_is_far_cheaper_than_the_timeout_it_replaces():
-    """The whole point is speed: the stall it fixes cost 141.7 s."""
-    assert STARTING_PLAY_CONFIRM_READS <= 5
+    """The whole point is speed: the stall it fixes cost 141.7 s. At the ~1.1 s
+    scan cadence the streak must stay under a tenth of the 150 s timeout."""
+    assert STARTING_PLAY_CONFIRM_READS * 1.1 < 150.0 / 10
+
+
+# Code Review 019 cycle 29: the longest run of PLAY or READY sightings measured
+# in a GAME_STARTING phase that went on to a battle. Over 1,056 phases of
+# 2026-10-15 to 10-18, 21 such phases showed the button for 1 read (13) or 2
+# (8); the 3-read streaks were all walked back, and on 2026-10-18 at 08:09:13,
+# 09:42:39 and 12:55:09 the button was gone on the next read and the match
+# started with wingman in the lobby, nobody flying.
+_LONGEST_REAL_START_FLASH_READS = 3
+
+
+def test_a_found_match_flash_cannot_walk_the_start_back():
+    """A match that is starting shows the lobby button for up to three reads
+    before the loading screen. The walk-back must need more than that, with
+    room to spare: a lost match costs a whole round, a later walk-back about a
+    second a read."""
+    assert STARTING_PLAY_CONFIRM_READS >= _LONGEST_REAL_START_FLASH_READS + 3
