@@ -453,6 +453,12 @@ SCHEMA = Section(
                 # afterburner. null: never brake.
                 "emergency_airbrake_below_deg": Leaf(
                     types=NUMBER, minimum=-90, maximum=0, allow_none=True, default=-40.0),
+                # Code Review 019 cycle 21: a dive at or above this speed (KPH)
+                # brakes at any angle, until it is down to the release. null: off.
+                "emergency_airbrake_above_kph": Leaf(
+                    types=NUMBER, minimum=0, maximum=3000, allow_none=True, default=None),
+                "emergency_airbrake_release_kph": Leaf(
+                    types=NUMBER, minimum=0, maximum=3000, allow_none=True, default=None),
                 "spawn_guard": Section(children={
                     "enabled": BOOL,
                     "max_hold_s": SECONDS,
@@ -479,6 +485,14 @@ SCHEMA = Section(
                     "capture_max": _int(0),
                     "capture_cooldown_s": _num(0),
                     "capture_dir": STR,
+                }),
+                # Code Review 019 cycle 25: two terrain warnings agreeing within
+                # window_s start the emergency climb, held hold_s.
+                "warning_agreement": Section(children={
+                    "enabled": Leaf(types=(bool,), default=False),
+                    "shadow": Leaf(types=(bool,), default=True),
+                    "window_s": Leaf(types=NUMBER, minimum=0, maximum=10, default=1.0),
+                    "hold_s": Leaf(types=NUMBER, minimum=0, maximum=30, default=3.0),
                 }),
             }),
             # HLDD 013 Phase 1: TACTIC_ATTACK_SUPPORT's fallback roll — own

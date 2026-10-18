@@ -513,8 +513,10 @@ def test_main_wires_the_path_perception_for_live_runs_only():
     grab, as for the main tick's loom."""
     src = inspect.getsource(main_module.main)
     guard = src.index("if not replay_mode and not capture_mode:\n        behavior_tree.set_terrain_loom(")
-    wiring = src.index("ctrl.set_path_perception(PathPerception(")
+    wiring = src.index("path_perception = PathPerception(")
     assert guard < wiring < guard + 900
+    # Cycle 25: the warning agreement is wired inside the same guard.
+    assert guard < src.index("ctrl.set_warning_agreement(warning_agreement)") < guard + 2600
 
 
 # ---------------------------------------------------------------------------
@@ -708,3 +710,19 @@ def test_the_pursuit_brakes_on_a_fast_resupply_approach(monkeypatch):
     assert brakes and brakes[0]["action_type"] == "key_press"
     assert brakes[-1]["action_type"] == "key_release"     # let go at the loop's exit
     assert not ctrl._approach_brake_held
+
+
+# --- Code Review 019 cycle 25: each ESCAPE plan is noted for the agreement --------
+
+@pytest.mark.parametrize("mode, noted", [("ESCAPE", True), ("DETOUR", False), ("BLIND", False)])
+def test_an_escape_plan_is_noted_in_the_warning_agreement(monkeypatch, mode, noted):
+    from wingman.clear_path import PathGoal, PathPerception, PathPlan
+    from wingman.warning_agreement import WarningAgreement
+    perception = PathPerception()
+    perception.agreement = WarningAgreement()
+    goal = PathGoal("target", 960.0, 500.0)
+    monkeypatch.setattr(perception._planner, "plan",
+                        lambda view, g, now: PathPlan(mode=mode, goal=g, aim=(960.0, 400.0),
+                                                      origin=(960.0, 600.0), side="over"))
+    perception.plan(_view([]), goal)
+    assert ("ESCAPE" in perception.agreement._last) is noted

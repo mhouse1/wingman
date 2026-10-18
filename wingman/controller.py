@@ -1219,6 +1219,14 @@ class Controller:
         self._climb_brake_below_deg = _cl_cfg.get(
             "emergency_airbrake_below_deg",
             schema_default("behavior_tree.climb.emergency_airbrake_below_deg"))
+        # Code Review 019 cycle 21 (ADR 159 amendment): a dive this fast brakes
+        # at any angle until the speed is down to the release; None: off.
+        self._climb_brake_above_kph = _cl_cfg.get(
+            "emergency_airbrake_above_kph",
+            schema_default("behavior_tree.climb.emergency_airbrake_above_kph"))
+        self._climb_brake_release_kph = _cl_cfg.get(
+            "emergency_airbrake_release_kph",
+            schema_default("behavior_tree.climb.emergency_airbrake_release_kph"))
         # ADR 088: abort a dive whose premise (empty rack) has expired.
         self._eject_abort_on_rearm = bool(_ecl.get("abort_on_rearm", True))
         # ADR 107: duration cap for the boundary turn. Bounded for the same
@@ -1757,6 +1765,11 @@ class Controller:
         """Code Review 019 cycle 11: the depth view the pursuit hands its
         pictures to (shadow), or None."""
         self._depth_perception = perception
+
+    def set_warning_agreement(self, agreement) -> None:
+        """Code Review 019 cycle 25: the terrain-warning tracker; while it
+        agrees, the crash recovery is not held off for a goal in view."""
+        self._warning_agreement = agreement
 
     def set_path_perception(self, perception) -> None:
         """Wire in the terrain perception the pursuit runs on its own frames
@@ -6081,6 +6094,13 @@ class Controller:
             # with one of them in view, and 310 of 316 targets were gone at the
             # hand-back.
             _objective = self._pursuit_objective_in_view()
+            # Code Review 019 cycle 25 (operator, 2026-10-18): two agreeing
+            # terrain warnings break off the chase or objective run anyway.
+            _agreement = getattr(self, "_warning_agreement", None)
+            if _objective is not None and _agreement is not None and _agreement.agreeing():
+                logger.info("Controller: crash recovery starts with the %s in view — "
+                            "two terrain warnings agree", _objective)
+                _objective = None
             if _objective is not None:
                 now = time.time()
                 if now - self._recovery_held_log_ts >= 10.0:
@@ -6755,6 +6775,7 @@ class Controller:
         observe_until = 0.0
         last_rate = None
         last_angle = None   # ADR 081: flight-path angle from the same sample
+        last_speed = None   # cycle 21: speed (KPH) from the same sample
         prev_angle = None   # ADR 086 d7: previous sample, for the pitch rate
         prev_angle_ts = None
         pitch_rate = None   # deg/s between the last two angle samples
@@ -6810,6 +6831,34 @@ class Controller:
             """
             limit = self._climb_brake_below_deg
             return limit is not None and angle is not None and angle < float(limit)
+
+        def _brake_release_why(angle: float, speed: "float | None") -> str:
+            """The release line's reason: the dive ended, or it is neither steep
+            nor fast any more (a release reads one or the other, never both)."""
+            if angle >= 0:
+                return "path %+.0f deg is no longer a dive" % angle
+            if speed is None or self._climb_brake_above_kph is None:
+                return "path %+.0f deg is no longer a steep dive" % angle
+            return ("path %+.0f deg is no longer a steep dive and %.0f KPH is slow "
+                    "enough" % (angle, speed))
+
+        def _fast_dive(angle: "float | None", braking: bool) -> bool:
+            """True while a dive is too fast to pull out of (Code Review 019
+            cycle 21). Over the emergency climbs of 2026-10-17 the nose came up
+            a median 21 deg/s at 400-599 KPH, 7 at 800-999, 5 at 1000-1199 and
+            3 at 1200-1399, while the burner the nose-up carries in a dive
+            shallower than the steep-dive limit added speed (1067 to 1459 KPH
+            at 20:23:37-41). Braking starts at or above
+            ``emergency_airbrake_above_kph`` and, once on, holds while the speed
+            stays above ``emergency_airbrake_release_kph``: well clear of the
+            stall the old any-dive rule caused (ADR 159: 1116 KPH to 266).
+            """
+            above = self._climb_brake_above_kph
+            if above is None or angle is None or angle >= 0 or last_speed is None:
+                return False
+            release = self._climb_brake_release_kph
+            floor = float(release) if (braking and release is not None) else float(above)
+            return last_speed > floor if braking else last_speed >= floor
 
         guarded_keys = tuple(k for k in (NOSE_UP_KEY, NOSE_DOWN_KEY, AFTERBURNER_KEY)
                              if k in _WATCHED_MANEUVER_KEYS)
@@ -6882,7 +6931,9 @@ class Controller:
                 if last_angle is None:
                     _braking = emergency_now and self._climb_emergency_active
                 else:
-                    _braking = emergency_now and _steep_dive(last_angle)
+                    _braking = emergency_now and (
+                        _steep_dive(last_angle)
+                        or _fast_dive(last_angle, self._climb_emergency_active))
                 if _braking != self._climb_emergency_active:
                     if _braking:
                         # Airbrake and afterburner cancel each other out (ADR
@@ -6895,8 +6946,10 @@ class Controller:
                                         action="climb_emergency")
                         self._climb_emergency_active = True
                         _actuator.reevaluate(AFTERBURNER_KEY)   # as at the start
-                        logger.info("Controller: climb — path %+.0f deg is a steep "
-                                    "dive: airbrake on, afterburner off", last_angle)
+                        logger.info("Controller: climb — path %+.0f deg %s: airbrake "
+                                    "on, afterburner off", last_angle,
+                                    "is a steep dive" if _steep_dive(last_angle)
+                                    else "at %.0f KPH is too fast to pull out of" % last_speed)
                     else:
                         self._climb_key(AIRBRAKE_KEY, press=False,
                                         action="climb_emergency")
@@ -6905,7 +6958,7 @@ class Controller:
                         # known angle; no angle keeps the brake (above).
                         logger.info("Controller: climb — %s: airbrake released, "
                                     "afterburner allowed",
-                                    "path %+.0f deg is no longer a steep dive" % last_angle
+                                    _brake_release_why(last_angle, last_speed)
                                     if emergency_now else "emergency cleared")
                 # ADR 075 burner gate: release at the floor (a held key at 0%
                 # blocks recharge; the sustain floor keeps the evade reserve),
@@ -7001,6 +7054,13 @@ class Controller:
                         _objective = (self._pursuit_objective_in_view()
                                       if _recovering and recovery_since is not None
                                       and not self._pursuit_dive_safety else None)
+                        # Code Review 019 cycle 25: not while two terrain warnings
+                        # agree (live 02:48:33: the agreement's recovery was handed
+                        # back after 0.3 s for the resupply marker, and restarted).
+                        _agreement = getattr(self, "_warning_agreement", None)
+                        if (_objective is not None and _agreement is not None
+                                and _agreement.agreeing()):
+                            _objective = None
                         if _objective is not None:
                             logger.info(
                                 "Controller: climb — the pursuit has the %s in view "
@@ -7159,6 +7219,8 @@ class Controller:
                             pitch_rate = (_new_angle - prev_angle) / _dt
                     prev_angle, prev_angle_ts = _new_angle, sig_ts
                 last_angle = _new_angle
+                _speed_signal = getattr(snap, "speed", None)
+                last_speed = getattr(_speed_signal, "stable_value", None)
                 # ADR 083 d3: at or above target, thrust stops — one fresh
                 # read, no debounce. Removing the energy source is the
                 # physical fix for a zoom climb; the pitch ceiling fighting

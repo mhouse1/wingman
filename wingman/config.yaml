@@ -212,9 +212,12 @@ crops:
     - [0.1484, 0.045]
     text: [INVITEPLAYERS, INVITEPLAY, VITEPLAYERS]
   STALL_MULTI_PLAYER:
+    # Code Review 019 cycle 24: moved right to where the party bar's red X is
+    # (x about 853 px). At 0.3826-0.4076 it read nothing on the 2026-10-18 01:05
+    # party lobby, and wingman stalled 900 s unable to leave a squad.
     coords:
-    - [0.3826, 0.91]
-    - [0.4076, 0.9444]
+    - [0.43, 0.91]
+    - [0.46, 0.9444]
     text: [X]
   STALL_RETRY:
     coords:
@@ -688,6 +691,13 @@ behavior_tree:
     # airbrake pulled out at 59 m and 138 m, which both started at -46.
     # null: never brake.
     emergency_airbrake_below_deg: -40
+    # Code Review 019 cycle 21 (ADR 159 amendment): a dive this fast brakes at any
+    # angle until the speed is down to the release. Over the emergency climbs of
+    # 2026-10-17 the nose came up a median 21 deg/s at 400-599 KPH and 3 to 5 at
+    # 1000-1399; 31 of 92 crashes in the 10-hour session came 3 to 12 s after the
+    # recovery began. The release sits well above stall prevention's 300 KPH.
+    emergency_airbrake_above_kph: 900
+    emergency_airbrake_release_kph: 750
     spawn_guard: {enabled: true, max_hold_s: 90.0, release_overlap_s: 2.5, pulse_s: 1.5,
       observe_s: 1.0}
     sustain: {enabled: true, enter_below_alt: 4000, exit_above_alt: 5000, max_climb_s: 90.0}
@@ -753,6 +763,12 @@ behavior_tree:
     # handles night maps before it actuates again.
     terrain_avoidance: {enabled: true, shadow: true, sky_min_frac: 0.55,
       confirm_reads: 2, capture_max: 0, capture_cooldown_s: 20.0}
+    # Code Review 019 cycle 25 (operator, 2026-10-18: "yes"): two of the shadow
+    # terrain warnings (planner ESCAPE, LOOM, SHAPE) within window_s of each other
+    # start the emergency climb, held hold_s for the tree's tick. On 2026-10-17
+    # (130 missions, 145 kill-card crashes) that agreement came 1 to 6 s before
+    # 34% of the crashes, about twice a mission, a crash following 16% of them.
+    warning_agreement: {enabled: true, shadow: false, window_s: 1.0, hold_s: 3.0}
   # HLDD 013 Phase 1: wires the existing, already-selected TACTIC_ATTACK_SUPPORT
   # fallback slot to the existing boundary reading — roll away from the nearest
   # map edge on ticks where nothing else steers at all. Ships shadow-only
@@ -1051,8 +1067,12 @@ depth_view:
 # 4 of 6 classified terrain; braked resupply passes 8 of 74, none terrain.
 # A/B (operator, 2026-10-16): alternated between back-to-back one-hour sessions
 # to separate the brake from time of day; see Code Review 019, cycle 14.
+# Ended 2026-10-17 (cycle 23) with both arms past 40 missions, pooled over both
+# accounts: brake on 48 missions, 2.81 deaths a mission, a death within 10 s of a
+# rearm climb-out 11 of 59 (19%); off 81 missions, 3.31, 27 of 88 (31%). Over 624
+# climb-outs that day the death rate was 30% above 1,100 KPH and about 11% below.
 approach_brake:
-  enabled: false
+  enabled: true
   resupply: true
   control_point: true
   crown: true

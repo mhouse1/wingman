@@ -1910,6 +1910,7 @@ class BehaviorTreeHandler:
         # HLDD 001 Phase 2 (shadow): the looming measurement and the grab it
         # needs for its second frame. Both None until set_terrain_loom().
         self._loom = None
+        self._warning_agreement = None
         self._loom_grab_fn = None
         self._shapes = None
         self._terrain_hud_cfg = (
@@ -2009,6 +2010,11 @@ class BehaviorTreeHandler:
         hud_renderer.set_terrain_source(
             self._analyzer.terrain_sky_mask, crops["TERRAIN_FORWARD"],
             sky_min_frac, shadow)
+
+    def set_warning_agreement(self, agreement) -> None:
+        """Code Review 019 cycle 25: the tracker LOOM and SHAPE switching on
+        are noted in, and whose verdict rides on the snapshot."""
+        self._warning_agreement = agreement
 
     def set_terrain_loom(self, loom, grab_fn) -> None:
         """Wire in the Phase 2 looming measurement (HLDD 001, shadow only).
@@ -2475,6 +2481,9 @@ class BehaviorTreeHandler:
             boundary_forward=_b_fwd,
             has_padlock=self._has_padlock,
             terrain_sky_frac=_terrain_sky_frac,
+            terrain_warnings_agree=(self._warning_agreement is not None
+                                    and current_game_state in _BATTLE_STATES
+                                    and self._warning_agreement.agreeing(now)),
         )
         self._writer.set("snapshot", snap)
         # Anomaly 007: refresh Climb's ttg emergency verdict unconditionally,
@@ -2524,14 +2533,20 @@ class BehaviorTreeHandler:
             # Each reading advances the confirm streak in order; a tick with
             # none resets it, once.
             loom_warn = False
+            loom_was = self._loom.warn
             for loom_reading in loom_readings or [None]:
                 loom_warn = self._loom.update(loom_reading) or loom_warn
+            if loom_warn and not loom_was and self._warning_agreement is not None:
+                self._warning_agreement.note("LOOM")
             if self._hud is not None and current_game_state in _BATTLE_STATES:
                 self._hud.set_loom_reading(
                     loom_readings[-1] if loom_readings else None, loom_warn, time.time())
         shape_reading = getattr(self, "_shape_reading", None)
         if self._shapes is not None:
+            shape_was = self._shapes.warn
             shape_warn = self._shapes.update(shape_reading)
+            if shape_warn and not shape_was and self._warning_agreement is not None:
+                self._warning_agreement.note("SHAPE")
             if self._hud is not None and current_game_state in _BATTLE_STATES:
                 self._hud.set_shape_reading(shape_reading, shape_warn, time.time())
         logger.debug(

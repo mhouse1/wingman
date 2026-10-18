@@ -469,6 +469,8 @@ class PathPerception:
         self._loom = TerrainLoom(loom_cfg)
         self._shapes = TerrainShapes(self._loom, shapes_cfg)
         self._planner = PathPlanner(cfg.get("planner"))
+        # Code Review 019 cycle 25: each ESCAPE plan is noted here.
+        self.agreement = None
         self._plan_modes: Counter = Counter()
         self._plan_label: "str | None" = None
         self._plan_logged = -1e9
@@ -571,6 +573,8 @@ class PathPerception:
             return view
         plan = self._planner.plan(view, goal, view.picture_ts)
         self._plan_modes[plan.mode] += 1
+        if plan.mode.startswith("ESCAPE") and self.agreement is not None:
+            self.agreement.note("ESCAPE")
         logger.debug("PATH: %s %s", fmt_plan(plan), fmt_own(own))
         label = f"{goal.kind} {plan.label}"
         if label != self._plan_label and view.picture_ts - self._plan_logged >= 2.0:

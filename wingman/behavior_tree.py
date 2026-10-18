@@ -30,6 +30,7 @@ import py_trees
 
 logger = logging.getLogger(__name__)
 
+from .config_schema import schema_default
 from .state import GameState
 
 SNAPSHOT_KEY = "snapshot"
@@ -106,6 +107,9 @@ class AnalyzerSnapshot:
     # as every other emergency trigger — this is the frozen measurement
     # only, consistent with boundary_dist/altitude above.
     terrain_sky_frac: "float | None" = None
+    # Code Review 019 cycle 25: two terrain warnings agreed within the hold
+    # (wingman/warning_agreement.py). The trigger lives in ClimbCondition.
+    terrain_warnings_agree: bool = False
 
     @property
     def contacts(self) -> int:
@@ -542,8 +546,15 @@ class ClimbCondition:
                 terrain_sky_min_frac: float = 0.55,
                 terrain_confirm_reads: int = 2,
                 alt_floor_m: "float | None" = None,
-                alt_floor_override_fn: "Callable[[], float | None] | None" = None):
+                alt_floor_override_fn: "Callable[[], float | None] | None" = None,
+                agreement_enabled: bool = False,
+                agreement_shadow: bool = True):
         self._enter_below_alt = enter_below_alt
+        # Code Review 019 cycle 25: two terrain warnings agreeing is a hard
+        # emergency (ttg's and terrain-ahead's footing), unless in shadow.
+        self._agreement_enabled = agreement_enabled
+        self._agreement_shadow = agreement_shadow
+        self._agreement_active = False
         self._exit_above_alt = exit_above_alt
         self._is_running_fn = is_running_fn
         self._confirm_reads = confirm_reads
@@ -768,6 +779,20 @@ class ClimbCondition:
             if not self._terrain_shadow:
                 emergency = emergency or terrain_ahead
 
+        # Code Review 019 cycle 25 (operator, 2026-10-18): two of the shadow
+        # terrain warnings (planner ESCAPE, LOOM, SHAPE) firing within a second
+        # came 1 to 6 s before a third of the kill-card crashes of 2026-10-17;
+        # the recovery mostly started under 2 s before the impact.
+        if self._agreement_enabled:
+            agree = bool(getattr(snapshot, "terrain_warnings_agree", False))
+            if agree and not self._agreement_active:
+                logger.warning(
+                    "BT: TERRAIN WARNINGS AGREE — climb forced (Code Review 019 "
+                    "cycle 25)%s", " [SHADOW - not actuating]" if self._agreement_shadow else "")
+            self._agreement_active = agree
+            if not self._agreement_shadow:
+                emergency = emergency or agree
+
         # ttg or terrain only, captured BEFORE the altitude floor below is
         # folded in — see hard_emergency_active's docstring.
         self._hard_emergency_active = bool(emergency)
@@ -872,7 +897,9 @@ def make_climb_condition(enter_below_alt: "float | None",
                          terrain_sky_min_frac: float = 0.55,
                          terrain_confirm_reads: int = 2,
                          alt_floor_m: "float | None" = None,
-                         alt_floor_override_fn: "Callable[[], float | None] | None" = None
+                         alt_floor_override_fn: "Callable[[], float | None] | None" = None,
+                         agreement_enabled: bool = False,
+                         agreement_shadow: bool = True,
                          ) -> ClimbCondition:
     """ADR 139 D3: thin factory kept so every existing call site — production
     and test — is unchanged. See ``ClimbCondition`` for the logic."""
@@ -887,7 +914,9 @@ def make_climb_condition(enter_below_alt: "float | None",
                           terrain_sky_min_frac=terrain_sky_min_frac,
                           terrain_confirm_reads=terrain_confirm_reads,
                           alt_floor_m=alt_floor_m,
-                          alt_floor_override_fn=alt_floor_override_fn)
+                          alt_floor_override_fn=alt_floor_override_fn,
+                          agreement_enabled=agreement_enabled,
+                          agreement_shadow=agreement_shadow)
 
 
 def make_sustain_climb_condition(enter_below_alt: "float | None",
@@ -1122,6 +1151,7 @@ def _build_climb_slot(ctx: "_BuildContext"):
     # behavior_tree.boundary — detection config near the detector, trigger
     # config near the condition it feeds).
     _terrain_cfg = climb_cfg.get("terrain_avoidance", {}) or {}
+    _agree_cfg = climb_cfg.get("warning_agreement", {}) or {}
     emergency = make_climb_condition(
         climb_cfg.get("enter_below_alt"),
         climb_cfg.get("exit_above_alt"),
@@ -1137,7 +1167,11 @@ def _build_climb_slot(ctx: "_BuildContext"):
         terrain_sky_min_frac=float(_terrain_cfg.get("sky_min_frac", 0.55)),
         terrain_confirm_reads=int(_terrain_cfg.get("confirm_reads", 2)),
         alt_floor_m=climb_cfg.get("alt_floor_m"),
-        alt_floor_override_fn=ctx.alt_floor_override_fn)
+        alt_floor_override_fn=ctx.alt_floor_override_fn,
+        agreement_enabled=bool(_agree_cfg.get(
+            "enabled", schema_default("behavior_tree.climb.warning_agreement.enabled"))),
+        agreement_shadow=bool(_agree_cfg.get(
+            "shadow", schema_default("behavior_tree.climb.warning_agreement.shadow"))))
     # ADR 075: the armed altitude-sustain band shares the leaf with the
     # emergency band. Both closures are evaluated EVERY tick (no
     # short-circuit) so neither hysteresis state machine goes stale while

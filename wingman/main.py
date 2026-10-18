@@ -41,6 +41,7 @@ from .hud import HudRenderer
 from .clear_path import PathPerception
 from .depth_view import DepthPerception
 from .kill_card import KillCardReader, read_card
+from .warning_agreement import WarningAgreement
 from .terrain_loom import TerrainLoom
 from .mission_stats import MissionStatsTracker
 from .performance import PerformanceTracker
@@ -1360,8 +1361,23 @@ def main():
         # Code Review 019 step 3a: the same measurement on the pursuit's own
         # frames, with its own detector instances. Live only, for the reason
         # above: the pursuit's grabs are scripted screenshots in those lanes.
-        ctrl.set_path_perception(PathPerception(
-            (cfg.get("terrain_avoidance") or {}).get("loom"), cfg.get("clear_path")))
+        path_perception = PathPerception(
+            (cfg.get("terrain_avoidance") or {}).get("loom"), cfg.get("clear_path"))
+        ctrl.set_path_perception(path_perception)
+        # Code Review 019 cycle 25: the planner's ESCAPE and the tick's LOOM and
+        # SHAPE noted in one tracker; two agreeing start the emergency climb.
+        _agree_cfg = (((cfg.get("behavior_tree") or {}).get("climb") or {})
+                      .get("warning_agreement") or {})
+        if _agree_cfg.get("enabled", schema_default(
+                "behavior_tree.climb.warning_agreement.enabled")):
+            warning_agreement = WarningAgreement(
+                window_s=_agree_cfg.get("window_s", schema_default(
+                    "behavior_tree.climb.warning_agreement.window_s")),
+                hold_s=_agree_cfg.get("hold_s", schema_default(
+                    "behavior_tree.climb.warning_agreement.hold_s")))
+            path_perception.agreement = warning_agreement
+            behavior_tree.set_warning_agreement(warning_agreement)
+            ctrl.set_warning_agreement(warning_agreement)
         # Cycle 11: relative depth from a monocular model, in a worker process
         # that loads it in the background (shadow; stopped by ctrl.cleanup()).
         depth_view = DepthPerception(cfg.get("depth_view"))
