@@ -110,6 +110,13 @@ class AnalyzerSnapshot:
     # Code Review 019 cycle 25: two terrain warnings agreed within the hold
     # (wingman/warning_agreement.py). The trigger lives in ClimbCondition.
     terrain_warnings_agree: bool = False
+    # Code Review 019 cycle 32 (HLDD 001 part 2): the latest raw HUD altitude
+    # and speed and the flight-path angle, each None unless fresh, for the
+    # pull-out trigger in ClimbCondition. `altitude` above is the stable value,
+    # the mean of the last reads, which trails a fast dive by hundreds of metres.
+    altitude_now: "float | None" = None
+    speed_kph: "float | None" = None
+    path_deg: "float | None" = None
 
     @property
     def contacts(self) -> int:
