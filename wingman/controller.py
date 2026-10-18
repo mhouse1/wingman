@@ -6097,7 +6097,7 @@ class Controller:
             # Code Review 019 cycle 25 (operator, 2026-10-18): two agreeing
             # terrain warnings break off the chase or objective run anyway.
             _agreement = getattr(self, "_warning_agreement", None)
-            if _objective is not None and _agreement is not None and _agreement.agreeing():
+            if _objective is not None and _agreement is not None and _agreement.live():
                 logger.info("Controller: crash recovery starts with the %s in view — "
                             "two terrain warnings agree", _objective)
                 _objective = None
@@ -7059,7 +7059,7 @@ class Controller:
                         # back after 0.3 s for the resupply marker, and restarted).
                         _agreement = getattr(self, "_warning_agreement", None)
                         if (_objective is not None and _agreement is not None
-                                and _agreement.agreeing()):
+                                and _agreement.live()):
                             _objective = None
                         if _objective is not None:
                             logger.info(

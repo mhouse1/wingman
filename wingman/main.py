@@ -1374,7 +1374,9 @@ def main():
                 window_s=_agree_cfg.get("window_s", schema_default(
                     "behavior_tree.climb.warning_agreement.window_s")),
                 hold_s=_agree_cfg.get("hold_s", schema_default(
-                    "behavior_tree.climb.warning_agreement.hold_s")))
+                    "behavior_tree.climb.warning_agreement.hold_s")),
+                shadow=_agree_cfg.get("shadow", schema_default(
+                    "behavior_tree.climb.warning_agreement.shadow")))
             path_perception.agreement = warning_agreement
             behavior_tree.set_warning_agreement(warning_agreement)
             ctrl.set_warning_agreement(warning_agreement)

@@ -35,8 +35,13 @@ class WarningAgreement:
     latest moment two different kinds fired within `window_s` of each other.
     """
 
-    def __init__(self, window_s: float = 1.0, hold_s: float = 3.0, clock=time.time) -> None:
+    def __init__(self, window_s: float = 1.0, hold_s: float = 3.0, clock=time.time,
+                 shadow: bool = False) -> None:
         self.window_s = float(window_s)
+        # In shadow the agreements are logged and nothing flies on them: the
+        # climb condition does not force a climb and the controller does not
+        # set aside its objective hold-off (live 2026-10-18 07:13:40, cycle 26).
+        self.shadow = bool(shadow)
         self.hold_s = float(hold_s)
         self._clock = clock
         self._lock = threading.Lock()
@@ -64,10 +69,16 @@ class WarningAgreement:
             self._lock.release()
         if fresh:
             self.agreements += 1
-            logger.warning("TERRAIN WARNINGS AGREE: %s and %s within %.1f s — "
-                           "the emergency climb starts (Code Review 019 cycle 25)",
-                           kind, " and ".join(partners), self.window_s)
+            logger.warning("TERRAIN WARNINGS AGREE: %s and %s within %.1f s — %s "
+                           "(Code Review 019 cycle 25)",
+                           kind, " and ".join(partners), self.window_s,
+                           "[SHADOW - not actuating]" if self.shadow
+                           else "the emergency climb starts")
         return True
+
+    def live(self, now: "float | None" = None) -> bool:
+        """True while agreeing and not in shadow: what the controller flies on."""
+        return not self.shadow and self.agreeing(now)
 
     def agreeing(self, now: "float | None" = None) -> bool:
         """True while the latest agreement is under `hold_s` old."""

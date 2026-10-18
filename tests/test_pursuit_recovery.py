@@ -770,3 +770,19 @@ def test_agreeing_warnings_keep_the_recovery_when_a_goal_comes_into_view(monkeyp
         assert ctrl.is_climbing(), "handed back while the warnings agree"
     finally:
         _stop(ctrl)
+
+
+def test_a_shadow_agreement_leaves_the_hold_off_in_place(monkeypatch, caplog):
+    """Live 2026-10-18 07:13:40: the shadow trigger still broke off the chase."""
+    from wingman.warning_agreement import WarningAgreement
+    ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-25.0))
+    agreement = WarningAgreement(shadow=True)
+    agreement.note("LOOM")
+    agreement.note("ESCAPE")
+    ctrl.set_warning_agreement(agreement)
+    ctrl._pursuing.set()
+    ctrl._note_pursuit_objective("target")
+    with caplog.at_level(logging.INFO, logger="wingman.controller"):
+        ctrl.climb_mode(emergency=True)
+    assert not ctrl.is_climbing()
+    assert _held_off(caplog)

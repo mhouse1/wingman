@@ -122,3 +122,16 @@ def test_the_shipped_config_flies_it():
                          .read_text(encoding="utf-8"))
     agree = cfg["behavior_tree"]["climb"]["warning_agreement"]
     assert agree["enabled"] is True and agree["shadow"] is False
+
+
+def test_in_shadow_an_agreement_is_logged_but_not_live(caplog):
+    """Live 2026-10-18 07:13:40: with the trigger in shadow the controller still
+    set aside its objective hold-off on an agreement."""
+    clock = _Clock()
+    a = WarningAgreement(clock=clock, shadow=True)
+    with caplog.at_level(logging.WARNING, logger="wingman.warning_agreement"):
+        a.note("LOOM")
+        clock.t += 0.3
+        a.note("SHAPE")
+    assert a.agreeing() and not a.live()
+    assert "SHADOW - not actuating" in caplog.records[0].getMessage()
