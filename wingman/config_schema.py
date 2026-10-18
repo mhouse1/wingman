@@ -698,6 +698,11 @@ SCHEMA = Section(
             "decel_kph_s": Leaf(types=NUMBER, minimum=10, maximum=1000, default=150.0),
             # The longest dose one reading can start.
             "max_dose_s": Leaf(types=NUMBER, minimum=0.1, maximum=10, default=3.0),
+            # Code Review 019 cycle 27: also brake in a dive steeper than
+            # dive_path_deg below dive_below_m, with no objective steering.
+            "dive": Leaf(types=(bool,), default=False),
+            "dive_path_deg": Leaf(types=NUMBER, minimum=-90, maximum=0, default=-10.0),
+            "dive_below_m": Leaf(types=NUMBER, minimum=0, maximum=20000, default=3000.0),
         }),
 
         # Code Review 019 step 3a: the terrain outlines measured on the pursuit's

@@ -643,7 +643,14 @@ class Controller:
         self._approach_brake_cfg = {
             key: _brake.get(key, schema_default(f"approach_brake.{key}"))
             for key in ("enabled", "resupply", "control_point", "crown", "cap_kph",
-                        "target_kph", "decel_kph_s", "max_dose_s")}
+                        "target_kph", "decel_kph_s", "max_dose_s", "dive",
+                        "dive_path_deg", "dive_below_m")}
+        # Code Review 019 cycle 27: the last dive the brake was armed for, for its log.
+        self._dive_brake_state: "tuple[float, float] | None" = None
+        # Cycle 27b: True while the dose in hand was started for a dive, and why
+        # the dive goal last ended, for the release line.
+        self._dive_dose_running = False
+        self._dive_brake_end_why = "no braked objective has the steering"
         self._approach_brake_held = False
         self._approach_brake_until = 0.0
         self._approach_brake_read_ts: "float | None" = None
@@ -2415,7 +2422,53 @@ class Controller:
 
     # The approach brake's switch for each objective it can brake for.
     _BRAKE_GOAL_KEYS = {"resupply": "resupply", "control point": "control_point",
-                        "crown": "crown"}
+                        "crown": "crown", "dive": "dive"}
+
+    def _dive_brake_goal(self) -> "str | None":
+        """Code Review 019 cycle 27 (envelope protection, part 1): "dive" while
+        the flight path points `dive_path_deg` or more below level under
+        `dive_below_m`, for a pursuit cycle no objective's marker steers.
+
+        Over 31,589 HUD samples of 2026-10-17/18 a kill-card crash followed
+        within 8 s 0.8 to 3.1% of the time while climbing, at any speed; in a
+        dive of -10 to -30 deg 3.1% under 600 KPH and 11.8% at 1,100 and over;
+        steeper than -30 deg 6.4% and 37.1%. The nose comes up a median
+        21 deg/s at 400-599 KPH and 3 to 5 deg/s at 1,000-1,399 (cycle 21), so a
+        fast dive has lost the pitch it needs to pull out. The approach brake,
+        the same dose on objective approaches, cut the crashes after a rearm
+        climb-out from 31% to 19% in its A/B. None when the path or the
+        altitude has no fresh reading.
+
+        Cycle 27b: a dose started for a dive runs its course while the path
+        still points below level, or while the readings are stale; its time,
+        a reading at the target and the vetoes still end it. Live at 08:26:30 on
+        2026-10-18 a 3.0 s dose at 1,533 KPH let go after 1.5 s when the path
+        read -10 deg, with the speed still 1,502 KPH: the path is an average
+        over the OCR cadence and wanders across the threshold in a dive.
+        """
+        cfg = self._approach_brake_cfg
+        if not cfg.get("dive") or self._analyzer is None:
+            return None
+        running = self._approach_brake_held and self._dive_dose_running
+        try:
+            snap = self._analyzer.get_telemetry()
+        except Exception:
+            snap = None
+        path = alt = None
+        if snap is not None and snap.altitude_fresh():
+            path = snap.pitch_angle_deg()
+            alt = snap.altitude.stable_value
+        if path is None or alt is None:
+            return "dive" if running else None
+        if path <= float(cfg["dive_path_deg"]) and alt < float(cfg["dive_below_m"]):
+            self._dive_brake_state = (path, alt)
+            return "dive"
+        if running and path < 0.0:
+            self._dive_brake_state = (path, alt)
+            return "dive"
+        self._dive_brake_end_why = ("no longer a dive (path %+.0f deg at %.0f m)"
+                                    % (path, alt))
+        return None
 
     def _approach_brake_tick(self, goal: "str | None") -> None:
         """Code Review 019 cycle 9 (operator, 2026-10-15): the airbrake on the
@@ -2440,8 +2493,9 @@ class Controller:
             return
         now = time.time()
         armed = goal is not None and bool(cfg.get(self._BRAKE_GOAL_KEYS.get(goal, ""), False))
-        veto = (None if armed else "no braked objective has the steering") \
-            or self._approach_brake_veto(now)
+        unarmed = (self._dive_brake_end_why if self._dive_dose_running
+                   else "no braked objective has the steering")
+        veto = (None if armed else unarmed) or self._approach_brake_veto(now)
         if veto is not None:
             self._approach_brake_off(veto)
             return
@@ -2452,9 +2506,13 @@ class Controller:
                 dose = min(float(cfg["max_dose_s"]),
                            (reading - float(cfg["target_kph"])) / float(cfg["decel_kph_s"]))
                 self._approach_brake_until = now + dose
-                logger.info("SPEEDCAP: %.0f KPH over the %.0f KPH cap on the %s "
-                            "approach: airbrake for %.1f s", reading, float(cfg["cap_kph"]),
-                            goal, dose)
+                self._dive_dose_running = goal == "dive"
+                if goal == "dive" and self._dive_brake_state is not None:
+                    where = "in a dive (%+.0f deg at %.0f m)" % self._dive_brake_state
+                else:
+                    where = "on the %s approach" % goal
+                logger.info("SPEEDCAP: %.0f KPH over the %.0f KPH cap %s: airbrake "
+                            "for %.1f s", reading, float(cfg["cap_kph"]), where, dose)
                 self._approach_brake_on()
             elif self._approach_brake_held and reading <= float(cfg["target_kph"]):
                 self._approach_brake_off("%.0f KPH reached" % reading)
@@ -2489,6 +2547,8 @@ class Controller:
         its next tick. While the emergency climb holds the airbrake the key is
         that climb's (ADR 137), so it is left down for the climb to release."""
         self._approach_brake_until = 0.0
+        self._dive_dose_running = False
+        self._dive_brake_end_why = "no braked objective has the steering"
         if not getattr(self, "_approach_brake_held", False):
             return
         self._approach_brake_held = False
@@ -4790,6 +4850,10 @@ class Controller:
                             elif priority_control:
                                 brake_goal = ("crown" if priority_kind == "priority_target"
                                               else "control point")
+                            else:
+                                # Cycle 27: a fast dive with no objective steering,
+                                # the chase included.
+                                brake_goal = self._dive_brake_goal()
                         self._approach_brake_tick(brake_goal)
                         # Code Review 019 step 3e: the planner's aim in place of the
                         # marker while it detours or escapes (when steering is on).

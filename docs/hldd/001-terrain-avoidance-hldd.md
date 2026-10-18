@@ -4,6 +4,124 @@
 |--------|------------|-----------------|
 | Active | 2026-09-20 | 1.8.9           |
 
+## Direction (2026-10-18, wingman 1.9.2): envelope protection
+
+Status: part 1 built and in its first A/B; parts 2 and 3 designed, not built. This section supersedes the
+document's premise that terrain avoidance is first a perception problem. The forward-view detectors described
+below stay, as a secondary input. Operator, 2026-10-18: "review the design of hldd1 is there a better
+solution", then "update hldd1 with this recommendation".
+
+**Decision.** Keep the aircraft out of flight states it cannot recover from, using the telemetry it already
+reads (speed, flight-path angle, altitude), instead of waiting to see terrain in the forward view and then
+pulling up. The forward view becomes a secondary input, for the one case only it can see.
+
+**Why** (measured unless marked):
+
+- Phase 1's sky test reads below its threshold on 95 percent of ticks on a canyon map (1,270 of 1,335) and
+  0.00 in open night sky. It has stayed in shadow.
+- Phase 2's looming and shapes become unreadable when the ground is closest: a third to two thirds of the
+  readings before each terrain death were unreadable, against 36 percent over the whole session (08:42
+  session). The live rule warned before 7 of 17 terrain deaths in the five-hour session.
+- The recovery usually fires, then fails. In the operator's 10-hour account-2 session of 2026-10-17 (295
+  deaths, 92 of them crashes by the kill card, [Code Review 019](../code-review/019-2026-10.md) cycle 19), an
+  emergency climb had started before 71 of the 92 crashes, before 31 of them 3 to 12 s early. On 2026-10-04
+  the hold lost a median of over 1,200 m.
+- Pitch authority falls with speed. During emergency climbs in a dive the nose came up a median 21 deg/s at
+  400 to 599 KPH, 8 at 600 to 799, 7 at 800 to 999, 5 at 1,000 to 1,199 and 3 at 1,200 to 1,399 (320 sample
+  pairs, six logs). On 2026-10-17 from 20:23:37 to 20:23:41 a dive of -29 to -38 degrees carried the
+  afterburner and went from 1,067 to 1,459 KPH while the nose-up was held.
+- An earlier warning alone does not cure it. Two of the three forward-view warnings agreeing within a second
+  (Code Review 019 cycle 25) is followed by a crash within 6 s 9 to 16 percent of the time. Flown live for 34
+  missions, it started 24 of 40 crash pull-ups 3 s or more ahead, against 7 of 16 in the 10 missions before
+  it; crashes went from 1.9 to 1.47 a mission and objectives from 2.5 to 1.8. A lean, not a verdict.
+- The one intervention with a clear effect was a speed limit. The approach brake (Code Review 019 cycles 9
+  and 13) cut deaths within 10 s of a rearm climb-out from 31 percent (27 of 88) to 19 percent (11 of 59)
+  across both accounts, and to 9 of 127 in the run after it was made permanent (cycle 23).
+
+**Crash risk by flight state.** 31,589 HUD samples in battle over nine logs of 2026-10-17 and 2026-10-18,
+1,245 of them followed by a kill-card crash within 8 s. The chance of a crash within 8 s:
+
+| Speed (KPH) | Climbing | Level (-10 to +5 deg) | Dive (-10 to -30 deg) | Dive (steeper than -30 deg) |
+|-------------|----------|-----------------------|-----------------------|-----------------------------|
+| Under 600 | 1.0% | 3.3% | 3.1% | 6.4% |
+| 600 to 850 | 0.8% | 2.1% | 3.9% | 10.4% |
+| 850 to 1,100 | 1.4% | 3.1% | 7.7% | 19.5% |
+| 1,100 and over | 3.1% | 5.4% | 11.8% | 37.1% |
+
+By HUD altitude, which is above sea level and not above the terrain: fast and under 1,000 m, 18.7 percent;
+over 2,000 m, under 3 percent at any speed. The risk rises smoothly with speed, dive angle and lowness, and
+its worst cell is three to four times as precise as any forward-view alarm.
+
+**The design.**
+
+```mermaid
+flowchart TD
+    T[Telemetry speed path angle altitude] --> A{Diving low and fast}
+    A -->|yes| B[Airbrake dose and no afterburner]
+    T --> M[Height a pull-out would lose]
+    F[Terrain floor] --> C{Pull-out still fits above the floor}
+    M --> C
+    C -->|no| E[Emergency climb]
+    V[Forward view warnings] --> E
+```
+
+Conditions, in words: "diving low and fast" is a flight path of -10 degrees or steeper, under 3,000 m, over
+850 KPH. "Fits above the floor" is the predicted lowest point of the pull-out staying above the floor with a
+margin.
+
+1. **A speed limit in dives, everywhere (part 1, built).** Code Review 019 cycle 27: the approach brake
+   (`approach_brake`) gains a `dive` goal. In a pursuit cycle no objective's marker steers, a flight path of
+   `dive_path_deg` (-10) or steeper under `dive_below_m` (3,000 m) arms the same dose as on an objective
+   approach: a fresh speed reading over `cap_kph` (850) brakes toward `target_kph` (800), at most
+   `max_dose_s` (3 s), and cruise's afterburner yields to it. A dose started in a dive runs its course
+   while the path still points below level (cycle 27b): the path is an average over the OCR cadence and
+   wanders across -10 degrees in a dive. The chase is included: it was the largest
+   crash source (34 of 92 in the 10-hour session) and dived at up to 1,459 KPH. Log: `SPEEDCAP: 1100 KPH
+   over the 850 KPH cap in a dive (-25 deg at 1500 m): airbrake for 2.0 s`. Not yet covered: dives outside
+   a pursuit (the behavior tree's own tactics, the mission script).
+2. **Trigger the recovery on whether a pull-out still fits (part 2, designed).** Predict the height a
+   pull-out loses from the current speed and dive angle with the measured pitch-rate curve, and start the
+   emergency climb when the predicted lowest point would fall below the floor. Time to ground, the trigger
+   now, assumes the current descent continues all the way to sea level and ignores how long the pull-out
+   takes. With a constant pitch rate the loss is about half the descent rate times the time to level
+   (inferred, an approximation over the measured medians):
+
+   | Speed (KPH) | Nose rate (deg/s) | Time to level from -35 deg | Height lost |
+   |-------------|-------------------|----------------------------|-------------|
+   | 500 | 21 | 1.6 s | about 65 m |
+   | 700 | 8 | 4.4 s | about 240 m |
+   | 900 | 7 | 4.8 s | about 340 m |
+   | 1,100 | 5 | 6.5 s | about 570 m |
+   | 1,300 | 3 | 13.0 s | about 1,340 m |
+
+   The rates were measured during the emergency climb's pulsed nose-up, not a continuous pull, so a better
+   pull may lose less. Re-measure the curve once part 2 holds the key continuously.
+3. **A terrain floor (part 3, designed).** HUD altitude is above sea level, so the true height of the terrain
+   is unknown. Start with one conservative floor for every map, since the risk concentrates under 2,000 m.
+   Then learn a floor per map from the altitudes of kill-card crashes, or revive
+   [Design 017](017-terrain-map-from-flight-footage-hldd.md)'s height map.
+4. **The forward view as a secondary input.** The Phase 1 and Phase 2 detectors stay, for level flight into
+   terrain that stands above the floor, which telemetry cannot see. The agreement trigger (cycle 25) is live
+   in the shipped `config.yaml`; on VEDA it is in shadow through `config.local.yaml` while part 1's A/B runs,
+   so that only one thing changes between its blocks.
+
+**Caveats.**
+
+- The risk table is observational. Fast steep dives also happen where targets and terrain are, so part of
+  the risk is the situation, not the speed.
+- Each part needs its own A/B of 40 missions or more.
+- Wingman logs no kills of its own, so a speed limit's cost to the chase is read from `PURSUIT SUMMARY` (the
+  share of scans with a lock, missiles fired, gun time) and from objectives a mission.
+- Bank and attitude are still not read; a pull-out started while banked is not modelled.
+
+**Validation.**
+
+- Part 1: alternating one-hour blocks with the dive limit on and off, the agreement trigger in shadow
+  throughout. Measures: crashes and deaths a mission, crashes within 10 s of a dive faster than 850 KPH, and
+  the chase's lock share, missiles fired and objectives a mission. Rows go in Code Review 019.
+- Part 2: the share of crashes whose recovery started 3 s or more ahead and still failed (31 of 92 in the
+  10-hour session).
+
 ## Redesign note (2026-09-16)
 
 This document was originally written 2026-05-03 against v1.6.5, proposing a
@@ -1005,6 +1123,10 @@ The sessions recorded above led to a different approach, which has its own docum
 [Design 017](017-terrain-map-from-flight-footage-hldd.md) builds a height map of each arena offline from flight
 footage and telemetry, so wingman looks the terrain up instead of detecting it in the view. The forward-view
 detectors in this document stay in shadow as they are.
+
+2026-10-18: superseded as the direction by "Direction (2026-10-18): envelope protection" at the top of this
+document. Design 017's height map is one of the two ways named there to get a terrain floor (part 3), and two
+of the forward-view warnings agreeing now starts the emergency climb (Code Review 019 cycle 25).
 
 ## Retiring the spawn nose-up (plan, 2026-10-03, wingman 1.9.0)
 

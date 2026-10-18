@@ -1080,6 +1080,14 @@ approach_brake:
   target_kph: 800
   decel_kph_s: 150
   max_dose_s: 3.0
+  # Code Review 019 cycle 27 (envelope protection, part 1): the same dose in a
+  # dive with no objective steering, the chase included. Over 31,589 HUD samples
+  # of 2026-10-17/18 a crash followed within 8 s 37% of the time in a dive
+  # steeper than -30 deg at 1,100 KPH and over, 6% under 600 KPH, and about 1%
+  # climbing; the nose comes up 21 deg/s at 500 KPH and 3 to 5 above 1,000.
+  dive: true
+  dive_path_deg: -10
+  dive_below_m: 3000
 # Design 010 instrumentation: the RETURN TO BATTLE banner. Counted, not
 # acted on — it appears only after the crossing, so it measures the
 # outcome rather than preventing it.
