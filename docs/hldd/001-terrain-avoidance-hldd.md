@@ -79,23 +79,65 @@ margin.
    crash source (34 of 92 in the 10-hour session) and dived at up to 1,459 KPH. Log: `SPEEDCAP: 1100 KPH
    over the 850 KPH cap in a dive (-25 deg at 1500 m): airbrake for 2.0 s`. Not yet covered: dives outside
    a pursuit (the behavior tree's own tactics, the mission script).
-2. **Trigger the recovery on whether a pull-out still fits (part 2, designed).** Predict the height a
+2. **Trigger the recovery on whether a pull-out still fits (part 2, in shadow since cycle 32).** Predict the height a
    pull-out loses from the current speed and dive angle with the measured pitch-rate curve, and start the
    emergency climb when the predicted lowest point would fall below the floor. Time to ground, the trigger
    now, assumes the current descent continues all the way to sea level and ignores how long the pull-out
-   takes. With a constant pitch rate the loss is about half the descent rate times the time to level
-   (inferred, an approximation over the measured medians):
+   takes. With the nose coming up at a constant rate q, the path comes level in T = |g| / q and the height
+   lost is v T (1 - cos g) / g, g in radians (`wingman/pullout.py`; the rates are the measured medians):
 
    | Speed (KPH) | Nose rate (deg/s) | Time to level from -35 deg | Height lost |
    |-------------|-------------------|----------------------------|-------------|
-   | 500 | 21 | 1.6 s | about 65 m |
-   | 700 | 8 | 4.4 s | about 240 m |
-   | 900 | 7 | 4.8 s | about 340 m |
-   | 1,100 | 5 | 6.5 s | about 570 m |
-   | 1,300 | 3 | 13.0 s | about 1,340 m |
+   | 500 | 21 | 1.7 s | about 70 m |
+   | 700 | 8 | 4.4 s | about 250 m |
+   | 900 | 7 | 5.0 s | about 370 m |
+   | 1,100 | 5 | 7.0 s | about 630 m |
+   | 1,300 | 3 | 11.7 s | about 1,250 m |
 
    The rates were measured during the emergency climb's pulsed nose-up, not a continuous pull, so a better
-   pull may lose less. Re-measure the curve once part 2 holds the key continuously.
+   pull may lose less. Re-measure the curve once part 2 holds the key continuously. Re-measured on the 14
+   Su-33 logs of 2026-10-17/18 (645 sample pairs): 15, 14, 11, 5.4 and 0 deg/s across the same bands, so
+   faster than cycle 21's medians at 600 to 999 KPH and not rising at all at 1,200 to 1,399 KPH (half the
+   pairs rising). Scored offline, the two curves give the same trigger within a point (600 m floor: 55%
+   against 55% two seconds ahead, 43% against 41% four seconds ahead, 17% precision both), so the code
+   keeps cycle 21's. Whether the flat 1,200 KPH band is the aircraft or the climb's pulsed nose-up is
+   open.
+
+   Built in shadow (Code Review 019 cycle 32): `behavior_tree.climb.pullout` (`floor_m` 600, `reaction_s`
+   2.0) computes the lowest point from the raw HUD altitude, speed and path every tree tick and logs
+   `BT: PULL-OUT WOULD NOT CLEAR — lowest point ... under the 600m floor ... [SHADOW - not actuating]` once
+   an episode; time to ground still flies. Scored offline over 23 logs of 2026-10-17/18 (373 missions,
+   499 kill-card crashes), against the emergency climbs that did start (an observational comparison: the
+   real climbs changed what followed):
+
+   | Trigger | Fires 2 s or more before the crash | 4 s or more | Followed by a crash | A mission |
+   |---|---|---|---|---|
+   | Emergency climbs that started | 43% | 28% | 18% | 4.6 |
+   | Lowest point under 600 m, 2 s reaction | 55% | 41% | 17% | 4.8 |
+   | Lowest point under 900 m, 2 s reaction | 60% | 47% | 14% | 6.4 |
+
+   At the same alarm rate and precision it warns earlier for a further 12% of the crashes. One floor
+   cannot fit every map: carried down from the last reading, the crashes hit at a median 760 m and a
+   quarter above 1,170 m, which is part 3's case.
+
+   Before it flies (cycle 33, same logs plus two more, 401 missions): a reading whose path clamps at
+   85 degrees or more (the altitude fell faster than the aircraft flies) is a misread and neither fires
+   nor clears it (alarms -10%, precision 16.5% to 18.5%, 1.8 points less warned two seconds ahead).
+   Slowing the aircraft in the model during the pull-out (the airbrake's 100 to 300 KPH/s) ranks
+   crashes worse at the same alarm rate, so the model keeps the speed constant: its pessimism at speed
+   tracks the risk, which grows with speed. An altitude cap changes nothing. Flown together with the
+   triggers that start the climb today it would warn two seconds ahead of 60% of the crashes (43%
+   now) and four seconds ahead of 46% (28%), for 6.1 climbs a mission instead of 4.5.
+
+   The objective hold-off (operator, 2026-10-08: no recovery while the pursuit has its target or an
+   objective in view) acted within 10 s before 55% of those crashes, and touched 65% of the ones the
+   trigger warns two seconds ahead; its alarms during the hold-off predict crashes as well as the rest
+   (18.8% against 18.3% at 600 m). So the trigger flies in two steps: first under the hold-off (cycle
+   34), then with alarms under 300 m allowed to break it (24% of those were followed by a crash), as
+   two agreeing warnings may, each step judged on crashes and objectives a mission. Both are built: the
+   trigger flies since cycle 34 and `pullout.bypass_holdoff_below_m` (300) since cycle 36. Cycle 35 made
+   the emergency climb itself skip misread paths (`telemetry.path_is_misread`): 80 of 144 of its
+   nose-down pulses had come at a clamped +90 deg reading, pushing the nose down in dive recoveries.
 3. **A terrain floor (part 3, designed).** HUD altitude is above sea level, so the true height of the terrain
    is unknown. Start with one conservative floor for every map, since the risk concentrates under 2,000 m.
    Then learn a floor per map from the altitudes of kill-card crashes, or revive

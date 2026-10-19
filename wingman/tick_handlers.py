@@ -1882,6 +1882,7 @@ class BehaviorTreeHandler:
         self._climb_last_hard_emergency_ts_fn = None
         self._climb_emergency_update_fn = None
         self._climb_terrain_ahead_fn = None
+        self._climb_pullout_lowest_fn = None
         self._terrain_ahead_prev = False
         # HLDD 001 Phase 1: evidence capture on the FALSE->TRUE edge of the
         # terrain-ahead trigger, same shape as _capture_crash_frame — cap-
@@ -1994,6 +1995,8 @@ class BehaviorTreeHandler:
                 self._tree, "climb_emergency_update_fn", None)
             self._climb_terrain_ahead_fn = getattr(
                 self._tree, "climb_terrain_ahead_fn", None)
+            self._climb_pullout_lowest_fn = getattr(
+                self._tree, "climb_pullout_lowest_fn", None)
 
     def set_hud_renderer(self, hud_renderer) -> None:
         """Wire in the HudRenderer so live_hud.png shows the terrain reading.
@@ -2376,6 +2379,16 @@ class BehaviorTreeHandler:
         if snapshot_obj is not None and snapshot_obj.altitude_fresh():
             altitude = snapshot_obj.altitude.stable_value
             altitude_rate = getattr(snapshot_obj.altitude, "rate", None)
+        # Code Review 019 cycle 32 (HLDD 001 part 2): the raw latest altitude and
+        # speed and the flight-path angle for the pull-out trigger, each None
+        # unless fresh (pitch_angle_deg needs both signals fresh).
+        altitude_now = speed_kph = path_deg = None
+        if snapshot_obj is not None:
+            if snapshot_obj.altitude_fresh():
+                altitude_now = snapshot_obj.altitude.value
+            if snapshot_obj.speed_fresh():
+                speed_kph = snapshot_obj.speed.value
+            path_deg = snapshot_obj.pitch_angle_deg()
         # Stored for _start_climb, which runs inside tree.tick() below and
         # needs the altitude the selection was made against (ADR 075).
         self._last_altitude = altitude
@@ -2484,6 +2497,9 @@ class BehaviorTreeHandler:
             terrain_warnings_agree=(self._warning_agreement is not None
                                     and current_game_state in _BATTLE_STATES
                                     and self._warning_agreement.agreeing(now)),
+            altitude_now=altitude_now,
+            speed_kph=speed_kph,
+            path_deg=path_deg,
         )
         self._writer.set("snapshot", snap)
         # Anomaly 007: refresh Climb's ttg emergency verdict unconditionally,
@@ -2497,6 +2513,11 @@ class BehaviorTreeHandler:
             except Exception as exc:
                 log_suppressed(logger, "climb_emergency_update_fn", exc)
         self._push_climb_emergency()
+        # Code Review 019 cycle 36: the live pull-out alarm's lowest point, every
+        # tick, for the controller's objective hold-off.
+        _set_pullout = getattr(self._ctrl, "set_pullout_lowest_m", None)
+        if self._climb_pullout_lowest_fn is not None and callable(_set_pullout):
+            _set_pullout(self._climb_pullout_lowest_fn())
         # HLDD 001 Phase 1: capture evidence on the FALSE->TRUE edge, right
         # after the update above refreshes terrain_ahead_active for THIS
         # tick and before the tree consumes it — mirrors the emergency

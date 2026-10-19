@@ -224,6 +224,37 @@ def pitch_angle_deg(
     return math.degrees(math.asin(ratio))
 
 
+# Code Review 019 cycle 35: a flight path that clamps (the altitude rate outran
+# the airspeed, which only a misread does) or turns faster than an airframe can
+# is a misread. Over 62,265 pairs of consecutive HUD readings of 2026-10-17/18,
+# changes faster than 40 deg/s were 4.1% of the pairs and 88% of them involved a
+# clamped reading; the emergency climb's nose comes up at most about 21 deg/s
+# (cycle 21). Only at flying speed: near a stall the path is the direction of
+# a slow velocity and swings fast for real, and a climb rate over the airspeed
+# clamps it at once (live 21:32:32.7: +90 deg at 18 KPH, tests/
+# test_pursuit_recovery.py). 44 of the 45 clamped +90 deg nose-down pulses in
+# the climbs of 2026-10-18 came at 300 KPH or more.
+PATH_CLAMPED_DEG = 89.5
+PATH_MAX_RATE_DEG_S = 40.0
+PATH_MISREAD_MIN_SPEED_KPH = 300.0
+
+
+def path_is_misread(angle_deg: float, prev_angle_deg: "float | None" = None,
+                    dt_s: "float | None" = None,
+                    speed_kph: "float | None" = None) -> bool:
+    """True for a flight-path reading no airframe can produce at `speed_kph`:
+    clamped at vertical, or turned from `prev_angle_deg` faster than
+    PATH_MAX_RATE_DEG_S over `dt_s` seconds. Never below
+    PATH_MISREAD_MIN_SPEED_KPH, or with no speed."""
+    if speed_kph is None or speed_kph < PATH_MISREAD_MIN_SPEED_KPH:
+        return False
+    if abs(angle_deg) >= PATH_CLAMPED_DEG:
+        return True
+    if prev_angle_deg is None or dt_s is None or dt_s <= 0:
+        return False
+    return abs(angle_deg - prev_angle_deg) / dt_s > PATH_MAX_RATE_DEG_S
+
+
 def pitch_band_from_angle_deg(
     angle_deg: float | None,
     *,

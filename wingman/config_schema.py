@@ -494,6 +494,19 @@ SCHEMA = Section(
                     "window_s": Leaf(types=NUMBER, minimum=0, maximum=10, default=1.0),
                     "hold_s": Leaf(types=NUMBER, minimum=0, maximum=30, default=3.0),
                 }),
+                # Code Review 019 cycle 32 (HLDD 001 part 2): the emergency climb
+                # starts when a pull-out started reaction_s from now would bottom
+                # out under floor_m (wingman/pullout.py).
+                "pullout": Section(children={
+                    "enabled": Leaf(types=(bool,), default=False),
+                    "shadow": Leaf(types=(bool,), default=True),
+                    "floor_m": Leaf(types=NUMBER, minimum=0, maximum=5000, default=600.0),
+                    "reaction_s": Leaf(types=NUMBER, minimum=0, maximum=10, default=2.0),
+                    # Cycle 36: a live alarm predicting a lowest point under this
+                    # breaks the objective hold-off. null: never.
+                    "bypass_holdoff_below_m": Leaf(types=NUMBER, minimum=-5000, maximum=5000,
+                                                   allow_none=True, default=None),
+                }),
             }),
             # HLDD 013 Phase 1: TACTIC_ATTACK_SUPPORT's fallback roll — own
             # gain/hold-time knobs, independent of j20_mission's coarse_kp/

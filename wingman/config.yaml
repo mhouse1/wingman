@@ -769,6 +769,20 @@ behavior_tree:
     # (130 missions, 145 kill-card crashes) that agreement came 1 to 6 s before
     # 34% of the crashes, about twice a mission, a crash following 16% of them.
     warning_agreement: {enabled: true, shadow: false, window_s: 1.0, hold_s: 3.0}
+    # Code Review 019 cycle 32 (HLDD 001 part 2): the emergency climb starts when a
+    # pull-out started reaction_s from now would bottom out under floor_m, from the
+    # raw altitude, speed and path and the nose-up rates measured in cycle 21. Over
+    # 373 missions of 2026-10-17/18 (499 kill-card crashes), floor 600 m and 2 s of
+    # reaction would have fired 2 s or more before 55% of the crashes, where the
+    # emergency climbs that fired managed 43%, at the same alarms a mission (4.7)
+    # and precision (17%). Cycle 34: it flies, beside time to ground and under the same
+    # objective hold-off, after a MiG-31 shadow baseline (cycle 32). Cycle 36: an alarm
+    # predicting a lowest point under bypass_holdoff_below_m breaks the objective
+    # hold-off, as two agreeing warnings do: over 401 missions the hold-off acted
+    # within 10 s before 55% of the crashes, and alarms under 300 m during it were
+    # followed by a crash 24% of the time, 1.0 a mission.
+    pullout: {enabled: true, shadow: false, floor_m: 600, reaction_s: 2.0,
+      bypass_holdoff_below_m: 300}
   # HLDD 013 Phase 1: wires the existing, already-selected TACTIC_ATTACK_SUPPORT
   # fallback slot to the existing boundary reading — roll away from the nearest
   # map edge on ticks where nothing else steers at all. Ships shadow-only

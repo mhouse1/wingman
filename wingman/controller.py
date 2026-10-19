@@ -15,7 +15,7 @@ from mss import mss
 
 from .state import GameState
 from .perception import Perception
-from .telemetry import STEEP_DIVE_MIN_SIN_DEFAULT
+from .telemetry import STEEP_DIVE_MIN_SIN_DEFAULT, path_is_misread
 from .config_schema import schema_default
 from . import keybindings as _keybindings
 from .actuator import Actuator
@@ -1234,6 +1234,13 @@ class Controller:
         self._climb_brake_release_kph = _cl_cfg.get(
             "emergency_airbrake_release_kph",
             schema_default("behavior_tree.climb.emergency_airbrake_release_kph"))
+        # Code Review 019 cycle 36: a live pull-out alarm whose predicted lowest
+        # point is under this (m) breaks the objective hold-off, as two agreeing
+        # warnings do; None: never. The tree pushes the lowest point every tick.
+        self._pullout_bypass_below_m = (_cl_cfg.get("pullout") or {}).get(
+            "bypass_holdoff_below_m",
+            schema_default("behavior_tree.climb.pullout.bypass_holdoff_below_m"))
+        self._pullout_lowest_m: "float | None" = None
         # ADR 088: abort a dive whose premise (empty rack) has expired.
         self._eject_abort_on_rearm = bool(_ecl.get("abort_on_rearm", True))
         # ADR 107: duration cap for the boundary turn. Bounded for the same
@@ -6165,6 +6172,12 @@ class Controller:
                 logger.info("Controller: crash recovery starts with the %s in view — "
                             "two terrain warnings agree", _objective)
                 _objective = None
+            # Code Review 019 cycle 36: so does a severe pull-out alarm.
+            if _objective is not None and self._pullout_breaks_holdoff():
+                logger.info("Controller: crash recovery starts with the %s in view — a "
+                            "pull-out would bottom out at %.0f m (HLDD 001 part 2)",
+                            _objective, self._pullout_lowest_m)
+                _objective = None
             if _objective is not None:
                 now = time.time()
                 if now - self._recovery_held_log_ts >= 10.0:
@@ -6257,6 +6270,24 @@ class Controller:
         whatever value was true when the hold started.
         """
         self._climb_emergency_requested = bool(value)
+
+    def set_pullout_lowest_m(self, value: "float | None") -> None:
+        """Code Review 019 cycle 36: the tree's live pull-out alarm, every tick:
+        the predicted lowest point (m) of a pull-out, None while not firing."""
+        self._pullout_lowest_m = None if value is None else float(value)
+
+    def _pullout_breaks_holdoff(self) -> bool:
+        """True while a live pull-out alarm predicts a lowest point under
+        `bypass_holdoff_below_m`: the recovery flies with an objective in view.
+
+        Over 401 missions of 2026-10-17/18 the objective hold-off acted within
+        10 s before 55% of the kill-card crashes and touched 65% of those the
+        trigger warns 2 s ahead; its alarms under 300 m were followed by a crash
+        24% of the time during the hold-off (21% otherwise), 1.0 a mission.
+        """
+        low = self._pullout_lowest_m
+        limit = self._pullout_bypass_below_m
+        return limit is not None and low is not None and low < float(limit)
 
     def note_incoming(self, detected: bool, now: "float | None" = None) -> None:
         """Refresh the missile-evade afterburner deadline. ADR 128.
@@ -7125,6 +7156,10 @@ class Controller:
                         if (_objective is not None and _agreement is not None
                                 and _agreement.live()):
                             _objective = None
+                        # Code Review 019 cycle 36: nor while a severe pull-out
+                        # alarm stands.
+                        if _objective is not None and self._pullout_breaks_holdoff():
+                            _objective = None
                         if _objective is not None:
                             logger.info(
                                 "Controller: climb — the pursuit has the %s in view "
@@ -7272,9 +7307,27 @@ class Controller:
                 if alt is None or sig_ts is None or sig_ts <= last_counted_ts:
                     continue   # stale sample already counted (d5)
                 last_counted_ts = sig_ts
-                last_rate = getattr(alt_signal, "rate", None)
                 _angle_fn = getattr(snap, "pitch_angle_deg", None)
                 _new_angle = _angle_fn() if callable(_angle_fn) else None
+                # Code Review 019 cycle 35: a path that clamps or turns faster
+                # than an airframe can is a misread, and so are its rate and its
+                # predicted altitude. Acting on them pushed the nose down in dive
+                # recoveries: of 144 nose-down pulses in emergency climbs on five
+                # logs of 2026-10-18, 80 came at a clamped +90 deg (rates of +330
+                # to +412 m/s, the rebound of an altitude misread), and 25 of the
+                # 61 crashes during an emergency climb had one. The sample is
+                # skipped; the last plausible one keeps steering.
+                if _new_angle is not None and path_is_misread(
+                        _new_angle, prev_angle,
+                        None if prev_angle_ts is None else sig_ts - prev_angle_ts,
+                        getattr(getattr(snap, "speed", None), "stable_value", None)):
+                    logger.debug(
+                        "Controller: climb — path %+.0f deg (rate %s) after %s is a "
+                        "misread, held", _new_angle,
+                        getattr(alt_signal, "rate", None),
+                        "n/a" if prev_angle is None else f"{prev_angle:+.0f} deg")
+                    continue
+                last_rate = getattr(alt_signal, "rate", None)
                 # ADR 086 d7: pitch rate across consecutive angle samples.
                 if _new_angle is not None:
                     if prev_angle is not None and prev_angle_ts is not None:
