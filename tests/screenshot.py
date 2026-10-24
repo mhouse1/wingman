@@ -16,8 +16,11 @@ Controls (global — they work whichever window has focus):
 Screenshots are written to tests/test-output/screenshot_<timestamp>.png, the
 folder and name pattern the 'v' hotkey uses, under the same capture budget.
 
-Captures go through mss, so they see what an X11 or Windows desktop shows. A
-GNOME Wayland session hides native Wayland windows from it.
+Windows and Linux X11 capture through mss. A Linux Wayland session captures
+through the XDG ScreenCast portal (PipeWire), the path wingman itself uses there:
+Xwayland on GNOME 50 refuses mss's XGetImage on the root window outright. The
+first run there shows GNOME's share-screen dialog; the restore token wingman
+saves skips it afterwards.
 """
 
 import contextlib
@@ -88,15 +91,124 @@ def _geometry(x: int, y: int, w: int, h: int) -> str:
     return f"{w}x{h}+{x}+{y}"
 
 
+def _region_in_stream(region: dict, origin: "tuple[int, int]",
+                      scale: "tuple[float, float]",
+                      frame_size: "tuple[int, int]") -> "tuple[int, int, int, int]":
+    """Map a desktop region to (x, y, w, h) pixels in a portal stream's frame.
+
+    The stream shows one monitor whose top-left sits at `origin` on the desktop;
+    `scale` is frame pixels per desktop pixel. Raises ValueError when the region
+    is not wholly on that monitor.
+    """
+    (ox, oy), (sx, sy), (fw, fh) = origin, scale, frame_size
+    x = round((region["left"] - ox) * sx)
+    y = round((region["top"] - oy) * sy)
+    w = round(region["width"] * sx)
+    h = round(region["height"] * sy)
+    if x < 0 or y < 0 or x + w > fw or y + h > fh:
+        raise ValueError("region is not on the monitor the screen-share stream shows")
+    return x, y, w, h
+
+
 # ---------------------------------------------------------------------------
 # Capture and save
 # ---------------------------------------------------------------------------
 
-def _save(sct, region: dict) -> "Path | None":
+class _MssGrabber:
+    """Windows and Linux X11: mss reads the desktop directly."""
+
+    def __init__(self, sct):
+        self._sct = sct
+
+    def grab(self, region: dict):
+        return self._sct.grab(region)
+
+    def close(self) -> None:
+        pass
+
+
+class _PortalGrabber:
+    """Linux Wayland: the newest frame of an XDG ScreenCast portal stream.
+
+    PipeWire sends a frame only when the screen changes, so a pull that finds
+    none means the last frame kept is still what the screen shows.
+    """
+
+    def __init__(self):
+        import gi
+        gi.require_version("Gst", "1.0")
+        from gi.repository import Gst
+        from wingman.portal import acquire_screencast_stream
+
+        if not Gst.is_initialized():
+            Gst.init(None)
+        self._Gst = Gst
+        # Hidden cursor: a capture of a crop region must not carry the pointer.
+        node_id, props, self._bus = acquire_screencast_stream(cursor_mode=1)
+        self._pipeline = Gst.parse_launch(
+            f"pipewiresrc path={node_id} keepalive-time=5000 "
+            f"! videoconvert ! video/x-raw,format=BGR "
+            f"! appsink name=sink max-buffers=1 drop=true sync=false"
+        )
+        self._sink = self._pipeline.get_by_name("sink")
+        if self._pipeline.set_state(Gst.State.PLAYING) == Gst.StateChangeReturn.FAILURE:
+            raise RuntimeError("GStreamer pipeline for the portal stream failed to start")
+        self._frame = self._pull(5 * Gst.SECOND)
+        if self._frame is None:
+            self.close()
+            raise RuntimeError("the portal stream sent no frame within 5 s")
+        fh, fw = self._frame.shape[:2]
+        self._origin = tuple(props.get("position", (0, 0)))
+        sw, sh = props.get("size", (fw, fh))
+        self._scale = (fw / sw, fh / sh)
+
+    def _pull(self, timeout_ns: int) -> "np.ndarray | None":
+        sample = self._sink.emit("try-pull-sample", timeout_ns)
+        if sample is None:
+            return None
+        caps = sample.get_caps().get_structure(0)
+        w, h = caps.get_int("width")[1], caps.get_int("height")[1]
+        buf = sample.get_buffer()
+        ok, info = buf.map(self._Gst.MapFlags.READ)
+        if not ok:
+            return None
+        try:
+            # Rows may be padded past w * 3 bytes.
+            stride = info.size // h
+            rows = np.frombuffer(info.data, dtype=np.uint8, count=stride * h).reshape(h, stride)
+            return rows[:, :w * 3].reshape(h, w, 3).copy()
+        finally:
+            buf.unmap(info)
+
+    def grab(self, region: dict) -> np.ndarray:
+        newest = self._pull(0)
+        if newest is not None:
+            self._frame = newest
+        fh, fw = self._frame.shape[:2]
+        x, y, w, h = _region_in_stream(region, self._origin, self._scale, (fw, fh))
+        return self._frame[y:y + h, x:x + w]
+
+    def close(self) -> None:
+        self._pipeline.set_state(self._Gst.State.NULL)
+
+
+def _grabber(sct):
+    """mss everywhere except Linux Wayland, which gets the portal stream."""
+    if sys.platform == "win32" or os.environ.get("XDG_SESSION_TYPE", "").lower() != "wayland":
+        return _MssGrabber(sct)
+    try:
+        return _PortalGrabber()
+    except Exception as exc:
+        print(f"[WARN] screen-share portal unavailable ({exc}); falling back to mss, "
+              "which Xwayland may refuse.")
+        return _MssGrabber(sct)
+
+
+def _save(grabber, region: dict) -> "Path | None":
     if not capture_budget.admit(_OUTPUT_DIR, "make screenshot", patterns="screenshot_*.png"):
         print("[SKIP] disk below the capture-budget floor - nothing saved.")
         return None
-    frame = np.asarray(sct.grab(region))[:, :, :3]  # BGRA -> BGR
+    frame = np.ascontiguousarray(np.asarray(grabber.grab(region))[:, :, :3])  # BGRA -> BGR
     _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     # Milliseconds, so two Enters in the same second do not overwrite each other.
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:-3]
@@ -133,9 +245,9 @@ def _set_dpi_aware() -> None:
 # ---------------------------------------------------------------------------
 
 class _Snipper:
-    def __init__(self, sct, keys):
-        self._sct = sct
-        self._screen = sct.monitors[0]  # the whole virtual desktop
+    def __init__(self, screen: dict, grabber, keys):
+        self._grabber = grabber
+        self._screen = screen  # the whole virtual desktop
         self._events: "queue.Queue[str]" = queue.Queue()
         self._last_enter = 0.0
         self._region: "dict | None" = None
@@ -239,7 +351,11 @@ class _Snipper:
         if self._region is None:
             print("  No region yet - drag one on the overlay first.")
             return
-        path = _save(self._sct, self._region)
+        try:
+            path = _save(self._grabber, self._region)
+        except Exception as exc:
+            print(f"  [ERROR] capture failed: {exc}")
+            return
         if path is not None:
             self._flash()
             print(f"  Saved {self._region['width']}x{self._region['height']} -> {path}")
@@ -253,10 +369,6 @@ class _Snipper:
 # ---------------------------------------------------------------------------
 
 def main():
-    if sys.platform != "win32" and os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland":
-        print("[WARN] Wayland session: mss cannot see native Wayland windows, so captures "
-              "may come out black. Run under an X11 session for reliable results.")
-
     keys = _keyboard_backend()
     if keys is None:
         print("[ERROR] no keyboard backend for global hotkeys (`keyboard` module missing).")
@@ -267,7 +379,12 @@ def main():
           "Backspace exits.")
     try:
         with mss.mss() as sct:
-            _Snipper(sct, keys).run()
+            # mss's monitor list comes from XRandR, which still answers on Xwayland.
+            grabber = _grabber(sct)
+            try:
+                _Snipper(sct.monitors[0], grabber, keys).run()
+            finally:
+                grabber.close()
     finally:
         with contextlib.suppress(Exception):
             keys.unhook_all()

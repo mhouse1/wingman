@@ -5,6 +5,7 @@ import sys
 
 import cv2
 import numpy as np
+import pytest
 
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "tests"))
@@ -64,3 +65,22 @@ def test_save_writes_region_as_bgr_png(tmp_path, monkeypatch):
     assert path is not None and path.parent == tmp_path
     assert path.name.startswith("screenshot_") and path.suffix == ".png"
     assert cv2.imread(str(path)).shape == (50, 100, 3)
+
+
+def test_region_maps_into_stream_at_origin():
+    region = {"left": 1624, "top": 478, "width": 1524, "height": 751}
+    assert screenshot._region_in_stream(region, (0, 0), (1.0, 1.0), (3840, 1600)) == \
+        (1624, 478, 1524, 751)
+
+
+def test_region_offset_and_scaled_into_stream():
+    # Stream shows the right-hand monitor at desktop x=1920, at 2x its desktop size.
+    region = {"left": 2020, "top": 10, "width": 100, "height": 50}
+    assert screenshot._region_in_stream(region, (1920, 0), (2.0, 2.0), (3840, 2160)) == \
+        (200, 20, 200, 100)
+
+
+def test_region_off_the_streamed_monitor_is_rejected():
+    region = {"left": 100, "top": 0, "width": 100, "height": 50}
+    with pytest.raises(ValueError):
+        screenshot._region_in_stream(region, (1920, 0), (1.0, 1.0), (1920, 1080))
