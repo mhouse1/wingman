@@ -82,6 +82,7 @@ make p "msg"    # stage, commit, push
 make calibrate                   # recalibrate all crop regions interactively
 make calibrate-crop CROP=respawn # recalibrate one named region
 make add-crops                   # calibrate new images from test_screenshots/to_be_added/
+make screenshot                  # snipping tool: drag a region anywhere on screen; Enter captures, Backspace exits
 ```
 
 ## Architecture
