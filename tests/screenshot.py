@@ -391,6 +391,17 @@ def main():
 
     print("[DONE] Screenshot tool closed.")
 
+    if sys.platform == "win32":
+        # unhook_all() drops the callbacks but leaves the `keyboard` module's
+        # low-level hook installed. A key event during interpreter shutdown —
+        # the Backspace key-up that triggered the exit, typically — makes
+        # Python end the hook thread inside the Windows callback, and the
+        # process dies with 0xC000041D (STATUS_FATAL_USER_CALLBACK_EXCEPTION).
+        # Everything is saved and closed by now, so skip the shutdown phase.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
+
 
 if __name__ == "__main__":
     main()
