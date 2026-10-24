@@ -113,8 +113,14 @@ def _may_inject(what: str = "key") -> bool:
 # lambdas read the module globals on each call, so tests that monkeypatch
 # `keyboard_module` or `_may_inject` still intercept every press.
 # Phase 2 (2026-09-27): the throttle is leased; see Actuator and _THROTTLE_YIELDS.
+# The pitch keys too (2026-10-24): on 2026-10-23 another owner's release lifted
+# the climb's nose-up 713 times (533 the pursuit's ADR 148 yield, 180 the spawn
+# guard's hand-off), each costing the climb the rest of its 1.5 s pulse. At
+# 00:54:22 one of them left a terrain pull-out 84 ms of its first pulse, and the
+# aircraft hit the hillside about 4 s later, still 16 deg nose-down.
 _actuator = Actuator(lambda: keyboard_module, lambda what: _may_inject(what),
-                     leased_keys=(_keybindings.AFTERBURNER_KEY,))
+                     leased_keys=(_keybindings.AFTERBURNER_KEY,
+                                  _keybindings.NOSE_UP_KEY, _keybindings.NOSE_DOWN_KEY))
 
 # A failed key RELEASE is the start of a stuck-key incident, and the key does not
 # come back when this process dies: on Linux XTest key state lives in the X
@@ -6637,8 +6643,13 @@ class Controller:
             return bool(getattr(self, "_approach_brake_held", False))
         raise ValueError(f"unknown yield condition {name!r}")
 
-    def _owner_may_hold(self, _key: str, owner: str) -> bool:
-        """May ``owner`` hold the throttle right now (the Actuator's policy)."""
+    def _owner_may_hold(self, key: str, owner: str) -> bool:
+        """May ``owner`` hold ``key`` right now (the Actuator's policy).
+
+        Only the throttle has yields. A pitch lease always counts: its owners
+        give the axis up by releasing (ADR 148), not by a policy turning."""
+        if key != AFTERBURNER_KEY:
+            return True
         return not any(self._yield_condition(c)
                        for c in self._THROTTLE_YIELDS.get(owner, ()))
 
@@ -6807,11 +6818,12 @@ class Controller:
                     break
         finally:
             _release_started = time.time()
-            if not self._climbing.is_set():
-                self._climb_key(NOSE_UP_KEY, press=False, action="spawn_guard")
-            else:
-                logger.info("Controller: spawn guard — climb hold owns the "
-                            "pitch key, skipping OS-level release")
+            # Always end the lease (ADR 151 D6): the key stays down while a
+            # climb still holds it. Skipping this release when a climb ran, as
+            # the guard did before the pitch keys were leased, left its lease
+            # behind and latched nose-up (2026-10-24 02:10:25, the aircraft
+            # looped from +16 to -90 deg).
+            self._climb_key(NOSE_UP_KEY, press=False, action="spawn_guard")
             _release_span = time.time() - _release_started
             if bracketed:
                 self._arm_release_grace(NOSE_UP_KEY, span_s=_release_span)
