@@ -948,6 +948,11 @@ class Controller:
             schema_default("pursuit_mode.crash_recovery_clear_view_s"))
         self._pursuit_recovery_clear_view_s = (
             None if _clear_view is None else max(0.0, float(_clear_view)))
+        # 2026-10-20: a control point's or the crown's marker is held this long
+        # through the scan's misses, so the objective keeps the steering it has.
+        self._objective_marker_hold_s = max(0.0, float(_pm.get(
+            "objective_marker_hold_s",
+            schema_default("pursuit_mode.objective_marker_hold_s"))))
         self._pursuit_objective_ts = 0.0
         self._pursuit_objective_kind = ""
         self._recovery_held_log_ts = 0.0
@@ -4441,7 +4446,13 @@ class Controller:
                 resupply_points = IconPoints(self._icon_cfg) if self._icon_cfg.enabled else None
                 # So does the priority target's pin (operator, 2026-10-09).
                 priority_points = IconPoints(self._icon_cfg) if self._icon_cfg.enabled else None
-                priority_marker_memory = ResupplyMarkerMemory()
+                # 2026-10-20 02:40:48.8: A, 20 px off the centre and steered at,
+                # was missed by the scan for about 0.6 s; the resupply's 0.5 s of
+                # memory ran out, the resupply marker took the steering, and A,
+                # found again a cycle later, never got it back. In the logs of
+                # 10-15 to 10-20 85% of such misses lasted under 1.5 s.
+                priority_marker_memory = ResupplyMarkerMemory(
+                    hold_s=self._objective_marker_hold_s)
                 priority_state = None     # "marker" or "pin" while one is being followed
                 priority_kind = None      # whose: "priority_target" or "air_superiority"
                 priority_last_ts = 0.0
@@ -4781,9 +4792,12 @@ class Controller:
                         # does: on 2026-10-12 14:36:56 the recovery took the
                         # airframe with A 12 px off the centre, one second after
                         # A took the steering from the target it had waited on.
+                        # A held marker steers but is not in view: the recovery
+                        # does not wait on one the scan has lost (2026-10-20).
                         self._note_pursuit_objective(
                             "resupply marker" if resupply_control
-                            else priority_hud.lower() if priority_control
+                            else priority_hud.lower()
+                            if priority_control and not priority_marker_stale
                             else "target" if control_visible else None)
                         icon_state = None
                         # In resupply mode the icon law runs on the resupply pin:

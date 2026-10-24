@@ -84,6 +84,10 @@ NESTED_FLAG  = $(if $(NESTED),--nested $(NESTED),)
 # config read, so `make test` and friends are not slowed by it.
 NESTED_ENV   = $(shell $(PYTHON_RUN) scripts/nested-display.py env $(NESTED_FLAG) 2>/dev/null)
 WINGMAN_NESTED_ENV = $(if $(NESTED),WINGMAN_NESTED=$(NESTED),)
+# Research 017: the prefix the game runs in, where it saves its own frame rate
+# for each match (wingman/game_stats.py logs it as GAME STATS). Lazily expanded,
+# so r1 and r2's WINE_PREFIX reaches rd's recipe.
+WINGMAN_PREFIX_ENV = WINGMAN_WINE_PREFIX="$(WINE_PREFIX)"
 # Real-game capture (make p1/p2/p3) must outlast a full mission cycle
 # (~6 min lobby->battle->missiles empty->respawn->match end), not the ~24 s
 # replay pacing the out-of-order deadline is derived from. The ADR 045
@@ -504,10 +508,10 @@ update:
 endif
 
 r: $(GAME_LAUNCH_DEPS)
-	$(WINGMAN_ENV) $(WINGMAN_NESTED_ENV) $(WINGMAN_NICE) $(PYTHON_RUN) -m wingman.main $(RECORD_FLAG)
+	$(WINGMAN_ENV) $(WINGMAN_NESTED_ENV) $(WINGMAN_PREFIX_ENV) $(WINGMAN_NICE) $(PYTHON_RUN) -m wingman.main $(RECORD_FLAG)
 
 rd: $(GAME_LAUNCH_DEPS)
-	$(WINGMAN_ENV) $(WINGMAN_NESTED_ENV) $(WINGMAN_NICE) $(PYTHON_RUN) -m wingman.main --log-file wingman.log $(RECORD_FLAG)
+	$(WINGMAN_ENV) $(WINGMAN_NESTED_ENV) $(WINGMAN_PREFIX_ENV) $(WINGMAN_NICE) $(PYTHON_RUN) -m wingman.main --log-file wingman.log $(RECORD_FLAG)
 
 invite:
 	$(PYTHON_RUN) scripts/toggle-invite.py $(if $(CONFIG),--config "$(CONFIG)",)

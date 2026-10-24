@@ -2828,6 +2828,10 @@ class WaitingFallbackHandler:
         """Returns True when the tick loop should `continue`."""
         if current_game_state != GameState.GAME_WAITING or self._waiting_since <= 0:
             return False
+        # Code Review 019: the matchmaking panel's mode and map, read once.
+        note_matchmaking = getattr(self._analyzer, "note_matchmaking_frame", None)
+        if callable(note_matchmaking):
+            note_matchmaking(frame)
 
         elapsed_waiting = time.time() - self._waiting_since
         if elapsed_waiting > self._timeout_s:

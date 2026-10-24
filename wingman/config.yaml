@@ -168,6 +168,26 @@ crops:
     - [0.5174, 0.4078]
     - [0.7, 0.4767]
     text: [SILVER]
+  # Code Review 019 (2026-10-19 09:14): "That party has ended." with one OK
+  # button, over the lobby at a start; it held the start in GAME_UNKNOWN until OK
+  # was clicked. PARTY_ENDED reads the message, PARTY_ENDED_OK is what is clicked
+  # (test_screenshots/PARTY_ENDED.png).
+  PARTY_ENDED:
+    coords:
+    - [0.33, 0.39]
+    - [0.67, 0.455]
+    text: [PARTYHASENDED, HASENDED]
+  PARTY_ENDED_OK:
+    coords:
+    - [0.4188, 0.4708]
+    - [0.5813, 0.5267]
+  # Code Review 019 (2026-10-19): the matchmaking panel's mode and map lines
+  # above CANCEL ("TEAM DEATHMATCH" / "ICEBOUND"), read once per matchmaking
+  # (test_screenshots/MATCHMAKING_ICEBOUND.png).
+  MATCH_MAP:
+    coords:
+    - [0.84, 0.828]
+    - [0.97, 0.875]
   ALTITUDE_SPEED:
     coords:
     - [0.3167, 0.6333]
@@ -361,7 +381,7 @@ eject_stuck_detector:
   eject_stuck_after_s: 40.0
 stall_recovery:
   action_after_s: 15.0        # dwell in GAME_UNKNOWN/GAME_STARTING_STALLED before acting
-  unready_dwell_s: 40.0       # UNREADY suppressing the PLAY click before leaving the squad
+  unready_dwell_s: 160.0      # UNREADY suppressing the PLAY click before leaving the squad (was 40; +2 min 2026-10-23 so a party leader has time to launch)
   squad_no_battle_s: 900.0    # squad lobby (READY shown, not PLAY) with no battle before leaving the squad
   scan_interval_s: 5.0        # how often the stall batch runs once the gate is open
   play_click_delay_s: 2.0     # after leaving the squad, before clicking PLAY
@@ -1745,6 +1765,15 @@ pursuit_mode:
   # too. In that day's session 19 of 269 recoveries started while a control point's
   # marker was steering; at 14:36:56 A was 12 px off the centre.
   crash_recovery_clear_view_s: 1.0
+  # Operator, 2026-10-20: "why did it see target 'A' then steer away when it was
+  # clearly in view". At 02:40:48.8 the scan missed A, 20 px off the centre, for
+  # about 0.6 s; the 0.5 s memory ran out, the resupply marker took the steering,
+  # and A, found again a cycle later, never got it back. In the logs of 10-15 to
+  # 10-20 an objective with the steering went unseen 1,747 times and came back
+  # within 4 s: 64% under 1.1 s, 85% under 1.5 s; 289 came back without the
+  # steering. A control point's or the crown's marker is now held this long. A
+  # held marker steers but does not count as in view for crash_recovery_clear_view_s.
+  objective_marker_hold_s: 1.5
   # HLDD 015 Icon-Directed Search (2026-09-26), SHADOW STAGE: each steering tick
   # finds the game's red ring icon (an arrowhead on a fixed ring around the screen
   # centre pointing at an off-screen enemy), adds points to a nose-down/up and a
@@ -1807,6 +1836,14 @@ pursuit_mode:
     # 470 m (HUD 1403 m, mean 1873 m at 20:19:28). Named guess.
     push_floor_lookahead_s: 3.0
     blind_search_after_s: 3.0
+    # Code Review 019 cycle 39 (the operator's resupply question, 2026-10-19): an
+    # icon within 5 deg of the horizon, or above it, gets no push. At 04:17:01.7
+    # the ammo pin moved level (-1 to +5 deg) and the push went on 3 s on the
+    # score a low-left sighting had left, into a -50 deg dive at 983 KPH, the
+    # pull-up alarm, a stall and a crash. Over 271 missions, 21 crashes came
+    # 1 to 15 s after a push with the icon level or above (9% of such pushes,
+    # 4% of the others).
+    level_band_deg: 5.0
 hud:
   # Back on (2026-09-21): the roll_right convergence investigation exhausted
   # what wingman.log alone can show (episode trace confirmed roll_right
@@ -1863,8 +1900,12 @@ hud:
   # Each planner alarm (DETOUR or ESCAPE, Code Review 019 cycle 5) also leaves a
   # 4 s clip in <dir>/alarms, taken 1.5 s after it: at most one every 30 s and 60
   # a session, so each alarm can be labelled true or false from what was on screen.
+  # Research 017 step 3: `raw` also keeps the game's own picture beside each
+  # annotated frame, in <dir>/raw under the same names (the annotated frames carry
+  # the planner's overlay over the analysed box). Its budget is under
+  # capture_budget.dirs: about 370 deaths.
   black_box: {enabled: true, dir: test_screenshots/path_blackbox, seconds: 18.0, rate_hz: 3.0,
-              alarm_max: 60, alarm_gap_s: 30.0, alarm_seconds: 4.0}
+              alarm_max: 60, alarm_gap_s: 30.0, alarm_seconds: 4.0, raw: true}
 # Design 012: opt-in via --record-session (the Makefile's 'v' argument, e.g.
 # "make rd v"), never the default — a multi-hour session's file size and CPU
 # cost scale with fps. Low by design: this is reviewed at tactic-selection
@@ -1882,6 +1923,8 @@ capture_budget:
   dirs:
     # annotated frame (about 1 MB) plus raw scan (about 0.6 MB) per save
     tests/test-output/target_tracking: {max_files: 600, max_mb: 1024}
+    # Research 017 step 3: the black box's raw pictures, about 54 a death
+    test_screenshots/path_blackbox/raw: {max_files: 20000, max_mb: 3072}
   # logs/wingman_*.log, deleted oldest-first at startup
   rotated_logs: {max_files: 200, max_mb: 2048}
   # logs/session_*.mp4 (make rd v), deleted oldest-first before recording
@@ -1920,6 +1963,12 @@ telemetry:
   # designed for the 1.5 s tick (max_gate_dt_s 1.5); each read is about 0.4 s
   # of OCR on the pool, in parallel with the other crops.
   ocr_every_n_ticks: 1
+  # Code Review 019 cycle 38: the behavior tree decides on this tick's reading,
+  # waiting for it at most this long after the tick starts (it lands about 0.45 s
+  # in). Deciding first left every climb trigger on a frame 1.54 s old (409
+  # triggers, 2026-10-18/19), 1.1 s of it a finished reading waiting for the next
+  # tick. Live runs only; 0 turns it off.
+  bt_wait_s: 0.75
   eject_closed_loop: {enabled: true, check_interval_s: 1.5, confirm_consecutive: 2,
     legacy_nose_hold_s: 5.0, over_rotation_after_s: 6.0, target_dive_angle_deg: 65.0,
     dive_angle_floor_deg: 55.0, descent_target_mps: 100.0, descent_floor_mps: 50.0,

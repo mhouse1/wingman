@@ -940,6 +940,11 @@ SCHEMA = Section(
             # have been out of view this long. 0 or null: no wait.
             "crash_recovery_clear_view_s": Leaf(
                 types=NUMBER, minimum=0, allow_none=True, default=1.0),
+            # How long a control point's or the crown's marker is still flown at
+            # after the scan stops finding it (2026-10-20: the scan misses it for
+            # 0.6 s or more while it is in view, and the 0.5 s of the resupply's
+            # memory handed A to the resupply mid-approach).
+            "objective_marker_hold_s": Leaf(types=NUMBER, minimum=0, maximum=5, default=1.5),
             # HLDD 015 Icon-Directed Search, shadow stage (2026-09-26).
             "icon_steering": Section(children={
                 "enabled": BOOL,
@@ -971,6 +976,11 @@ SCHEMA = Section(
                 # next reading arrives. Named guess.
                 "push_floor_lookahead_s": Leaf(types=NUMBER, minimum=0, default=3.0),
                 "blind_search_after_s": SECONDS,
+                # Code Review 019 cycle 39: an icon within this many degrees of the
+                # horizon (or above it) gets no push, whatever the pitch score
+                # still says. null: the score alone decides.
+                "level_band_deg": Leaf(types=NUMBER, minimum=0, maximum=45,
+                                       allow_none=True, default=None),
             }),
         }),
 
@@ -1012,6 +1022,9 @@ SCHEMA = Section(
                 "alarm_max": Leaf(types=(int,), minimum=0, maximum=1000, default=0),
                 "alarm_gap_s": Leaf(types=NUMBER, minimum=0, maximum=600, default=30.0),
                 "alarm_seconds": Leaf(types=NUMBER, minimum=0.5, maximum=18, default=4.0),
+                # Research 017 step 3: the game's own picture beside each
+                # annotated frame, written to <dir>/raw under the same names.
+                "raw": Leaf(types=(bool,), default=False),
             }),
         }),
 
@@ -1079,6 +1092,9 @@ SCHEMA = Section(
             "steep_dive_min_sin": Leaf(types=NUMBER, minimum=0.0, maximum=1.0, default=0.8),
             "level_max_sin": FRACTION,
             "ocr_every_n_ticks": _int(1),
+            # Code Review 019 cycle 38: how far into a live battle tick the tree
+            # waits for that tick's reading. 0 decides on the last tick's.
+            "bt_wait_s": Leaf(types=NUMBER, minimum=0.0, maximum=1.5, default=0.0),
             "eject_closed_loop": Section(children={
                 "enabled": BOOL,
                 "check_interval_s": SECONDS,

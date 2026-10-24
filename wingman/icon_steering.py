@@ -108,6 +108,10 @@ class IconSteeringConfig:
     push_floor_lookahead_s: float = schema_default(
         "pursuit_mode.icon_steering.push_floor_lookahead_s")
     blind_search_after_s: float = 3.0
+    # Code Review 019 cycle 39: an icon this close to the horizon, or above it,
+    # gets no push whatever the pitch score says. None: the score alone decides.
+    level_band_deg: "float | None" = schema_default(
+        "pursuit_mode.icon_steering.level_band_deg")
 
     @classmethod
     def from_dict(cls, cfg: "dict | None") -> "IconSteeringConfig":
@@ -115,6 +119,7 @@ class IconSteeringConfig:
         d = cls()
         min_path = cfg.get("icon_min_path_deg", d.icon_min_path_deg)
         floor = cfg.get("push_floor_m", d.push_floor_m)
+        level_band = cfg.get("level_band_deg", d.level_band_deg)
         return cls(
             enabled=bool(cfg.get("enabled", d.enabled)),
             wings_level=bool(cfg.get("wings_level", d.wings_level)),
@@ -142,6 +147,7 @@ class IconSteeringConfig:
             push_floor_lookahead_s=float(cfg.get("push_floor_lookahead_s",
                                                  d.push_floor_lookahead_s)),
             blind_search_after_s=float(cfg.get("blind_search_after_s", d.blind_search_after_s)),
+            level_band_deg=None if level_band is None else float(level_band),
         )
 
 
@@ -244,6 +250,8 @@ class IconPoints:
         self.turn_active = 0     # -1, 0 or +1: the sign the switch is on
         self.pitch_active = 0
         self.last_icon_ts: "float | None" = None
+        # The angle of the icon the last scan chose, held while none is seen.
+        self.last_icon_angle_deg: "float | None" = None
         self._last_scan_ts: "float | None" = None
 
     def reset(self) -> None:
@@ -251,6 +259,7 @@ class IconPoints:
         time an icon was seen is kept: it is when, not what."""
         self.turn_pts = self.pitch_pts = 0.0
         self.turn_active = self.pitch_active = 0
+        self.last_icon_angle_deg = None
         self._last_scan_ts = None
 
     def contribution(self, icon: RingIcon) -> "tuple[int, int]":
@@ -293,6 +302,7 @@ class IconPoints:
                 self.turn_pts *= factor
                 self.pitch_pts *= factor
             self.last_icon_ts = now
+            self.last_icon_angle_deg = icon.angle_deg
             add = self.contribution(icon)
             self.turn_pts = self._add(self.turn_pts, add[0])
             self.pitch_pts = self._add(self.pitch_pts, add[1])
@@ -325,6 +335,20 @@ class IconPoints:
     def icon_seen_within(self, seconds: float) -> bool:
         return self.last_icon_ts is not None and self._clock() - self.last_icon_ts <= seconds
 
+    def icon_level_or_above(self) -> bool:
+        """The last chosen icon sits within `level_band_deg` of the horizon, or
+        above it (Code Review 019 cycle 39). False with the band off or no icon
+        seen since the last reset: the score alone decides."""
+        band = self._cfg.level_band_deg
+        angle = self.last_icon_angle_deg
+        if band is None or angle is None:
+            return False
+        # Degrees below the horizon on either side: 116 -> 64, 172 -> 8, -1 -> -1,
+        # -120 -> -60. Plain arithmetic: asin(sin(175)) is 5.000000000000002.
+        a = ((float(angle) + 180.0) % 360.0) - 180.0
+        below = a if -90.0 <= a <= 90.0 else (180.0 - a if a > 0 else -180.0 - a)
+        return below <= band
+
     def intent(self, down_allowed: bool = True) -> "tuple[str, tuple[str, ...]]":
         """What the dominant-intent law would hold now: ("down", ...), ("up",
         ...), ("turn", ...) or ("none", ()). It acts on the scores whether or not
@@ -344,9 +368,17 @@ class IconPoints:
         neutral, so the jet flew straight with the enemy off to one side: 686 of
         916 icon ticks, 95 s over 9 stretches, in the 2026-09-27 18:42 session
         (the 18:51:51 case: icon 158-171 deg, points -23/+9, at 822 m). With no
-        side to turn to (turn not active) it is still "none"."""
+        side to turn to (turn not active) it is still "none".
+
+        Below the horizon means the icon too, not only the score (Code Review
+        019 cycle 39). The score fades with a 1 s half-life, so after a low
+        sighting it points down for seconds after the icon has moved level: at
+        2026-10-19 04:17:01.7 the ammo pin sat at -1 to +5 deg and the push went
+        on 3 s, into a -50 deg dive. An icon inside `level_band_deg` of the
+        horizon, or above it, gets the turn toward its side instead."""
         roll = ROLL_LEFT if self.turn_active < 0 else ROLL_RIGHT
-        if self.pitch_pts > 0 and (self.pitch_active or self.turn_active):
+        icon_level = self.icon_level_or_above()
+        if self.pitch_pts > 0 and not icon_level and (self.pitch_active or self.turn_active):
             if down_allowed:
                 return "down", (NOSE_DOWN,)
             if self.turn_active:
@@ -354,9 +386,10 @@ class IconPoints:
             return "none", ()
         if self.pitch_active and (not self.turn_active
                                   or abs(self.pitch_pts) >= abs(self.turn_pts)):
-            if self.pitch_active > 0:
+            if self.pitch_active < 0:
+                return "up", (NOSE_UP, roll) if self.turn_active else (NOSE_UP,)
+            if not icon_level:
                 return "down", (NOSE_DOWN,)          # wings level: roll released
-            return "up", (NOSE_UP, roll) if self.turn_active else (NOSE_UP,)
         if self.turn_active:
             return "turn", (roll, NOSE_UP)           # bank and pull, as BoundaryTurn
         return "none", ()

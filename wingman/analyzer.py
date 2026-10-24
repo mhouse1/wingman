@@ -699,6 +699,31 @@ def _process_crop_region(frame, crop_coords, text_tokens):
     return _process_text_region(get_crop(frame, *crop_coords), text_tokens)
 
 
+def _read_text_lines(frame) -> "list[str]":
+    """OCR a crop into its text lines, top to bottom, upper case (worker thread)."""
+    reader = _get_thread_ocr_reader()
+    if reader is None:
+        return []
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    upscaled = cv2.resize(gray, None, fx=1.4, fy=1.4, interpolation=cv2.INTER_CUBIC)
+    results = reader.readtext(upscaled, detail=1, paragraph=False, workers=0)
+    results = sorted(results, key=lambda r: min(p[1] for p in r[0]))
+    return [str(r[1]).strip().upper() for r in results if str(r[1]).strip()]
+
+
+def _mode_and_map(lines: "list[str]") -> "tuple[str | None, str | None]":
+    """The matchmaking panel's two lines: the mode above, the map below.
+
+    One line read is taken as the map: the mode line is the longer, steadier
+    one, and it is the map that varies from match to match.
+    """
+    if not lines:
+        return None, None
+    if len(lines) == 1:
+        return None, lines[0]
+    return lines[0], lines[-1]
+
+
 def _levenshtein_distance_simple(a: str, b: str) -> int:
     """Simple Levenshtein distance for worker processes."""
     if a == b:
@@ -764,6 +789,7 @@ _STATE_CROPS: "dict[GameState, set[str]]" = {
         "PLAY", "READY", "UNREADY", "CANCEL",
         "CREATION_FAILED", "INSPECT", "INVITED",
         "REVEAL_ALL", "TAP_HERE_TO_CONTINUE", "UNLOCK_CLOSE", "FINAL_CONTINUE", "SILVER",
+        "PARTY_ENDED",
     },
     GameState.GAME_WAITING: {
         "PLAY", "READY", "CANCEL",
@@ -1377,9 +1403,21 @@ class GameStateAnalyzer:
         self._telemetry_lock = threading.Lock()
         # Non-blocking telemetry OCR (ADR 038 safety rule: never block the
         # main loop on altitude-speed OCR). The in-flight future is harvested
-        # on a later tick when done; a new one is submitted only when none is
-        # pending and the tick throttle allows.
+        # by its done-callback the moment its OCR finishes (Code Review 019
+        # cycle 38); a new one is submitted only when none is pending and the
+        # tick throttle allows.
         self._telemetry_future = None
+        # Cycle 38: the frame time of the newest reading in the filter, and the
+        # wake-up for the tick that waits on it (main._wait_for_tick_telemetry).
+        self._telemetry_landed_frame_ts = 0.0
+        self.telemetry_event = threading.Event()
+        # Code Review 019 (2026-10-19): the mode and map the matchmaking panel
+        # shows, read once per matchmaking (note_matchmaking_frame).
+        self.match_mode: "str | None" = None
+        self.match_map: "str | None" = None
+        self._match_map_reads = 0
+        self._match_map_last_read_ts = 0.0
+        self._last_telemetry_ocr_s = 0.0   # for the pass timing log
         # Capture timestamp of the frame behind the in-flight future. Rates
         # must be derived from frame times, not harvest times — the async
         # harvest lands one to two ticks after capture, and rate computed on
@@ -1741,35 +1779,123 @@ class GameStateAnalyzer:
             if self._fuel_lock.locked():
                 self._fuel_lock.release()
 
-    def _harvest_telemetry_future(self) -> float:
+    def _submit_telemetry(self, executor, telemetry_frame) -> None:
+        """Start a telemetry OCR pass on this frame, harvested when it finishes.
+
+        Code Review 019 cycle 38: the pass used to be harvested at the start of
+        the next background pass, 1.5 s after its frame, so every climb trigger
+        acted on a frame 1.54 s old (median of 409, 2026-10-18/19) while the
+        OCR itself took 0.41 s. The done-callback puts the reading in the
+        filter the moment it exists. Nothing waits on it here (ADR 038).
+        """
+        self._telemetry_frame_ts = time.time()
+        fut = executor.submit(_process_telemetry_region, telemetry_frame)
+        self._telemetry_future = fut
+        fut.add_done_callback(self._on_telemetry_done)
+
+    def _on_telemetry_done(self, fut) -> None:
+        """Done-callback of a telemetry OCR pass: harvest it now."""
+        try:
+            self._harvest_telemetry_future(fut)
+        except Exception:
+            logger.exception("Analyzer: telemetry harvest failed")
+
+    def telemetry_landed_since(self, since_ts: float) -> bool:
+        """True once a reading of a frame grabbed at or after ``since_ts`` is in
+        the filter (cycle 38)."""
+        return self._telemetry_landed_frame_ts >= since_ts
+
+    def telemetry_in_flight_since(self, since_ts: float) -> bool:
+        """True while a telemetry OCR pass runs on a frame grabbed at or after
+        ``since_ts`` (cycle 38)."""
+        return (self._telemetry_future is not None
+                and self._telemetry_frame_ts >= since_ts)
+
+    _MATCH_MAP_MAX_READS = 3
+    _MATCH_MAP_RETRY_S = 2.0
+
+    def note_matchmaking_frame(self, frame) -> None:
+        """Read the mode and map off the matchmaking panel (Code Review 019).
+
+        Called each tick in GAME_WAITING. One background OCR at a time, up to
+        three a matchmaking until a map is read; nothing waits on it. Logs
+        ``MATCH: mode=... map=...`` once, so each match's crashes can be put
+        against its map (the JA37's unwarned crashes of 2026-10-19 flew level
+        into ground 1,000 to 1,600 m high, which no sea-level floor sees).
+        """
+        if (self.match_map is not None or frame is None
+                or self._match_map_reads >= self._MATCH_MAP_MAX_READS
+                or "MATCH_MAP" not in self.crops):
+            return
+        now = time.time()
+        if now - self._match_map_last_read_ts < self._MATCH_MAP_RETRY_S:
+            return
+        executor = self.ocr_executor
+        if executor is None:
+            return
+        self._match_map_reads += 1
+        self._match_map_last_read_ts = now
+        fut = executor.submit(_read_text_lines,
+                              _crop_for_ocr(frame, self.crops["MATCH_MAP"][:4]))
+        fut.add_done_callback(self._on_match_map_read)
+
+    def _on_match_map_read(self, fut) -> None:
+        try:
+            lines = fut.result()
+        except Exception:
+            logger.debug("Analyzer: matchmaking panel read failed", exc_info=True)
+            return
+        mode, name = _mode_and_map(lines)
+        if name is None:
+            logger.debug("Analyzer: matchmaking panel read no text (attempt %d)",
+                         self._match_map_reads)
+            return
+        self.match_mode, self.match_map = mode, name
+        logger.info("MATCH: mode=%s map=%s", mode or "n/a", name)
+
+    def _harvest_telemetry_future(self, fut=None) -> float:
         """Collect a finished telemetry OCR pass without blocking (ADR 038).
 
-        Returns the harvested pass's OCR seconds for the tick timing log, or
-        0.0 when nothing was ready. The reading lands one to two ticks after
-        its frame was captured — well inside the staleness budget — and the
-        filter timestamps it at harvest time, so rate derivation stays on one
-        consistent clock.
+        ``fut`` is the pass its done-callback finished (cycle 38); without it,
+        the pass in flight. Returns the harvested pass's OCR seconds, or 0.0
+        when nothing was ready or the pass is no longer the one in flight: a
+        reset (respawn, battle entry) drops it under the telemetry lock, because
+        its frame shows the aircraft before the discontinuity. The filter
+        timestamps the reading with its frame's capture time, so rate
+        derivation stays on one consistent clock.
         """
-        fut = self._telemetry_future
+        if fut is None:
+            fut = self._telemetry_future
         if fut is None or not fut.done():
             return 0.0
-        self._telemetry_future = None
         try:
             speed_value, altitude_value, telemetry_ocr_time = fut.result(timeout=1)
         except Exception:
-            logger.exception("Analyzer: telemetry OCR pass failed")
+            if not fut.cancelled():   # cleanup() cancels the passes still queued
+                logger.exception("Analyzer: telemetry OCR pass failed")
+            with self._telemetry_lock:
+                if self._telemetry_future is fut:
+                    self._telemetry_future = None
             return 0.0
-        if self._tracker:
-            self._tracker.record_ocr_crop("telemetry", telemetry_ocr_time)
-        # Timestamp readings with the frame's capture time so rates reflect
-        # real Δaltitude/Δframe-time; signal age then honestly includes the
-        # OCR latency.
-        _frame_ts = self._telemetry_frame_ts or time.time()
         with self._telemetry_lock:
+            if self._telemetry_future is not fut:
+                return 0.0   # dropped by a reset, or already harvested
+            # Timestamp readings with the frame's capture time so rates reflect
+            # real Δaltitude/Δframe-time; signal age then honestly includes the
+            # OCR latency.
+            _frame_ts = self._telemetry_frame_ts or time.time()
             rejected_before = self._telemetry.rejected_total
             self._telemetry.update(speed_value, altitude_value, _frame_ts)
             rejected_after = self._telemetry.rejected_total
             snap = self._telemetry.snapshot(_frame_ts)
+            # Landed before the future clears: a waiter that sees nothing in
+            # flight then always sees this reading (main._wait_for_tick_telemetry).
+            self._telemetry_landed_frame_ts = _frame_ts
+            self._telemetry_future = None
+        self.telemetry_event.set()
+        self._last_telemetry_ocr_s = telemetry_ocr_time
+        if self._tracker:
+            self._tracker.record_ocr_crop("telemetry", telemetry_ocr_time)
         if rejected_after > rejected_before:
             logger.warning(
                 "Analyzer: telemetry plausibility filter rejected reading "
@@ -1954,6 +2080,10 @@ class GameStateAnalyzer:
 
     def on_enter_GAME_LOBBY(self):
         self._last_lobby_play_click_ts = 0.0
+        # The next matchmaking reads its own mode and map.
+        self.match_mode = self.match_map = None
+        self._match_map_reads = 0
+        self._match_map_last_read_ts = 0.0
         with self._health_lock:
             self._health_window.clear()
             self._health_ceiling = None
@@ -1982,11 +2112,16 @@ class GameStateAnalyzer:
                 self.alive_event.set()
         with self._telemetry_lock:
             self._telemetry.reset()
-        # Drop any in-flight OCR from the previous battle so its stale frame
-        # cannot seed the freshly reset filter when battle resumes.
-        self._telemetry_future = None
-        # A battle is the proof a squad lobby works; its clock starts over.
+            # Drop any in-flight OCR from the previous battle so its stale frame
+            # cannot seed the freshly reset filter when battle resumes. Under the
+            # lock: the pass's done-callback claims it under the same lock.
+            self._telemetry_future = None
+        # A battle is the proof a squad lobby works; its clocks start over. The
+        # UNREADY dwell too: no lobby scan runs in battle to clear it, so on
+        # 2026-10-23 15:38 a READY that started a battle 9 s later left it
+        # running, and the next lobby left the squad 12 s after the round.
         self._squad_lobby_since = 0.0
+        self._unready_since = 0.0
 
     def reset_health_for_respawn(self):
         """Clear health spike filter after a respawn so full-health readings aren't rejected.
@@ -2016,11 +2151,11 @@ class GameStateAnalyzer:
         # ticks, so recalibrate it alongside the health filter.
         with self._telemetry_lock:
             self._telemetry.reset()
-        # Drop any in-flight telemetry OCR: a pre-respawn frame harvested after
-        # this reset would seed the freshly recalibrated filter with pre-death
-        # values and delta-reject genuine post-respawn readings for ~9s
-        # (mirrors the same guard in on_enter_GAME_BATTLE).
-        self._telemetry_future = None
+            # Drop any in-flight telemetry OCR: a pre-respawn frame harvested after
+            # this reset would seed the freshly recalibrated filter with pre-death
+            # values and delta-reject genuine post-respawn readings for ~9s
+            # (mirrors the same guard in on_enter_GAME_BATTLE).
+            self._telemetry_future = None
         logger.info("Analyzer: health spike filter reset for respawn")
 
     def on_enter_GAME_BATTLE_MANUAL(self):
@@ -2960,20 +3095,18 @@ class GameStateAnalyzer:
                     ammo_flares_future = executor.submit(_process_health_region, ammo_flares_frame, "ammo_flares") if ammo_flares_frame is not None else None
                     ammo_missile_future = executor.submit(_process_health_region, ammo_missile_frame, "ammo_missiles") if ammo_missile_frame is not None else None
                     fuel_future = executor.submit(_process_health_region, fuel_frame, "fuel") if fuel_frame is not None else None
-                    # Telemetry is fire-and-forget: harvest last submission's
-                    # result if it finished, then maybe submit a fresh frame.
-                    # The tick NEVER waits on telemetry (ADR 038 safety rule) —
+                    # Telemetry is fire-and-forget: submit a fresh frame when no
+                    # pass is in flight; its done-callback harvests it (cycle 38).
+                    # This pass NEVER waits on telemetry (ADR 038 safety rule) —
                     # measured on session run_20260728_172933, blocking on it
                     # made telemetry the critical path on 92% of ticks.
-                    telemetry_ocr_time = self._harvest_telemetry_future()
+                    telemetry_ocr_time = self._last_telemetry_ocr_s
                     self._telemetry_tick_counter += 1
                     if (telemetry_frame is not None
                             and self._telemetry_future is None
                             and self._telemetry_tick_counter >= self._telemetry_every_n_ticks):
                         self._telemetry_tick_counter = 0
-                        self._telemetry_frame_ts = time.time()
-                        self._telemetry_future = executor.submit(
-                            _process_telemetry_region, telemetry_frame)
+                        self._submit_telemetry(executor, telemetry_frame)
                     t2 = time.time()
 
                     # Wait for respawn result first — update its cache immediately so the
@@ -3527,7 +3660,7 @@ class GameStateAnalyzer:
         popup_crop_names = ["INVITED", "CREATION_FAILED", "REVEAL_ALL", "SILVER",
                             "UNLOCK_CLOSE", "INSPECT", "event_refresh",
                             "NEW_FLIGHT_PASS", "TAP_HERE_TO_CONTINUE",
-                            "FINAL_CONTINUE"]
+                            "FINAL_CONTINUE", "PARTY_ENDED"]
         popup_crops = [c for c in popup_crop_names if c in self.crops]
 
         if not lobby_crops and not popup_crops:

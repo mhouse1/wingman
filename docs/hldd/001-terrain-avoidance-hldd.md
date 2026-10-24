@@ -138,6 +138,15 @@ margin.
    trigger flies since cycle 34 and `pullout.bypass_holdoff_below_m` (300) since cycle 36. Cycle 35 made
    the emergency climb itself skip misread paths (`telemetry.path_is_misread`): 80 of 144 of its
    nose-down pulses had come at a clamped +90 deg reading, pushing the nose down in dive recoveries.
+
+   How old the reading is (cycle 38). Every climb trigger acted on a frame a median 1.54 s old (409
+   triggers, five logs of 2026-10-18/19; p10 1.51 s, p90 1.61 s), while its OCR took 0.41 s (p95
+   0.51 s): the finished reading waited for the next 1.5 s tick, and the tree decided about 0.1 s into
+   each tick, before its own reading existed. The emergency climb's own readings were as old. Since
+   cycle 38 a reading enters the filter when its OCR finishes, and in a live battle tick the tree waits
+   for that tick's reading, at most `telemetry.bt_wait_s` (0.75 s) from the tick start. Reading twice
+   as often instead would have saved about 0.4 s on average for a second OCR each tick. `reaction_s`
+   (2.0) was sized with the old age in it; re-fit it once the new age is measured live.
 3. **A terrain floor (part 3, designed).** HUD altitude is above sea level, so the true height of the terrain
    is unknown. Start with one conservative floor for every map, since the risk concentrates under 2,000 m.
    Then learn a floor per map from the altitudes of kill-card crashes, or revive
