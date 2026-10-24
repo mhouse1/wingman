@@ -24,6 +24,7 @@
 #   make calibrate   -> calibrate all crop regions interactively (offline, no game needed)
 #   make calibrate-crop CROP=<name> -> calibrate a single named crop (e.g. CROP=respawn)
 #   make add-crops -> calibrate every image in test_screenshots/to_be_added as a new crop named after filename
+#   make screenshot -> snipping tool: drag a region anywhere on screen; Enter captures it (any window), Backspace exits
 #   make g           -> launch MetalStorm only, without starting Wingman (Linux only)
 #   make update      -> update the installed MetalStorm files through Heroic (Linux only)
 #   make r           -> run wingman (Linux: auto-launches game; Windows: game must be running)
@@ -43,7 +44,7 @@
 #   make p1          -> capture screenshots for PATH1 using live Wingman play
 #   make p2          -> capture screenshots for PATH2 using live Wingman play
 
-.PHONY: hooks upgrade-linux fsm session-report sr leak-check leak-check-gate test test1 test2 docker-build docker-test docker-shell require-veda tp tp-full runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q nb g updater rd invite launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops ti preflight tree v frame
+.PHONY: hooks upgrade-linux fsm session-report sr leak-check leak-check-gate test test1 test2 docker-build docker-test docker-shell require-veda tp tp-full runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q nb g updater rd invite launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops screenshot ti preflight tree v frame
 
 PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
@@ -84,6 +85,10 @@ NESTED_FLAG  = $(if $(NESTED),--nested $(NESTED),)
 # config read, so `make test` and friends are not slowed by it.
 NESTED_ENV   = $(shell $(PYTHON_RUN) scripts/nested-display.py env $(NESTED_FLAG) 2>/dev/null)
 WINGMAN_NESTED_ENV = $(if $(NESTED),WINGMAN_NESTED=$(NESTED),)
+# Research 017: the prefix the game runs in, where it saves its own frame rate
+# for each match (wingman/game_stats.py logs it as GAME STATS). Lazily expanded,
+# so r1 and r2's WINE_PREFIX reaches rd's recipe.
+WINGMAN_PREFIX_ENV = WINGMAN_WINE_PREFIX="$(WINE_PREFIX)"
 # Real-game capture (make p1/p2/p3) must outlast a full mission cycle
 # (~6 min lobby->battle->missiles empty->respawn->match end), not the ~24 s
 # replay pacing the out-of-order deadline is derived from. The ADR 045
@@ -504,10 +509,10 @@ update:
 endif
 
 r: $(GAME_LAUNCH_DEPS)
-	$(WINGMAN_ENV) $(WINGMAN_NESTED_ENV) $(WINGMAN_NICE) $(PYTHON_RUN) -m wingman.main $(RECORD_FLAG)
+	$(WINGMAN_ENV) $(WINGMAN_NESTED_ENV) $(WINGMAN_PREFIX_ENV) $(WINGMAN_NICE) $(PYTHON_RUN) -m wingman.main $(RECORD_FLAG)
 
 rd: $(GAME_LAUNCH_DEPS)
-	$(WINGMAN_ENV) $(WINGMAN_NESTED_ENV) $(WINGMAN_NICE) $(PYTHON_RUN) -m wingman.main --log-file wingman.log $(RECORD_FLAG)
+	$(WINGMAN_ENV) $(WINGMAN_NESTED_ENV) $(WINGMAN_PREFIX_ENV) $(WINGMAN_NICE) $(PYTHON_RUN) -m wingman.main --log-file wingman.log $(RECORD_FLAG)
 
 invite:
 	$(PYTHON_RUN) scripts/toggle-invite.py $(if $(CONFIG),--config "$(CONFIG)",)
@@ -917,3 +922,10 @@ calibrate-crop:
 
 add-crops:
 	uv run --active python tests/calibrate.py --add-new-crops
+
+# Snipping-tool style screenshot of any region of the desktop (every monitor).
+#   Drag a rectangle on the dimmed screen; it stays outlined while you keep using
+#   the computer. Enter (global, from any window) saves it to
+#   tests/test-output/screenshot_*.png, as often as you like; Backspace exits.
+screenshot:
+	uv run --active python tests/screenshot.py

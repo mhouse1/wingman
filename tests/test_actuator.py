@@ -17,7 +17,7 @@ import wingman.controller as controller
 from wingman.actuator import Actuator
 from wingman.controller import Controller
 from wingman.hold_tactic import HoldTactic
-from wingman.keybindings import AFTERBURNER_KEY, ROLL_RIGHT_KEY
+from wingman.keybindings import AFTERBURNER_KEY, NOSE_DOWN_KEY, NOSE_UP_KEY, ROLL_RIGHT_KEY
 
 _RAW_KEY_CALLS = {"press", "release", "press_and_release", "send", "write"}
 
@@ -255,13 +255,17 @@ def test_reevaluate_lifts_the_key_when_every_holder_must_yield():
         "the lease stays; cruise re-presses when it may again"
 
 
-def test_other_keys_keep_phase_one_semantics():
-    """One key at a time: the pitch key's release still lifts it for everyone."""
+def test_unleased_keys_keep_phase_one_semantics():
+    """One key at a time: an unleased key's release still lifts it for everyone."""
     kb = mock.MagicMock()
     act = _leased(kb)
-    act.press("i", "spawn_guard", focus_gate=False)
-    act.release("i", "climb")
-    kb.release.assert_called_once_with("i")
+    act.press(ROLL_RIGHT_KEY, "tracking_roll", focus_gate=False)
+    act.release(ROLL_RIGHT_KEY, "disengage_roll")
+    kb.release.assert_called_once_with(ROLL_RIGHT_KEY)
+
+
+def test_production_leases_the_throttle_and_the_pitch_keys():
+    assert controller._actuator._leased == {AFTERBURNER_KEY, NOSE_UP_KEY, NOSE_DOWN_KEY}
 
 
 @pytest.fixture
@@ -285,6 +289,48 @@ def test_a_climb_ending_no_longer_drops_the_cruise_burn(leased_ctrl):
     c._climb_key(AFTERBURNER_KEY, press=True, action="cruise")
     c._climb_key(AFTERBURNER_KEY, press=True, action="climb")
     c._climb_key(AFTERBURNER_KEY, press=False, action="climb")
+    kb.release.assert_not_called()
+
+
+@pytest.fixture
+def pitch_ctrl(leased_ctrl, monkeypatch):
+    c, kb = leased_ctrl
+    act = Actuator(lambda: controller.keyboard_module,
+                   lambda what: controller._may_inject(what),
+                   leased_keys=(AFTERBURNER_KEY, NOSE_UP_KEY, NOSE_DOWN_KEY))
+    act.set_hold_policy(c._owner_may_hold)
+    monkeypatch.setattr(controller, "_actuator", act)
+    return c, kb
+
+
+def test_the_pursuits_yield_no_longer_drops_the_climbs_nose_up(pitch_ctrl):
+    """2026-10-24 00:54:22: the climb pressed nose-up at .808 and the pursuit's
+    ADR 148 yield released its own nose-up at .892, lifting the climb's too."""
+    c, kb = pitch_ctrl
+    c._climb_key(NOSE_UP_KEY, press=True, action="tracking_pitch")
+    c._climb_key(NOSE_UP_KEY, press=True, action="climb")
+    c._climb_key(NOSE_UP_KEY, press=False, action="tracking_pitch")
+    kb.release.assert_not_called()
+    c._climb_key(NOSE_UP_KEY, press=False, action="climb")
+    kb.release.assert_called_once_with(NOSE_UP_KEY)
+
+
+def test_the_spawn_guard_hand_off_keeps_the_climbs_nose_up(pitch_ctrl):
+    c, kb = pitch_ctrl
+    c._climb_key(NOSE_UP_KEY, press=True, action="spawn_guard")
+    c._climb_key(NOSE_UP_KEY, press=True, action="climb")
+    c._climb_key(NOSE_UP_KEY, press=False, action="spawn_guard")
+    kb.release.assert_not_called()
+
+
+def test_an_emergency_does_not_lift_a_pitch_lease(pitch_ctrl):
+    """The throttle yields are the throttle's: a pitch holder in their table
+    (rearm_climb) keeps its key through an emergency climb."""
+    c, kb = pitch_ctrl
+    c._climb_key(NOSE_UP_KEY, press=True, action="rearm_climb")
+    c._climb_key(NOSE_UP_KEY, press=True, action="climb")
+    c._climb_emergency_active = True
+    c._climb_key(NOSE_UP_KEY, press=False, action="climb")
     kb.release.assert_not_called()
 
 

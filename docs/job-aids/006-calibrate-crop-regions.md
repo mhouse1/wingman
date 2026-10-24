@@ -55,6 +55,7 @@ click two corners (or press S to keep the existing value). Coordinates are writt
 | `make recalibrate` | Full loop — all crops in `calibration_map.yaml` order (alias of `make calibrate`) |
 | `make calibrate-crop CROP=<name>` | Single crop — after a misclick or minor UI shift |
 | `make add-crops` | Calibrate new crops from images in `test_screenshots/to_be_added/` |
+| `make screenshot` | Snipping tool: drag a region anywhere on screen, then Enter captures it to `tests/test-output/screenshot_*.png` from any window; Backspace exits |
 
 ### Crops config format (`config.yaml`)
 

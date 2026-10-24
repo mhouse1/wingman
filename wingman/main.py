@@ -20,8 +20,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.9.2"
-WINGMAN_VERSION_DETAILS = "ACS: optimization"
+WINGMAN_VERSION = "1.9.3"
+WINGMAN_VERSION_DETAILS = "ACS: terrain avoidance"
 
 from . import capture_budget
 from .capture import Capture
@@ -46,6 +46,7 @@ from .terrain_loom import TerrainLoom
 from .mission_stats import MissionStatsTracker
 from .performance import PerformanceTracker
 from .resource_monitor import ResourceSampler, read_loadavg
+from .game_stats import GameStatsWatcher
 from .heap_census import HeapCensus
 from .eject_stuck_detector import EjectStuckDetector
 from .liveness_guard import LivenessGuard
@@ -175,6 +176,14 @@ def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8,
     logger.info("\033[93m📋 Final continue click complete → GAME_LOBBY\033[0m")
 
 
+# Popups whose detection crop is not the button to click: the crop the click goes
+# to instead. PARTY_ENDED (2026-10-19): the message is read, OK below it is clicked.
+_POPUP_CLICK_TARGETS = {
+    "event_refresh": "event_refresh_dismiss",
+    "PARTY_ENDED": "PARTY_ENDED_OK",
+}
+
+
 def _invite_click_target(accept_invite: bool, crops) -> "str | None":
     """Which crop dismisses a party-invite popup, given the accept/decline policy.
 
@@ -197,6 +206,38 @@ def _invite_click_target(accept_invite: bool, crops) -> "str | None":
 CHOOSE_REWARDS_ACCEPT_DELAY_S = 1.5
 _CHOOSE_REWARDS_STATES = (GameState.GAME_LOBBY, GameState.GAME_UNKNOWN,
                           GameState.GAME_STARTING_STALLED)
+
+
+def _wait_for_tick_telemetry(analyzer, ammo_events, since_ts: float, wait_s: float,
+                             clock=time.time, start_grace_s: float = 0.25) -> bool:
+    """Wait for the telemetry reading of this tick's frame (Code Review 019 cycle 38).
+
+    The tree used to decide about 0.1 s into the tick, on the reading of the
+    tick before: every climb trigger acted on a frame 1.54 s old. This tick's
+    reading lands about 0.45 s in. Returns True once it is in the filter, and
+    False at ``since_ts + wait_s``, or once no reading of a frame grabbed since
+    ``since_ts`` is on its way ``start_grace_s`` into the tick. The grace is the
+    background pass's own start: live, the tree got here 1 to 2 ms after the
+    pass was scheduled, before it had submitted the reading (04:31, cycle 38).
+    A new missile alert still deploys flares while it waits.
+    """
+    deadline = since_ts + wait_s
+    while not analyzer.telemetry_landed_since(since_ts):
+        now = clock()
+        in_flight = analyzer.telemetry_in_flight_since(since_ts)
+        if not in_flight and now - since_ts >= start_grace_s:
+            # It may have landed between the two checks.
+            return analyzer.telemetry_landed_since(since_ts)
+        remaining = deadline - now
+        if remaining <= 0:
+            return False
+        # Nothing wakes the wait when the pass submits, only when it lands.
+        analyzer.telemetry_event.wait(timeout=min(remaining, 0.05 if in_flight else 0.02))
+        analyzer.telemetry_event.clear()
+        if analyzer.incoming_event.is_set():
+            analyzer.incoming_event.clear()
+            ammo_events.deploy_flares_on_new_incoming()
+    return True
 
 
 def _choose_middle_reward(ctrl, analyzer, logger,
@@ -873,6 +914,7 @@ def main():
         _files, _bytes = capture_budget.section_budget(
             cfg, "session_video", (8, 6144 * 1024 ** 2))
         capture_budget.prune("logs", "session_*.mp4", _files, _bytes, reserve=1)
+        capture_budget.prune("logs", "session_*.frames.csv", _files, _bytes, reserve=1)
         video_recorder = VideoRecorder(
             region, monitor_index, game_window_offset, nested_display,
             out_path=f"logs/session_{tracker.run_id}.mp4",
@@ -882,8 +924,9 @@ def main():
         video_recorder.start()
         bt_trace_writer = BtTraceWriter(f"logs/bt_trace_{tracker.run_id}.jsonl")
         logger.info("Design 012: recording session video to logs/session_%s.mp4 "
+                    "(each frame's time in logs/session_%s.frames.csv) "
                     "and behavior-tree trace to logs/bt_trace_%s.jsonl",
-                    tracker.run_id, tracker.run_id)
+                    tracker.run_id, tracker.run_id, tracker.run_id)
 
     # Party invites are DECLINED by default: accepting drops the aircraft into
     # someone else's squad mid-session, which silently changes what an unattended
@@ -1047,7 +1090,7 @@ def main():
             # ESC dismisses it. Cooldown above still rate-limits the presses.
             ctrl.press_escape(hold_seconds=0.05, block=False)
             return
-        click_target = "event_refresh_dismiss" if popup == "event_refresh" else popup
+        click_target = _POPUP_CLICK_TARGETS.get(popup, popup)
         if popup == "INVITED":
             click_target = _invite_click_target(accept_invite, analyzer.crops)
             if click_target is None:
@@ -1317,6 +1360,12 @@ def main():
 
     # Load loop interval from config
     loop_interval_sec = cfg.get("loop_interval_sec", 0.5)
+    # Code Review 019 cycle 38: live runs only, so replay and capture keep their
+    # timing.
+    telemetry_bt_wait_s = float((cfg.get("telemetry") or {}).get(
+        "bt_wait_s", schema_default("telemetry.bt_wait_s")))
+    if replay_mode or live_capture is not None:
+        telemetry_bt_wait_s = 0.0
 
     # Mission restart state machine
     last_click_to_alert_ts = 0.0
@@ -1426,6 +1475,8 @@ def main():
     resource_sampler = ResourceSampler(
         cfg.get("resource_monitor", {}), perf_tracker=tracker)
     resource_sampler.set_pool_depth_source(analyzer.ocr_queue_depth)
+    # Research 017: the game's own frame rate for each match, from its prefix.
+    game_stats = GameStatsWatcher.from_env()
     # ADR 095: record the conditions this session ran under, so it can be
     # compared against the archive rather than assumed equivalent to it.
     try:
@@ -1487,6 +1538,7 @@ def main():
             # resource trail — capture stalls are a symptom of the very
             # starvation this samples (Performance 008).
             resource_sampler.maybe_sample()
+            game_stats.maybe_poll()
             heap_census.maybe_census(mi_use_mb=resource_sampler.last_mi_use_mb)
             # ADR 093 liveness: OCR happening at all is progress. Own offsets —
             # snapshot_since does not drain, so this cannot starve the sampler.
@@ -1822,6 +1874,14 @@ def main():
             # semantics. Still ticks in off/shadow modes.
             if not behavior_tree.active:
                 enemy_presence.tick(frame, current_game_state)
+
+            # Code Review 019 cycle 38: decide on this tick's telemetry, not the
+            # last tick's (see _wait_for_tick_telemetry).
+            if (telemetry_bt_wait_s > 0 and current_game_state in BATTLE_STATES
+                    and not _wait_for_tick_telemetry(analyzer, ammo_events, loop_start,
+                                                     telemetry_bt_wait_s)):
+                logger.debug("Tick: the tree decides without this tick's telemetry "
+                             "(%.2fs in)", time.time() - loop_start)
 
             # ADR 024 behavior tree: tactic selection every tick; in active
             # mode the Engage selection also drives ring-engage geometry

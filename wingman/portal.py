@@ -37,6 +37,21 @@ def _save_restore_token(token):
 def acquire_screencast_node():
     """Run the portal ScreenCast sequence and return (node_id, bus).
 
+    See acquire_screencast_stream(); this keeps the cursor embedded and drops
+    the stream properties.
+    """
+    node_id, _props, bus = acquire_screencast_stream()
+    return node_id, bus
+
+
+def acquire_screencast_stream(cursor_mode=2):
+    """Run the portal ScreenCast sequence and return (node_id, props, bus).
+
+    `props` is the stream's property dict from the portal's Start response. For a
+    monitor it usually carries "position" and "size" (x, y and width, height in
+    logical desktop coordinates); either may be absent. `cursor_mode` is the
+    portal's: 1 hidden, 2 embedded in the frames.
+
     On first call: shows the GNOME screen-share dialog (select monitor → Share).
     On subsequent calls: restore token skips the dialog automatically.
 
@@ -98,7 +113,7 @@ def acquire_screencast_node():
             "handle_token": GLib.Variant("s", t2),
             "types": GLib.Variant("u", 1),          # 1=Monitor (window type not supported by DXVK/Wine)
             "multiple": GLib.Variant("b", False),
-            "cursor_mode": GLib.Variant("u", 2),    # 2=embedded cursor
+            "cursor_mode": GLib.Variant("u", cursor_mode),  # 1=hidden, 2=embedded
             "persist_mode": GLib.Variant("u", 2),   # 2=persistent (save restore token)
         }
         if restore_token:
@@ -126,8 +141,9 @@ def acquire_screencast_node():
                     state["error"] = "Portal returned no streams"
                     loop.quit()
                     return
-                node_id, _props = streams[0]
+                node_id, props = streams[0]
                 state["node_id"] = int(node_id)
+                state["props"] = dict(props)
                 state["restore_token"] = res.get("restore_token")
                 logger.debug("portal: node_id=%d", state["node_id"])
                 loop.quit()
@@ -160,7 +176,7 @@ def acquire_screencast_node():
         raise RuntimeError(f"Portal ScreenCast failed: {state['error']}")
 
     _save_restore_token(state.get("restore_token"))
-    return state["node_id"], bus
+    return state["node_id"], state["props"], bus
 
 
 if __name__ == "__main__":

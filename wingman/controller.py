@@ -15,7 +15,7 @@ from mss import mss
 
 from .state import GameState
 from .perception import Perception
-from .telemetry import STEEP_DIVE_MIN_SIN_DEFAULT
+from .telemetry import STEEP_DIVE_MIN_SIN_DEFAULT, path_is_misread
 from .config_schema import schema_default
 from . import keybindings as _keybindings
 from .actuator import Actuator
@@ -113,8 +113,14 @@ def _may_inject(what: str = "key") -> bool:
 # lambdas read the module globals on each call, so tests that monkeypatch
 # `keyboard_module` or `_may_inject` still intercept every press.
 # Phase 2 (2026-09-27): the throttle is leased; see Actuator and _THROTTLE_YIELDS.
+# The pitch keys too (2026-10-24): on 2026-10-23 another owner's release lifted
+# the climb's nose-up 713 times (533 the pursuit's ADR 148 yield, 180 the spawn
+# guard's hand-off), each costing the climb the rest of its 1.5 s pulse. At
+# 00:54:22 one of them left a terrain pull-out 84 ms of its first pulse, and the
+# aircraft hit the hillside about 4 s later, still 16 deg nose-down.
 _actuator = Actuator(lambda: keyboard_module, lambda what: _may_inject(what),
-                     leased_keys=(_keybindings.AFTERBURNER_KEY,))
+                     leased_keys=(_keybindings.AFTERBURNER_KEY,
+                                  _keybindings.NOSE_UP_KEY, _keybindings.NOSE_DOWN_KEY))
 
 # A failed key RELEASE is the start of a stuck-key incident, and the key does not
 # come back when this process dies: on Linux XTest key state lives in the X
@@ -643,8 +649,9 @@ class Controller:
         self._approach_brake_cfg = {
             key: _brake.get(key, schema_default(f"approach_brake.{key}"))
             for key in ("enabled", "resupply", "control_point", "crown", "cap_kph",
-                        "target_kph", "decel_kph_s", "max_dose_s", "dive",
-                        "dive_path_deg", "dive_below_m")}
+                        "target_kph", "resupply_cap_kph", "resupply_target_kph",
+                        "decel_kph_s", "max_dose_s", "dive", "dive_path_deg",
+                        "dive_below_m")}
         # Code Review 019 cycle 27: the last dive the brake was armed for, for its log.
         self._dive_brake_state: "tuple[float, float] | None" = None
         # Cycle 27b: True while the dose in hand was started for a dive, and why
@@ -948,6 +955,11 @@ class Controller:
             schema_default("pursuit_mode.crash_recovery_clear_view_s"))
         self._pursuit_recovery_clear_view_s = (
             None if _clear_view is None else max(0.0, float(_clear_view)))
+        # 2026-10-20: a control point's or the crown's marker is held this long
+        # through the scan's misses, so the objective keeps the steering it has.
+        self._objective_marker_hold_s = max(0.0, float(_pm.get(
+            "objective_marker_hold_s",
+            schema_default("pursuit_mode.objective_marker_hold_s"))))
         self._pursuit_objective_ts = 0.0
         self._pursuit_objective_kind = ""
         self._recovery_held_log_ts = 0.0
@@ -1234,6 +1246,13 @@ class Controller:
         self._climb_brake_release_kph = _cl_cfg.get(
             "emergency_airbrake_release_kph",
             schema_default("behavior_tree.climb.emergency_airbrake_release_kph"))
+        # Code Review 019 cycle 36: a live pull-out alarm whose predicted lowest
+        # point is under this (m) breaks the objective hold-off, as two agreeing
+        # warnings do; None: never. The tree pushes the lowest point every tick.
+        self._pullout_bypass_below_m = (_cl_cfg.get("pullout") or {}).get(
+            "bypass_holdoff_below_m",
+            schema_default("behavior_tree.climb.pullout.bypass_holdoff_below_m"))
+        self._pullout_lowest_m: "float | None" = None
         # ADR 088: abort a dive whose premise (empty rack) has expired.
         self._eject_abort_on_rearm = bool(_ecl.get("abort_on_rearm", True))
         # ADR 107: duration cap for the boundary turn. Bounded for the same
@@ -2499,12 +2518,13 @@ class Controller:
         if veto is not None:
             self._approach_brake_off(veto)
             return
+        cap, target = self._approach_brake_limits(goal)
         reading, read_ts = self._speed_reading()
         if reading is not None and read_ts != self._approach_brake_read_ts:
             self._approach_brake_read_ts = read_ts
-            if reading > float(cfg["cap_kph"]):
+            if reading > cap:
                 dose = min(float(cfg["max_dose_s"]),
-                           (reading - float(cfg["target_kph"])) / float(cfg["decel_kph_s"]))
+                           (reading - target) / float(cfg["decel_kph_s"]))
                 self._approach_brake_until = now + dose
                 self._dive_dose_running = goal == "dive"
                 if goal == "dive" and self._dive_brake_state is not None:
@@ -2512,13 +2532,25 @@ class Controller:
                 else:
                     where = "on the %s approach" % goal
                 logger.info("SPEEDCAP: %.0f KPH over the %.0f KPH cap %s: airbrake "
-                            "for %.1f s", reading, float(cfg["cap_kph"]), where, dose)
+                            "for %.1f s", reading, cap, where, dose)
                 self._approach_brake_on()
-            elif self._approach_brake_held and reading <= float(cfg["target_kph"]):
+            elif self._approach_brake_held and reading <= target:
                 self._approach_brake_off("%.0f KPH reached" % reading)
                 return
         if self._approach_brake_held and now >= self._approach_brake_until:
             self._approach_brake_off("dose given")
+
+    def _approach_brake_limits(self, goal: "str | None") -> "tuple[float, float]":
+        """The cap and target for this goal. The resupply approach has its own
+        (2026-10-24): over 25 logs the pull-out trigger broke the resupply
+        hold-off in 143 dives, at a median 1,003 KPH, the reading before at 834
+        (over 850 in 46%, over 700 in 82%). At 938 m and -38 deg a pull-out
+        bottoms out at -79 m from 1,000 KPH and 403 m from 700."""
+        cfg = self._approach_brake_cfg
+        if goal == "resupply":
+            return (float(cfg.get("resupply_cap_kph", cfg["cap_kph"])),
+                    float(cfg.get("resupply_target_kph", cfg["target_kph"])))
+        return float(cfg["cap_kph"]), float(cfg["target_kph"])
 
     def _approach_brake_veto(self, now: float) -> "str | None":
         """Why the approach brake may not hold now, or None: a takeover, a climb
@@ -4434,7 +4466,13 @@ class Controller:
                 resupply_points = IconPoints(self._icon_cfg) if self._icon_cfg.enabled else None
                 # So does the priority target's pin (operator, 2026-10-09).
                 priority_points = IconPoints(self._icon_cfg) if self._icon_cfg.enabled else None
-                priority_marker_memory = ResupplyMarkerMemory()
+                # 2026-10-20 02:40:48.8: A, 20 px off the centre and steered at,
+                # was missed by the scan for about 0.6 s; the resupply's 0.5 s of
+                # memory ran out, the resupply marker took the steering, and A,
+                # found again a cycle later, never got it back. In the logs of
+                # 10-15 to 10-20 85% of such misses lasted under 1.5 s.
+                priority_marker_memory = ResupplyMarkerMemory(
+                    hold_s=self._objective_marker_hold_s)
                 priority_state = None     # "marker" or "pin" while one is being followed
                 priority_kind = None      # whose: "priority_target" or "air_superiority"
                 priority_last_ts = 0.0
@@ -4774,9 +4812,12 @@ class Controller:
                         # does: on 2026-10-12 14:36:56 the recovery took the
                         # airframe with A 12 px off the centre, one second after
                         # A took the steering from the target it had waited on.
+                        # A held marker steers but is not in view: the recovery
+                        # does not wait on one the scan has lost (2026-10-20).
                         self._note_pursuit_objective(
                             "resupply marker" if resupply_control
-                            else priority_hud.lower() if priority_control
+                            else priority_hud.lower()
+                            if priority_control and not priority_marker_stale
                             else "target" if control_visible else None)
                         icon_state = None
                         # In resupply mode the icon law runs on the resupply pin:
@@ -6165,6 +6206,12 @@ class Controller:
                 logger.info("Controller: crash recovery starts with the %s in view — "
                             "two terrain warnings agree", _objective)
                 _objective = None
+            # Code Review 019 cycle 36: so does a severe pull-out alarm.
+            if _objective is not None and self._pullout_breaks_holdoff():
+                logger.info("Controller: crash recovery starts with the %s in view — a "
+                            "pull-out would bottom out at %.0f m (HLDD 001 part 2)",
+                            _objective, self._pullout_lowest_m)
+                _objective = None
             if _objective is not None:
                 now = time.time()
                 if now - self._recovery_held_log_ts >= 10.0:
@@ -6257,6 +6304,24 @@ class Controller:
         whatever value was true when the hold started.
         """
         self._climb_emergency_requested = bool(value)
+
+    def set_pullout_lowest_m(self, value: "float | None") -> None:
+        """Code Review 019 cycle 36: the tree's live pull-out alarm, every tick:
+        the predicted lowest point (m) of a pull-out, None while not firing."""
+        self._pullout_lowest_m = None if value is None else float(value)
+
+    def _pullout_breaks_holdoff(self) -> bool:
+        """True while a live pull-out alarm predicts a lowest point under
+        `bypass_holdoff_below_m`: the recovery flies with an objective in view.
+
+        Over 401 missions of 2026-10-17/18 the objective hold-off acted within
+        10 s before 55% of the kill-card crashes and touched 65% of those the
+        trigger warns 2 s ahead; its alarms under 300 m were followed by a crash
+        24% of the time during the hold-off (21% otherwise), 1.0 a mission.
+        """
+        low = self._pullout_lowest_m
+        limit = self._pullout_bypass_below_m
+        return limit is not None and low is not None and low < float(limit)
 
     def note_incoming(self, detected: bool, now: "float | None" = None) -> None:
         """Refresh the missile-evade afterburner deadline. ADR 128.
@@ -6592,8 +6657,13 @@ class Controller:
             return bool(getattr(self, "_approach_brake_held", False))
         raise ValueError(f"unknown yield condition {name!r}")
 
-    def _owner_may_hold(self, _key: str, owner: str) -> bool:
-        """May ``owner`` hold the throttle right now (the Actuator's policy)."""
+    def _owner_may_hold(self, key: str, owner: str) -> bool:
+        """May ``owner`` hold ``key`` right now (the Actuator's policy).
+
+        Only the throttle has yields. A pitch lease always counts: its owners
+        give the axis up by releasing (ADR 148), not by a policy turning."""
+        if key != AFTERBURNER_KEY:
+            return True
         return not any(self._yield_condition(c)
                        for c in self._THROTTLE_YIELDS.get(owner, ()))
 
@@ -6762,11 +6832,12 @@ class Controller:
                     break
         finally:
             _release_started = time.time()
-            if not self._climbing.is_set():
-                self._climb_key(NOSE_UP_KEY, press=False, action="spawn_guard")
-            else:
-                logger.info("Controller: spawn guard — climb hold owns the "
-                            "pitch key, skipping OS-level release")
+            # Always end the lease (ADR 151 D6): the key stays down while a
+            # climb still holds it. Skipping this release when a climb ran, as
+            # the guard did before the pitch keys were leased, left its lease
+            # behind and latched nose-up (2026-10-24 02:10:25, the aircraft
+            # looped from +16 to -90 deg).
+            self._climb_key(NOSE_UP_KEY, press=False, action="spawn_guard")
             _release_span = time.time() - _release_started
             if bracketed:
                 self._arm_release_grace(NOSE_UP_KEY, span_s=_release_span)
@@ -7125,6 +7196,10 @@ class Controller:
                         if (_objective is not None and _agreement is not None
                                 and _agreement.live()):
                             _objective = None
+                        # Code Review 019 cycle 36: nor while a severe pull-out
+                        # alarm stands.
+                        if _objective is not None and self._pullout_breaks_holdoff():
+                            _objective = None
                         if _objective is not None:
                             logger.info(
                                 "Controller: climb — the pursuit has the %s in view "
@@ -7272,9 +7347,27 @@ class Controller:
                 if alt is None or sig_ts is None or sig_ts <= last_counted_ts:
                     continue   # stale sample already counted (d5)
                 last_counted_ts = sig_ts
-                last_rate = getattr(alt_signal, "rate", None)
                 _angle_fn = getattr(snap, "pitch_angle_deg", None)
                 _new_angle = _angle_fn() if callable(_angle_fn) else None
+                # Code Review 019 cycle 35: a path that clamps or turns faster
+                # than an airframe can is a misread, and so are its rate and its
+                # predicted altitude. Acting on them pushed the nose down in dive
+                # recoveries: of 144 nose-down pulses in emergency climbs on five
+                # logs of 2026-10-18, 80 came at a clamped +90 deg (rates of +330
+                # to +412 m/s, the rebound of an altitude misread), and 25 of the
+                # 61 crashes during an emergency climb had one. The sample is
+                # skipped; the last plausible one keeps steering.
+                if _new_angle is not None and path_is_misread(
+                        _new_angle, prev_angle,
+                        None if prev_angle_ts is None else sig_ts - prev_angle_ts,
+                        getattr(getattr(snap, "speed", None), "stable_value", None)):
+                    logger.debug(
+                        "Controller: climb — path %+.0f deg (rate %s) after %s is a "
+                        "misread, held", _new_angle,
+                        getattr(alt_signal, "rate", None),
+                        "n/a" if prev_angle is None else f"{prev_angle:+.0f} deg")
+                    continue
+                last_rate = getattr(alt_signal, "rate", None)
                 # ADR 086 d7: pitch rate across consecutive angle samples.
                 if _new_angle is not None:
                     if prev_angle is not None and prev_angle_ts is not None:

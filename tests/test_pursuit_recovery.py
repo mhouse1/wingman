@@ -18,6 +18,8 @@ import logging
 import threading
 import time
 
+import pytest
+
 import wingman.controller as controller_module
 from wingman.analyzer import GameState
 from wingman.controller import (
@@ -786,3 +788,62 @@ def test_a_shadow_agreement_leaves_the_hold_off_in_place(monkeypatch, caplog):
         ctrl.climb_mode(emergency=True)
     assert not ctrl.is_climbing()
     assert _held_off(caplog)
+
+
+# --- Code Review 019 cycle 36 ---------------------------------------------------
+# A live pull-out alarm predicting a lowest point under bypass_holdoff_below_m
+# breaks the objective hold-off, as two agreeing warnings do. Over 401 missions
+# the hold-off acted within 10 s before 55% of the kill-card crashes; alarms
+# under 300 m during it were followed by a crash 24% of the time.
+
+def _bypass_ctrl(monkeypatch, lowest, limit=300.0):
+    ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-25.0))
+    ctrl._pullout_bypass_below_m = limit
+    ctrl.set_pullout_lowest_m(lowest)
+    ctrl._pursuing.set()
+    return ctrl
+
+
+def test_a_severe_pull_out_alarm_starts_the_recovery_with_the_target_in_view(monkeypatch, caplog):
+    ctrl = _bypass_ctrl(monkeypatch, 200.0)
+    ctrl._note_pursuit_objective("target")
+    with caplog.at_level(logging.INFO, logger="wingman.controller"):
+        ctrl.climb_mode(emergency=True)
+    try:
+        assert ctrl.is_climbing()
+        assert not _held_off(caplog)
+        assert any("crash recovery starts with the target in view — a pull-out would bottom "
+                   "out at 200 m" in r.getMessage() for r in caplog.records)
+    finally:
+        _stop(ctrl)
+
+
+@pytest.mark.parametrize("lowest, limit", [(450.0, 300.0), (-500.0, None), (None, 300.0)])
+def test_a_milder_alarm_none_or_no_threshold_leaves_the_hold_off(monkeypatch, caplog, lowest, limit):
+    ctrl = _bypass_ctrl(monkeypatch, lowest, limit)
+    ctrl._note_pursuit_objective("target")
+    with caplog.at_level(logging.INFO, logger="wingman.controller"):
+        ctrl.climb_mode(emergency=True)
+    assert not ctrl.is_climbing()
+    assert _held_off(caplog)
+
+
+def test_a_severe_alarm_keeps_the_recovery_when_a_goal_comes_into_view(monkeypatch):
+    ctrl = _bypass_ctrl(monkeypatch, 150.0)
+    ctrl.climb_mode(emergency=True)
+    try:
+        assert _wait(ctrl.pursuit_recovery_active)
+        ctrl._note_pursuit_objective("control point")
+        time.sleep(0.8)
+        assert ctrl.is_climbing(), "handed back while the pull-out alarm stands"
+    finally:
+        _stop(ctrl)
+
+
+def test_the_threshold_comes_from_the_climb_config(monkeypatch):
+    monkeypatch.setattr(controller_module, "keyboard_module", None)
+    ctrl = Controller((0, 0, 1920, 1200), analyzer=_Analyzer(), exit_event=threading.Event(),
+                      capture=_Capture(),
+                      config=ControllerConfig(simulate_os_input=True, disable_hotkeys=True,
+                                              climb=dict(_CLIMB, pullout={"bypass_holdoff_below_m": 250})))
+    assert ctrl._pullout_bypass_below_m == 250

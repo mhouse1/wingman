@@ -536,6 +536,66 @@ def test_telemetry_log_padlock_unknown_without_a_wired_controller(analyzer, capl
     assert "PADLOCK: UNKNOWN | Altitude:" in matches[0]
 
 
+class _PendingExecutor:
+    """submit() hands back a Future the test resolves by hand."""
+
+    def __init__(self):
+        from concurrent.futures import Future
+        self.future = Future()
+
+    def submit(self, fn, *args):
+        return self.future
+
+
+def test_a_telemetry_reading_lands_when_its_ocr_finishes(analyzer):
+    """Code Review 019 cycle 38: the reading is in the filter the moment its OCR
+    finishes, not at the next background pass 1.5 s later — no harvest call."""
+    import time as _time
+    pool = _PendingExecutor()
+    t0 = _time.time()
+    analyzer._submit_telemetry(pool, object())
+    assert analyzer.telemetry_in_flight_since(t0)
+    assert not analyzer.telemetry_landed_since(t0)
+
+    pool.future.set_result((600, 12000, 0.41))
+
+    snap = analyzer.get_telemetry()
+    assert snap.speed.value == 600
+    assert snap.altitude.value == 12000
+    assert analyzer.telemetry_landed_since(t0)
+    assert not analyzer.telemetry_in_flight_since(t0)
+    assert analyzer.telemetry_event.is_set()
+    assert analyzer._telemetry_future is None
+
+
+@pytest.mark.parametrize("reset", ["reset_health_for_respawn", "on_enter_GAME_BATTLE"])
+def test_a_reset_drops_the_telemetry_reading_in_flight(analyzer, reset):
+    """A reading of a frame from before a respawn or a battle entry must not seed
+    the freshly reset filter, however soon its OCR finishes."""
+    import time as _time
+    pool = _PendingExecutor()
+    t0 = _time.time()
+    analyzer._submit_telemetry(pool, object())
+    getattr(analyzer, reset)()
+
+    pool.future.set_result((600, 12000, 0.41))
+
+    snap = analyzer.get_telemetry()
+    assert snap.speed.value is None
+    assert snap.altitude.value is None
+    assert not analyzer.telemetry_landed_since(t0)
+
+
+def test_a_cancelled_telemetry_pass_is_quiet_and_frees_the_slot(analyzer, caplog):
+    """cleanup() cancels the passes still queued; that is not an OCR failure."""
+    pool = _PendingExecutor()
+    analyzer._submit_telemetry(pool, object())
+    with caplog.at_level("ERROR"):
+        assert pool.future.cancel()
+    assert not [r for r in caplog.records if r.levelname == "ERROR"]
+    assert analyzer._telemetry_future is None
+
+
 def test_telemetry_split_row_confidence_is_minimum_of_digit_boxes():
     # One doubtful digit box taints the whole row (conservative min), while
     # the other row keeps its own confidence. The row value stays the leading

@@ -277,6 +277,7 @@ green run.
 make calibrate
 make calibrate-crop CROP=respawn
 make add-crops
+make screenshot                  # snipping tool: drag a region anywhere on screen; Enter captures, Backspace exits
 ```
 
 Calibration references come from the same gate-corpus screenshots the test

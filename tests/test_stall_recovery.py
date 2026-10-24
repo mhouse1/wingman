@@ -332,6 +332,14 @@ class TestSquadNoBattleGate:
         analyzer.on_enter_GAME_BATTLE()
         assert analyzer._squad_lobby_since == 0.0
 
+    def test_a_battle_clears_the_unready_dwell(self, analyzer):
+        """2026-10-23 15:45: the dwell from the 15:38 READY outlived the battle
+        it started and left the squad 12 s into the next lobby."""
+        analyzer._unready_since = time.time() - 420.0
+        analyzer.on_enter_GAME_BATTLE()
+        assert analyzer._unready_since == 0.0
+        assert analyzer._stall_recovery_targets(GameState.GAME_WAITING) == []
+
     def test_leave_is_pending_only_past_the_limit(self, analyzer):
         assert analyzer.squad_leave_pending() is False
         analyzer._squad_lobby_since = time.time()
