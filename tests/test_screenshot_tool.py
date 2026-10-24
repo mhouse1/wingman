@@ -84,3 +84,17 @@ def test_region_off_the_streamed_monitor_is_rejected():
     region = {"left": 100, "top": 0, "width": 100, "height": 50}
     with pytest.raises(ValueError):
         screenshot._region_in_stream(region, (1920, 0), (1.0, 1.0), (1920, 1080))
+
+
+def test_stream_frame_placed_on_desktop_at_its_monitor():
+    # Stream shows the right-hand monitor of a desktop that starts at x=-1920.
+    frame = np.full((1080, 1920, 3), 200, dtype=np.uint8)
+    desktop = screenshot._place_on_desktop(frame, (0, 0), (1.0, 1.0), _DUAL)
+    assert desktop.shape == (1080, 3840, 3)
+    assert desktop[:, :1920].max() == 0 and desktop[:, 1920:].min() == 200
+
+
+def test_scaled_stream_frame_brought_back_to_desktop_pixels():
+    frame = np.full((2160, 3840, 3), 200, dtype=np.uint8)  # 2x the 1920x1080 desktop
+    desktop = screenshot._place_on_desktop(frame, (0, 0), (2.0, 2.0), _SCREEN)
+    assert desktop.shape == (1080, 1920, 3) and desktop.min() == 200

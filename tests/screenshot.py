@@ -1,7 +1,7 @@
 """Snipping-tool style region screenshot for Wingman (`make screenshot`).
 
-The whole desktop (every monitor) dims; drag a rectangle anywhere on it. The
-dimming then goes away and a thin outline marks the region while you keep using
+A dimmed picture of the whole desktop (every monitor) covers the screen; drag a
+rectangle anywhere on it. The picture then goes away and a thin outline marks the region while you keep using
 the computer normally — the outline sits just outside the region, so it never
 blocks a click inside it or appears in the capture.
 
@@ -48,7 +48,8 @@ _MIN_SIZE_PX = 4          # a click without a drag is not a selection
 _BORDER_PX = 2            # outline thickness, drawn outside the region
 _DEBOUNCE_S = 0.4         # key-repeat while Enter is held must not burst captures
 _POLL_MS = 50             # how often the Tk loop drains the hotkey queue
-_OVERLAY_ALPHA = 0.3
+_OVERLAY_DIM = 0.6        # brightness of the frozen desktop under the selection overlay
+_OVERLAY_ALPHA = 0.3      # see-through black overlay, only when no desktop picture was taken
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +111,27 @@ def _region_in_stream(region: dict, origin: "tuple[int, int]",
     return x, y, w, h
 
 
+def _place_on_desktop(frame: np.ndarray, origin: "tuple[int, int]",
+                      scale: "tuple[float, float]", screen: dict) -> np.ndarray:
+    """Paste one monitor's stream frame into a black picture of the whole desktop.
+
+    The inverse of _region_in_stream: the frame is brought back to desktop pixels
+    and placed at `origin`; whatever falls off the desktop is dropped.
+    """
+    sw, sh = screen["width"], screen["height"]
+    desktop = np.zeros((sh, sw, 3), dtype=np.uint8)
+    fh, fw = frame.shape[:2]
+    w, h = round(fw / scale[0]), round(fh / scale[1])
+    if (w, h) != (fw, fh):
+        frame = cv2.resize(frame, (w, h), interpolation=cv2.INTER_AREA)
+    x, y = origin[0] - screen["left"], origin[1] - screen["top"]
+    x1, y1 = max(0, x), max(0, y)
+    x2, y2 = min(sw, x + w), min(sh, y + h)
+    if x2 > x1 and y2 > y1:
+        desktop[y1:y2, x1:x2] = frame[y1 - y:y2 - y, x1 - x:x2 - x]
+    return desktop
+
+
 # ---------------------------------------------------------------------------
 # Capture and save
 # ---------------------------------------------------------------------------
@@ -122,6 +144,9 @@ class _MssGrabber:
 
     def grab(self, region: dict):
         return self._sct.grab(region)
+
+    def desktop(self, screen: dict) -> np.ndarray:
+        return np.asarray(self._sct.grab(screen))[:, :, :3]
 
     def close(self) -> None:
         pass
@@ -187,6 +212,12 @@ class _PortalGrabber:
         fh, fw = self._frame.shape[:2]
         x, y, w, h = _region_in_stream(region, self._origin, self._scale, (fw, fh))
         return self._frame[y:y + h, x:x + w]
+
+    def desktop(self, screen: dict) -> np.ndarray:
+        newest = self._pull(0)
+        if newest is not None:
+            self._frame = newest
+        return _place_on_desktop(self._frame, self._origin, self._scale, screen)
 
     def close(self) -> None:
         self._pipeline.set_state(self._Gst.State.NULL)
@@ -270,17 +301,43 @@ class _Snipper:
 
     # --- selection overlay ---
 
+    def _desktop_photo(self) -> "tk.PhotoImage | None":
+        """A dimmed picture of the desktop for the overlay, or None if it cannot be taken.
+
+        Taken before the overlay exists, so the overlay is not in it. Window
+        transparency is not used: Xwayland under GNOME ignores it on an
+        override-redirect window and shows plain black.
+        """
+        s = self._screen
+        try:
+            img = self._grabber.desktop(s)
+        except Exception as exc:
+            print(f"[WARN] could not picture the desktop for the overlay ({exc}).")
+            return None
+        if img.shape[:2] != (s["height"], s["width"]):
+            img = cv2.resize(img, (s["width"], s["height"]), interpolation=cv2.INTER_AREA)
+        img = cv2.convertScaleAbs(img, alpha=_OVERLAY_DIM)
+        ok, ppm = cv2.imencode(".ppm", img)
+        return tk.PhotoImage(master=self._root, data=ppm.tobytes()) if ok else None
+
     def _build_overlay(self) -> None:
         s = self._screen
+        self._photo = self._desktop_photo()  # held here: Tk drops an unreferenced image
         ov = tk.Toplevel(self._root)
         ov.overrideredirect(True)
         ov.geometry(_geometry(s["left"], s["top"], s["width"], s["height"]))
         ov.attributes("-topmost", True)
-        ov.attributes("-alpha", _OVERLAY_ALPHA)
         canvas = tk.Canvas(ov, bg="black", highlightthickness=0, cursor="crosshair")
         canvas.pack(fill=tk.BOTH, expand=True)
-        canvas.create_text(s["width"] // 2, 40, fill="white", font=("Segoe UI", 16),
-                           text="Drag to select a region  -  Esc or Backspace to exit")
+        if self._photo is not None:
+            canvas.create_image(0, 0, image=self._photo, anchor=tk.NW)
+        else:
+            ov.attributes("-alpha", _OVERLAY_ALPHA)
+        hint = canvas.create_text(s["width"] // 2, 40, fill="white", font=("Segoe UI", 16),
+                                  text="Drag to select a region  -  Esc or Backspace to exit")
+        x1, y1, x2, y2 = canvas.bbox(hint)
+        canvas.tag_lower(canvas.create_rectangle(x1 - 10, y1 - 6, x2 + 10, y2 + 6,
+                                                 fill="black", outline=""), hint)
         canvas.bind("<ButtonPress-1>", self._on_press)
         canvas.bind("<B1-Motion>", self._on_drag)
         canvas.bind("<ButtonRelease-1>", self._on_release)
@@ -308,6 +365,7 @@ class _Snipper:
             return  # a click, not a drag — stay in the overlay
         self._region = region
         self._overlay.destroy()
+        self._photo = None
         self._show_borders()
         print(f"Region {region['width']}x{region['height']} at ({region['left']},{region['top']}). "
               "Enter captures it, Backspace exits.")

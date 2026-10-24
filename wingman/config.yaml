@@ -1112,6 +1112,15 @@ approach_brake:
   crown: true
   cap_kph: 850
   target_kph: 800
+  # 2026-10-24 (operator: the resupply missed twice, pulling out too early): over
+  # 25 logs (660 matches) the pull-out trigger broke the resupply hold-off in 143
+  # dives, at a median 938 m, -38 deg and 1,003 KPH, the reading before at 834
+  # (over 850 in 46%, over 700 in 82%); after the 138 scored, 24% rearmed and 13%
+  # crashed. From 938 m at -38 deg a pull-out bottoms out at -79 m from 1,000 KPH,
+  # 238 m from 850 and 403 m from 700, above the 300 m that breaks the hold-off.
+  # The nose comes up 21 deg/s under 600 KPH and 5 to 7 around 1,000.
+  resupply_cap_kph: 700
+  resupply_target_kph: 650
   decel_kph_s: 150
   max_dose_s: 3.0
   # Code Review 019 cycle 27 (envelope protection, part 1): the same dose in a

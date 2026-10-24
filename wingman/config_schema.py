@@ -707,6 +707,10 @@ SCHEMA = Section(
             "cap_kph": Leaf(types=NUMBER, minimum=300, maximum=3000, default=850.0),
             # The speed a dose aims at.
             "target_kph": Leaf(types=NUMBER, minimum=300, maximum=3000, default=800.0),
+            # The cap and target on the resupply approach only; the defaults are
+            # the ones above.
+            "resupply_cap_kph": Leaf(types=NUMBER, minimum=300, maximum=3000, default=850.0),
+            "resupply_target_kph": Leaf(types=NUMBER, minimum=300, maximum=3000, default=800.0),
             # The airbrake's deceleration the dose is worked out with.
             "decel_kph_s": Leaf(types=NUMBER, minimum=10, maximum=1000, default=150.0),
             # The longest dose one reading can start.

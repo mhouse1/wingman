@@ -649,8 +649,9 @@ class Controller:
         self._approach_brake_cfg = {
             key: _brake.get(key, schema_default(f"approach_brake.{key}"))
             for key in ("enabled", "resupply", "control_point", "crown", "cap_kph",
-                        "target_kph", "decel_kph_s", "max_dose_s", "dive",
-                        "dive_path_deg", "dive_below_m")}
+                        "target_kph", "resupply_cap_kph", "resupply_target_kph",
+                        "decel_kph_s", "max_dose_s", "dive", "dive_path_deg",
+                        "dive_below_m")}
         # Code Review 019 cycle 27: the last dive the brake was armed for, for its log.
         self._dive_brake_state: "tuple[float, float] | None" = None
         # Cycle 27b: True while the dose in hand was started for a dive, and why
@@ -2517,12 +2518,13 @@ class Controller:
         if veto is not None:
             self._approach_brake_off(veto)
             return
+        cap, target = self._approach_brake_limits(goal)
         reading, read_ts = self._speed_reading()
         if reading is not None and read_ts != self._approach_brake_read_ts:
             self._approach_brake_read_ts = read_ts
-            if reading > float(cfg["cap_kph"]):
+            if reading > cap:
                 dose = min(float(cfg["max_dose_s"]),
-                           (reading - float(cfg["target_kph"])) / float(cfg["decel_kph_s"]))
+                           (reading - target) / float(cfg["decel_kph_s"]))
                 self._approach_brake_until = now + dose
                 self._dive_dose_running = goal == "dive"
                 if goal == "dive" and self._dive_brake_state is not None:
@@ -2530,13 +2532,25 @@ class Controller:
                 else:
                     where = "on the %s approach" % goal
                 logger.info("SPEEDCAP: %.0f KPH over the %.0f KPH cap %s: airbrake "
-                            "for %.1f s", reading, float(cfg["cap_kph"]), where, dose)
+                            "for %.1f s", reading, cap, where, dose)
                 self._approach_brake_on()
-            elif self._approach_brake_held and reading <= float(cfg["target_kph"]):
+            elif self._approach_brake_held and reading <= target:
                 self._approach_brake_off("%.0f KPH reached" % reading)
                 return
         if self._approach_brake_held and now >= self._approach_brake_until:
             self._approach_brake_off("dose given")
+
+    def _approach_brake_limits(self, goal: "str | None") -> "tuple[float, float]":
+        """The cap and target for this goal. The resupply approach has its own
+        (2026-10-24): over 25 logs the pull-out trigger broke the resupply
+        hold-off in 143 dives, at a median 1,003 KPH, the reading before at 834
+        (over 850 in 46%, over 700 in 82%). At 938 m and -38 deg a pull-out
+        bottoms out at -79 m from 1,000 KPH and 403 m from 700."""
+        cfg = self._approach_brake_cfg
+        if goal == "resupply":
+            return (float(cfg.get("resupply_cap_kph", cfg["cap_kph"])),
+                    float(cfg.get("resupply_target_kph", cfg["target_kph"])))
+        return float(cfg["cap_kph"]), float(cfg["target_kph"])
 
     def _approach_brake_veto(self, now: float) -> "str | None":
         """Why the approach brake may not hold now, or None: a takeover, a climb
