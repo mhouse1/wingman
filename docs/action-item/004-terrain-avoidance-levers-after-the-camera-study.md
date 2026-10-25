@@ -100,7 +100,24 @@ period after a recovery in which the chase does not command a steep dive.
 
 **Success.** Fewer crashes within 15 s of a hand-back, objectives a mission unchanged.
 
-**Status.** Open. Not yet measured at scale.
+**Status.** Closed 2026-10-25: measured at scale, too small to build.
+
+**Result (2026-10-25, operator `/proceed`; `test_screenshots/terrain_dataset/tools/redive.py`).** Over the
+logs of 2026-10-19 to 10-24 (933 missions, 732 crashes, 54.4 h of battle flight; the 02:00 run of 10-24 with
+the stuck nose-up left out), 2,632 `crash_cleared` hand-backs, 2.82 a mission. In the 15 s after one:
+
+| What followed | Hand-backs | Dived steeper than -30 deg | A new emergency climb |
+|---|---|---|---|
+| Nothing | 1,729 (65.7%) | 506 | 539 |
+| Shot down | 509 (19.3%) | 25 | 70 |
+| An objective or a rearm | 202 (7.7%) | 71 | 91 |
+| A crash | 192 (7.3%) | 58 | 97 |
+
+A crash follows 7.3% of hand-backs against 5.6% of any 15 s of battle flight: about 45 crashes more than the
+baseline, 0.05 a mission, and a hand-back comes right after a near-crash, so some excess is expected anyway.
+The mechanism the 4-hour run showed, a new steep dive and then the ground, is 58 crashes, 0.06 a mission and
+8% of all crashes. A guard against steep dives after a hand-back would act on the 660 such dives, 71 of which
+reached an objective.
 
 ### AI-004-3 — A continuous nose-up in a hard emergency
 
@@ -115,9 +132,20 @@ part 2 already asks for the rates to be re-measured "once part 2 holds the key c
 **Success.** A higher measured nose-up rate in dives and fewer crashes after a climb that started 2 s or more
 ahead.
 
-**Status.** Open. AI-004-1's re-measure is done: in a dive the current aircraft's nose comes up 12 to 21 deg/s
-at every speed band (pulsed), so the gaps between pulses, not the aircraft, may be what limits a late
-recovery (inferred); measure the climbs' pulse gaps against their outcome before building.
+**Status.** Closed 2026-10-25: the pulses are not what loses these recoveries; nothing to build.
+
+**Result (2026-10-25, operator `/iterate`; `test_screenshots/terrain_dataset/tools/pulse_gaps.py`).** 707
+emergency climbs in the five logs after D6 (02:25 to 21:20 on 10-24). The first pulse comes 0.25 s after the
+emergency in every climb. Counting only the pulses before the impact (or the first 8 s), in climbs that lasted
+2.5 s or more: those that crashed held nose-up 81% of the time and had a gap over 0.5 s in 14%; those that
+survived 84% and 19%. No difference.
+
+A trap on the way: counted over the whole climb, the crashed ones had a gap over 0.5 s in 74% (survived 21%)
+and an `emergency CLEARED mid-hold` in 84% (39%), which looked like the climb falling back to its slow pace
+too early. Timed against the impact, 43 of the 48 clearings came after it, a median 5.5 s after: the
+emergency clears because the aircraft is already dead and the respawn not yet read, and the long gaps are the
+climb pulsing blind after the impact. What the crashed climbs show instead is a late start: of those 48, 18
+crashed 0.7 s after the climb began and 15 after 2.1 to 2.3 s.
 
 ### AI-004-4 — Keep the speed down for the whole dive, not per reading
 
