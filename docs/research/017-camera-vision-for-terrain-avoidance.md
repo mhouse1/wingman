@@ -259,6 +259,86 @@ the `DEATH CARD:` line a few seconds later labels them crash or shoot-down; a
 shoot-down's frames are the comparison set. Crashes are about one death in
 five, so a few hundred crashes take a few long sessions.
 
+### Step 3 results (2026-10-24, wingman 1.9.3): the depth model adds to the telemetry
+
+Operator, 2026-10-24: "update hldd1 then proceed with steps 1 and 2" (HLDD 001, "Where it stands
+(2026-10-24)"). Everything below is measured offline on the black box's raw frames; nothing flew.
+
+**The data.** The black box's raw store held 506 deaths' frames (2026-10-23 20:32 to 2026-10-24 15:00, 20,000
+files). Its budget was full and the running session deleted the oldest set at each death, so the files were
+hard-linked into `test_screenshots/terrain_dataset/raw` (git-ignored, outside every capture budget). Each set
+was labelled from its log: 88 crashes (`DEATH CARD: no kill card`), 417 shoot-downs, 1 unread. The impact is
+timed half a reading interval (0.75 s, assumed) after the last HUD reading: the respawn screen is read 6.5 to
+7 s after the impact, so each set's last frames are already past it. The scripts and their outputs are beside
+the frames (`tools/label_sets.py`, `measure_texture.py`, `measure_depth.py`, `score.py`, `combine.py`).
+
+**The test.** A warning counts when it is up 2 to 6 s before the impact. Crashes give the hit rate;
+shoot-downs, combat flight from the same sessions that did not end in the ground, give the false-alarm rate.
+The live pull-out trigger (its logged alarms) is scored on the same windows: it caught 26.4% of the 87 crashes
+at 5.3% false alarms. Both measures look at a corridor around the flight path: x 330 to 630, y 110 to 300 of
+the 960 x 600 frame, between the HUD's ladders and above the jet's tail fins.
+
+- **Measure 1, terrain share by texture** (the share of the corridor whose 15 x 15 mean Sobel gradient
+  exceeds 8; 12,901 frames in 27 s). Area under the curve 0.70. At 5.3% false alarms it catches 27.6% (the
+  corridor 99.9% textured), on a par with the pull-out. Its growth over 1 s does not separate (0.46 to 0.59).
+- **Measure 2, proximity from the depth model** (Depth Anything V2 Small on the whole frame at 252 px, as
+  `depth_view` loads it; 8,853 frames in 35 min at 2 threads and nice 19, 272 ms a frame). Each pixel's
+  proximity is its output between the sky (the frame's 1st percentile) and the jet's own body (the 95th
+  percentile of x 400 to 560, y 400 to 560): about the camera's distance to the jet over its distance to the
+  terrain (inferred; it assumes the output is affine in inverse depth). The corridor's median: area under the
+  curve 0.79, its growth 0.75, the share over 0.3 0.80; at 5.3% false alarms it catches 24.1%. It fails when
+  no sky is in the frame: on the 2026-10-24 05:21:21 mesa crash it read 0.57 to 0.77 from 4.1 s out, then 0.09
+  at 1.0 s with rock filling the picture.
+
+No single picture measure beats the pull-out trigger at its false-alarm rate. Combined with the telemetry they
+do. An L2-regularised logistic regression, scored out of fold (5 stratified folds, 20 shuffles), on the
+highest value of each feature in the window; telemetry is the live pull-out alarm and, from the logged
+readings, the lowest predicted pull-out point, the steepest path, the top speed and the lowest altitude:
+
+| Features | Area under the curve | Caught at 5.3% false alarms | At 10.6% |
+|---|---|---|---|
+| Live pull-out alarm alone | — | 26.4% | — |
+| Telemetry | 0.810 | 34.8% (28.7 to 39.1% over the shuffles) | 47.2% |
+| Pictures (both measures) | 0.792 | 31.1% | 47.1% |
+| Telemetry and texture | 0.818 | 33.2% | 45.9% |
+| Telemetry and depth | 0.855 | 42.4% (39.1 to 47.1%) | 63.4% |
+| Telemetry and both | 0.853 | 41.8% | 62.6% |
+
+All of the pictures' gain comes from the depth model: about 8 points more crashes caught at 5.3% false alarms
+and 16 at 10.6%, against one standard error of about 5 points on 87 crashes. The texture share adds nothing
+once the telemetry is in. The depth model was switched off live on 2026-10-16 because its `mid_rank` was no
+higher before deaths than in random windows; the proximity here is a different figure, scored on crashes
+against shoot-downs.
+
+**Limits.** These are death windows only: a shoot-down's last seconds are not ordinary flight, so the false-
+alarm rate over whole battles is not known, and neither is the precision. The live pull-out flew during these
+sessions, and its climbs changed what followed. The crashes are mostly from one day (73 of 87 on
+2026-10-24). The telemetry model already beats the hand-written pull-out rule on these windows (34.8% against
+26.4%); read on its own, that says more about the windows than about the rule.
+
+### Ordinary flight (2026-10-25): the gain does not carry over
+
+The operator's `make r1 v` session of 2026-10-24 18:18 to 21:20 (account 1, 32 missions, 13 crashes, 93
+shoot-downs; `logs/session_20261024_181820_acct1.mp4`, 21,897 frames at 2 a second, every frame timed in its
+`frames.csv`, no gap over 0.67 s). The depth model ran on every second frame offline (10,949 frames, 4 threads,
+95 ms a frame, `tools/measure_video.py`). The telemetry-and-depth score was fitted on the 503 death windows,
+its thresholds set there, and applied to every battle second of the session with the same 4 s features
+(`tools/score_video.py`; 6,117 seconds in battle flight, outside respawns).
+
+| Warning, alarm episodes 5 s apart | A mission | Followed by a crash in 2 to 10 s | Crashes warned 2 to 10 s ahead |
+|---|---|---|---|
+| Live pull-out alarms | 2.44 | 6.4% | 5 of 13 |
+| Telemetry and depth, threshold at 5.3% | 2.59 | 3.6% | 3 of 13 |
+| Telemetry and depth, threshold at 10.6% | 4.09 | 3.1% | 4 of 13 |
+
+Ranked over the battle seconds (104 of them 2 to 10 s before a crash): the score 0.708, the telemetry's lowest
+predicted pull-out point alone 0.709, the depth proximity 0.668, its growth 0.666, its share over 0.3 0.680.
+The depth model sees something, but in ordinary flight nothing the telemetry does not already carry; its gain
+on the death windows came from how shoot-down windows differ from crash windows, not from flight in general.
+13 crashes is a small sample (the precision figures move by several points with one crash); the ranking over
+6,117 seconds is the firmer of the two results. **The camera path, as measured here, does not beat the
+telemetry: the depth model does not go to shadow, and the GPU runtime is not needed for it.**
+
 ## Open Questions
 
 - Does the game render more slowly when a model shares its chip? (The
@@ -273,6 +353,19 @@ five, so a few hundred crashes take a few long sessions.
   Unpacking the game's files is the operator's decision.
 
 ## Next Steps
+
+Since step 3 (2026-10-24), in order (2026-10-25: step 1 done, "Ordinary flight" above; the combination
+failed it, so step 2 is not needed):
+
+1. **The false-alarm rate in ordinary flight.** Score the telemetry-and-depth combination on whole battles,
+   not death windows: a `make r1 v` session's video, lined up with its log through
+   `logs/session_<id>.frames.csv`, run offline as above. It is the number that decides whether the
+   combination is worth flying in shadow. Nothing needs the GPU for this.
+2. **The cost live.** The depth model costs 95 to 272 ms a picture on the CPU (step 1), and in its 2026-10-16
+   shadow it cost the steering cycle about 6%. The Intel GPU runtime below becomes the way to run it, if step 1
+   of this list holds up.
+
+Before step 3, unchanged:
 
 1. The operator runs
    `sudo apt install intel-opencl-icd libze-intel-gpu1 libze1 clinfo`;
