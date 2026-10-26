@@ -1623,45 +1623,6 @@ class GameStateAnalyzer:
             except Exception:
                 logger.exception("Event %s: subscriber %r failed", event.name, name)
 
-    # -- ADR 039 compatibility shims --------------------------------------
-    # Preserve single-slot replace semantics under a fixed subscriber name, so
-    # existing callers (and tests that re-register) behave exactly as before.
-
-    def set_on_cancel_mission(self, callback):
-        """Set callback invoked after transitions that must cancel mission logic."""
-        self.subscribe(GameEvent.CANCEL_MISSION, callback, name="legacy", replace=True)
-
-    def set_on_start_game_starting_loop(self, callback):
-        """Set callback invoked when entering GAME_STARTING."""
-        self.subscribe(GameEvent.START_GAME_STARTING_LOOP, callback, name="legacy", replace=True)
-
-    def set_on_lobby_play_click(self, callback):
-        """Set callback invoked with PLAY/READY crop names from lobby quick-scan."""
-        self.subscribe(GameEvent.LOBBY_PLAY_CLICK, callback, name="legacy", replace=True)
-
-    def set_on_lobby_popup_click(self, callback):
-        """Set callback invoked with popup crop names from lobby quick-scan."""
-        self.subscribe(GameEvent.LOBBY_POPUP_CLICK, callback, name="legacy", replace=True)
-
-    def set_on_lobby_stall(self, callback):
-        """Set callback invoked when no lobby crops detected for 10s (stall recovery)."""
-        self.subscribe(GameEvent.LOBBY_STALL, callback, name="legacy", replace=True)
-
-    def set_on_fsm_transition(self, callback):
-        """Set callback invoked after successful FSM transitions.
-
-        Callback signature: (trigger_name, prev_state_name, next_state_name, timestamp_s).
-        """
-        self.subscribe(GameEvent.FSM_TRANSITION, callback, name="legacy", replace=True)
-
-    def set_on_respawn_detected(self, callback):
-        """Set callback invoked when RESPAWN OCR succeeds.
-
-        Callback signature: (frame: np.ndarray) where frame is the full BGR frame
-        used for the OCR scan.  Called from the background OCR thread.
-        """
-        self.subscribe(GameEvent.RESPAWN_DETECTED, callback, name="legacy", replace=True)
-
     def set_controller(self, controller) -> None:
         """ADR 140: wire a Controller reference in, late-bound from main.py
         after both objects exist — mirrors Controller.set_target_tracker's

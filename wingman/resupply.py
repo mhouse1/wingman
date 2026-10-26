@@ -409,6 +409,13 @@ class MissileUrgency:
         self._read_id: "int | None" = None
         self._ammo_by_rack: dict[object, int] = {}
         self._last_positive: dict[object, int] = {}
+        # The positive count read from each rack before its latest different
+        # one. A rearm must rise above it: a stale confirmed 0 compared with a
+        # falling count is the rack being fired, not refilled (2026-10-25
+        # 18:17:58: 28, 25, ... 9, 5 read as a rearm after a switch-away 0).
+        # A confirmed zero forgets it, so a misread that jumped up and back to
+        # an empty rack's 0 cannot hold off the rearm that follows.
+        self._positive_before: dict[object, int] = {}
         self._missiles_spent = 0
         self._empty = False
 
@@ -439,7 +446,11 @@ class MissileUrgency:
 
         ammo = int(ammo)
         if ammo > 0:
+            if rack in self._last_positive and self._last_positive[rack] != ammo:
+                self._positive_before[rack] = self._last_positive[rack]
             self._last_positive[rack] = ammo
+        before = self._positive_before.get(rack)
+        rises = before is None or ammo > before
         new_read = read_id is None or read_id != self._read_id
         self._read_id = read_id
         if ammo != self._candidate:
@@ -449,22 +460,26 @@ class MissileUrgency:
             self._candidate_reads += 1
         previous = self._ammo_by_rack.get(rack)
         # The same test the confirmed rearm makes below, on this one read.
-        rearm_seen = (0 < ammo <= REARM_SIGN_MAX_COUNT
+        rearm_seen = (0 < ammo <= REARM_SIGN_MAX_COUNT and rises
                       and (self._empty or (resupply_seeking and previous is not None
                                            and ammo > previous)))
         if self._candidate_reads < self._confirm_reads:
             return self.snapshot(rearm_seen=rearm_seen)
 
-        if ammo == 0 and terminal_zero:
-            self._empty = True
+        if ammo == 0:
+            self._last_positive.pop(rack, None)
+            self._positive_before.pop(rack, None)
+            if terminal_zero:
+                self._empty = True
 
-        if ammo > 0 and (self._empty or (resupply_seeking and previous is not None
-                                         and ammo > previous)):
+        if ammo > 0 and rises and (self._empty or (resupply_seeking and previous is not None
+                                                   and ammo > previous)):
             self._missiles_spent = 0
             self._empty = False
             self._ammo_by_rack.clear()
             self._ammo_by_rack[rack] = ammo
             self._last_positive = {rack: ammo}
+            self._positive_before = {}
             rearmed = True
         elif previous is None:
             self._ammo_by_rack[rack] = ammo
@@ -489,6 +504,7 @@ class MissileUrgency:
         self._missiles_spent += max(0, remaining)
         self._ammo_by_rack[rack] = 0
         self._last_positive.pop(rack, None)
+        self._positive_before.pop(rack, None)
         return self.snapshot()
 
     def snapshot(self, *, rearmed: bool = False, rearm_seen: bool = False) -> MissilePriority:

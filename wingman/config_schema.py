@@ -1059,6 +1059,7 @@ SCHEMA = Section(
             # copied, not swapped, and it keeps drawing while its window on the
             # desktop is not shown. Off until a covered-window flight confirms it.
             "block_page_flips": Leaf(types=(bool,), default=False),
+            "restore_size": Leaf(types=(bool,), default=True),   # ADR 162
         }),
 
         # ADR 098: focus guard for key injection

@@ -31,6 +31,11 @@ nested:
   # frames on Xwayland's fast path whatever the desktop does. Off until a
   # flight with the window covered for more than five minutes confirms it.
   block_page_flips: false
+  # ADR 162: resizing the nested window on the desktop resizes the nested
+  # screen with it (Xwayland 24.1.10, -decorate). Smaller than `size`, every
+  # grab fails: 2026-10-25 16:21, 3 pixels lost, ten minutes blind (Anomaly
+  # 015). true sets the screen back to `size` within a second of it shrinking.
+  restore_size: true
 
 # Design 011 (ACS Mode), step 1: which weapon-employment tactic the active
 # airframe supports. Read once at startup into AnalyzerSnapshot.has_padlock.
@@ -111,16 +116,19 @@ crops:
     - [0.85, 0.8933]
     - [0.9306, 0.9411]
     text: [PLAY]
-  # ADR 102 rev 2: the squad lobby's READY button, measured on the 2026-09-25
-  # 09:16:41 screenshot at 1606,1060 to 1863,1138 px (this crop is that box
-  # inset 3 px). The April crop covered only its upper-left corner, so READY was
-  # never read and three lobby dwells of 127 to 194 s ran before the operator
-  # clicked by hand. Not in tests/calibration_map.yaml (no capture path visits
-  # the squad lobby), so `make calibrate` will not move it.
+  # ADR 102 rev 2: the squad lobby's READY button. The April crop covered only
+  # its upper-left corner, so READY was never read and three lobby dwells of 127
+  # to 194 s ran before the operator clicked by hand. The October layout moved
+  # the word left of a rank badge: on the 2026-10-18 01:11:42 frame the white
+  # button is 1592,1062 to 1829,1140 px and the letters 1630,1079 to 1794,1121.
+  # This crop clears them by 4 px or more; the 2026-10-11 crop ended 1 px into
+  # the Y. The same crop reads the WAITING / CLICK TO UNREADY state. Not in
+  # tests/calibration_map.yaml (no capture path visits the squad lobby), so
+  # `make calibrate` will not move it.
   READY:
     coords:
     - [0.8451, 0.8911]
-    - [0.934, 0.9433]
+    - [0.9365, 0.9433]
     text: [READY]
   CANCEL:
     coords:

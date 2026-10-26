@@ -6,9 +6,9 @@ pre-fix sessions, PASSES on the real post-fix ones, and — the part that is eas
 to get wrong — refuses to conclude rather than passing when the data cannot
 support a verdict.
 
-Corpus assertions run against archived logs. Those are gitignored and
-machine-local, so they SKIP when absent; the synthetic fixtures carry the
-deterministic cases.
+The synthetic fixtures carry every case. The corpus assertions against the
+archived August sessions were removed once log rotation deleted those logs
+(see the CLI contract section).
 """
 
 import importlib.util
@@ -24,7 +24,6 @@ _SPEC.loader.exec_module(leak_check)
 
 PASS, FAIL, INSUFFICIENT = leak_check.PASS, leak_check.FAIL, leak_check.INSUFFICIENT
 CFG = dict(leak_check._DEFAULTS)
-LOGS = Path("logs")
 
 
 def _write(tmp_path, name, samples, fields=("rss_mb", "mi_use_mb", "game_rss_mb")):
@@ -146,45 +145,16 @@ def test_no_logs_reports_insufficient_not_pass(tmp_path):
     assert leak_check.main(["--log-dir", str(tmp_path)]) == INSUFFICIENT
 
 
-# --- corpus assertions ------------------------------------------------------
-
-def _corpus(name):
-    p = LOGS / name
-    if not p.exists():
-        pytest.skip(f"{p} not present (logs are gitignored and machine-local)")
-    return p
-
-
-@pytest.mark.parametrize("name,expected", [
-    ("wingman_20260823_002829.log", FAIL),          # pre-fix, 6.77h, +1491 MB/h
-    ("wingman_20260823_065033.log", FAIL),          # pre-fix, 2.26h, +974
-    ("wingman_20260823_230230.log", PASS),          # post-ADR091, 3.01h, +2
-    ("wingman_20260824_091431.log", PASS),          # post-ADR091, 4.34h, -0
-])
-def test_corpus_verdicts(name, expected):
-    """The gate must call the real sessions correctly, not just synthetic ones."""
-    m = leak_check.measure(_corpus(name), CFG)
-    assert m["qualifies"], m["reason"]
-    assert m["verdict"] == expected, f"{name}: {m['rate']:+.0f} MB/h"
-
-
-def test_corpus_short_session_is_insufficient():
-    m = leak_check.measure(_corpus("wingman_20260821_083045.log"), CFG)
-    assert not m["qualifies"]
-
-
-def test_corpus_livelock_session_is_refused():
-    """Anomaly 001 — half idle, so its flat rate proves nothing."""
-    m = leak_check.measure(_corpus("wingman_20260824_033917.log"), CFG)
-    assert not m["qualifies"] and "inert" in m["reason"]
-
-
 # --- the CLI contract -------------------------------------------------------
+#
+# The corpus assertions that called the real August sessions (pre-fix FAIL,
+# post-ADR091 PASS, short, livelock) were removed on 2026-10-25: those logs
+# rotated out of logs/ (capture_budget.rotated_logs) and the tests had skipped
+# everywhere since. The synthetic cases above carry each verdict.
 
 def test_cli_exit_codes(tmp_path):
     """make tp and make wrelease branch on these."""
-    src = _corpus("wingman_20260823_002829.log")
-    (tmp_path / "wingman_leak.log").write_bytes(src.read_bytes())
+    _write(tmp_path, "wingman_leak.log", _ramp(3, 1440, 950))
     r = subprocess.run([sys.executable, "scripts/leak-check.py", "--log-dir", str(tmp_path)],
                        capture_output=True, text=True)
     assert r.returncode == FAIL, r.stdout

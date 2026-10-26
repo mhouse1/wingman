@@ -264,7 +264,7 @@ exists to run (an unattended run is the normal case, not a special one).
 2. **Launch**, backgrounded (`run_in_background: true`), never in the foreground:
 
    ```bash
-   make r1                       # account 1 (r2: account 2). Kills and relaunches the game,
+   make r1                       # account 1 (r2, r3: accounts 2, 3). Kills and relaunches the game,
                                  # then wingman with DEBUG to wingman.log
    make r1 v                     # the same plus --record-session: session video and BT
                                  # trace, and the only mode that arms the eject-stuck check

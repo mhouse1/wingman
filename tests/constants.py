@@ -3,6 +3,10 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 TEST_SCREENSHOTS_DIR = PROJECT_ROOT / "test_screenshots"
+# Real minimap frames the boundary tests score against. Its own folder, which
+# no capture writes to: in unknown_anomalies they went out with a cleanup on
+# 2026-09-20/21 and 26 tests skipped for a month (restored 2026-10-25).
+MINIMAP_CORPUS_DIR = TEST_SCREENSHOTS_DIR / "corpus" / "minimap"
 CONFIG_PATH = PROJECT_ROOT / "wingman" / "config.yaml"
 # The gate corpus (integration_test/, refreshed unattended by make p1) is the
 # single screenshot set (ADR 072). Standalone respawn/continue variants were

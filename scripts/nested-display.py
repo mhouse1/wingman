@@ -141,6 +141,54 @@ def should_fullscreen(size: str, host: "tuple[int, int] | None") -> bool:
 DISPLAY_PROBE_TIMEOUT_S = 5.0
 
 
+def _x_socket_owner_pids(display: str, proc: str = "/proc") -> "list[int]":
+    """PIDs holding the listening X socket for `display`, abstract or on disk.
+
+    Names whatever answers on the display, Xwayland or not, so a refusal can say
+    which process to stop. Never raises; an unreadable /proc gives [].
+    """
+    num = display.lstrip(":")
+    paths = {f"/tmp/.X11-unix/X{num}", f"@/tmp/.X11-unix/X{num}"}
+    inodes = set()
+    try:
+        with open(f"{proc}/net/unix", "r", encoding="utf-8") as fh:
+            next(fh, None)
+            for line in fh:
+                parts = line.split()
+                if len(parts) >= 8 and parts[7] in paths:
+                    inodes.add(f"socket:[{parts[6]}]")
+    except OSError:
+        return []
+    pids = []
+    for entry in os.listdir(proc) if inodes else ():
+        if not entry.isdigit():
+            continue
+        try:
+            fds = os.listdir(f"{proc}/{entry}/fd")
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                if os.readlink(f"{proc}/{entry}/fd/{fd}") in inodes:
+                    pids.append(int(entry))
+                    break
+            except OSError:
+                continue
+    return pids
+
+
+def _describe_pids(pids: "list[int]", proc: str = "/proc") -> str:
+    """'Xvfb pid 2142480' for each pid, or 'unknown'."""
+    names = []
+    for pid in pids:
+        try:
+            with open(f"{proc}/{pid}/comm", "r", encoding="utf-8") as fh:
+                names.append(f"{fh.read().strip()} pid {pid}")
+        except OSError:
+            names.append(f"pid {pid}")
+    return ", ".join(names) or "unknown"
+
+
 def probe_display(display: str, timeout_s: float = DISPLAY_PROBE_TIMEOUT_S) -> str:
     """Probe `display`: "up", "down", or "wedged". ADR 119.
 
@@ -244,6 +292,21 @@ def start(display: str, size: str) -> int:
         except Exception:
             stale_game = False
         if not stale_game:
+            # Reuse only our own server. 2026-10-25 12:04 and 12:49: a pytest
+            # Xvfb (-displayfd picked :3 while the nested display was down) was
+            # left behind on :3, `make r2` reused it, the game could not start
+            # on a GPU-less Xvfb, and wingman captured an all-black frame.
+            try:
+                from wingman.game_shutdown import find_nested_display_pids
+                ours = bool(find_nested_display_pids(display))
+            except Exception:
+                ours = True
+            if not ours:
+                owners = _x_socket_owner_pids(display)
+                print(f"ERROR: an X server answers on {display} but it is not the "
+                      f"nested Xwayland (owner: {_describe_pids(owners)}). Stop it "
+                      f"before starting a session.", file=sys.stderr)
+                return 1
             print(f"nested display {display} already running (idle) — reusing")
             return 0
         print(f"nested display {display} already running with a game still "

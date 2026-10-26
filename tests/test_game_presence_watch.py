@@ -115,7 +115,7 @@ def test_the_game_gone_exit_needs_no_safe_point():
     There is no aircraft when there is no game."""
     from pathlib import Path
     src = Path("wingman/main.py").read_text()
-    check = src.split("if game_watch.game_has_gone():")[1].split("break")[0]
+    check = src.split("and game_watch.game_has_gone()):")[1].split("break")[0]
     assert "_safe" not in check
 
 
@@ -182,3 +182,14 @@ def test_standby_interrupt_checks_presence_without_a_confirmation_sleep():
     assert "_game_pids_now()" in except_branch
     assert "_game_confirmed_gone()" not in except_branch
     assert "close_nested_display(nested_display" in except_branch
+
+
+def test_replay_and_capture_runs_never_end_on_the_game_leaving():
+    """The watch scans every process on the box, not the run's own game. On
+    2026-10-25 an operator's MetalStorm quit during `make ocr`, and the PATH1
+    replay of recorded screenshots logged GAME GONE and stopped at 45 s of 94.
+    Same gate as the startup-stall exit."""
+    from pathlib import Path
+    src = Path("wingman/main.py").read_text()
+    check = src.split("game_watch.game_has_gone()")[0].rsplit("\n            if ", 1)[1]
+    assert check.startswith("(not replay_mode and not capture_mode"), check

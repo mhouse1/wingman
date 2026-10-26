@@ -19,11 +19,12 @@ import numpy as np
 import pytest
 import yaml
 
+from constants import MINIMAP_CORPUS_DIR
 from wingman.analyzer import GameStateAnalyzer
 from wingman.tick_handlers import BoundaryPerceptionHandler
 
 ROOT = Path(__file__).parent.parent
-CORPUS = ROOT / "test_screenshots" / "unknown_anomalies"
+CORPUS = MINIMAP_CORPUS_DIR
 # Enumerated, never globbed. A pattern over a directory the running app writes
 # into absorbs whatever the next session drops there — the mistake that broke a
 # corpus test the day it was written.

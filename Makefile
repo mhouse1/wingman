@@ -44,7 +44,7 @@
 #   make p1          -> capture screenshots for PATH1 using live Wingman play
 #   make p2          -> capture screenshots for PATH2 using live Wingman play
 
-.PHONY: hooks upgrade-linux fsm session-report sr leak-check leak-check-gate test test1 test2 docker-build docker-test docker-shell require-veda tp tp-full runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q nb g updater rd invite launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops screenshot ti preflight tree v frame
+.PHONY: hooks upgrade-linux fsm session-report sr leak-check leak-check-gate test test1 test2 docker-build docker-test docker-shell require-veda tp tp-full runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q nb g updater rd invite clip launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops screenshot ti preflight tree v frame
 
 PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
@@ -73,8 +73,8 @@ CAPTURE_PATH ?= PATH1
 # real framebuffer XGetImage can read.
 #
 # The switch lives in wingman/config.yaml (nested.enabled), NOT here, so that
-# the Makefile and wingman cannot disagree about the lane. `r`, `rd`, `r1` and
-# `r2` therefore need no nested variant - they read the same config.
+# the Makefile and wingman cannot disagree about the lane. `r`, `rd`, `r1`, `r2`
+# and `r3` therefore need no nested variant - they read the same config.
 #
 # Override for a single run without editing config:
 #     make rd NESTED=0      # force the on-screen lane
@@ -87,7 +87,7 @@ NESTED_ENV   = $(shell $(PYTHON_RUN) scripts/nested-display.py env $(NESTED_FLAG
 WINGMAN_NESTED_ENV = $(if $(NESTED),WINGMAN_NESTED=$(NESTED),)
 # Research 017: the prefix the game runs in, where it saves its own frame rate
 # for each match (wingman/game_stats.py logs it as GAME STATS). Lazily expanded,
-# so r1 and r2's WINE_PREFIX reaches rd's recipe.
+# so r1, r2 and r3's WINE_PREFIX reaches rd's recipe.
 WINGMAN_PREFIX_ENV = WINGMAN_WINE_PREFIX="$(WINE_PREFIX)"
 # Real-game capture (make p1/p2/p3) must outlast a full mission cycle
 # (~6 min lobby->battle->missiles empty->respawn->match end), not the ~24 s
@@ -169,7 +169,6 @@ reqs: reqs-gate
 # own targets; a new test file is now picked up by default and has to be opted
 # OUT deliberately rather than opted in and forgotten.
 TEST_EXCLUDED_FILES := \
-	tests/test_replay_integration_make_y.py \
 	tests/test_replay_integration_path1_path2.py \
 	tests/test_stall_crops_ocr.py \
 	tests/test_telemetry_corpus.py
@@ -469,7 +468,7 @@ else
 GAME_LAUNCH_DEPS :=
 endif
 
-# Design 012: "make rd v" (also r, r1, r2 — r1/r2 chain through rd below)
+# Design 012: "make rd v" (also r, r1, r2, r3 — rN chain through rd below)
 # opts into recording a session video + BT JSONL trace. `v` is a real,
 # no-op target purely so GNU Make accepts it as a second goal on the
 # command line — without a rule for it, "make rd v" fails with "No rule to
@@ -517,6 +516,14 @@ rd: $(GAME_LAUNCH_DEPS)
 invite:
 	$(PYTHON_RUN) scripts/toggle-invite.py $(if $(CONFIG),--config "$(CONFIG)",)
 
+# The game's display has its own clipboard (ADR 099), so desktop Ctrl-C never
+# reaches it. This puts TEXT there for Ctrl-V in the game (Job Aid 013).
+#   make clip TEXT='🄼🄾🄱🄸🅄🅂3'          # 15 min; SECONDS=60 for less
+clip:
+	@test -n "$(TEXT)" || { echo "usage: make clip TEXT='...'"; exit 2; }
+	@$(NESTED_ENV) $(PYTHON_RUN) scripts/nested-clipboard.py "$(TEXT)" \
+	  $(if $(SECONDS),--seconds $(SECONDS),)
+
 # ---------------------------------------------------------------------------
 # Per-account run targets (Research 005)
 #
@@ -542,6 +549,7 @@ invite:
 # duplicated generatedDeviceIdentifier did not prevent a fresh login.
 ACCT1_PREFIX ?= $(HOME)/Games/Heroic/Prefixes/Metalstorm-acct1
 ACCT2_PREFIX ?= $(HOME)/Games/Heroic/Prefixes/Metalstorm-acct2
+ACCT3_PREFIX ?= $(HOME)/Games/Heroic/Prefixes/Metalstorm-acct3
 
 # Proton's prefix update (wineboot) on first launch of a COPIED prefix resets
 # Wine-owned registry keys while leaving app keys intact, so a cp -a prefix
@@ -552,8 +560,8 @@ VIRTUAL_DESKTOP_SIZE ?= 1920x1200
 
 # Copy settings + keybindings from the main prefix into a per-account prefix,
 # WITHOUT copying identity (ADR 052 Open Question 3). launch-game does this
-# before every launch of an account prefix (sync-account-settings), so g, g1 and
-# g2 fly the same bindings and settings: change one under `make g` and each
+# before every launch of an account prefix (sync-account-settings), so g, g1, g2
+# and g3 fly the same bindings and settings: change one under `make g` and each
 # account picks it up at its next launch. A change made inside an account is
 # replaced at that account's next launch.
 #   make sync-settings-1 DRY=--dry-run   # list what would be copied to acct1
@@ -574,6 +582,10 @@ sync-settings-1:
 sync-settings-2:
 	@$(PYTHON_RUN) scripts/sync-metalstorm-settings.py \
 	  "$(SETTINGS_SRC_PREFIX)" "$(ACCT2_PREFIX)" $(DRY)
+
+sync-settings-3:
+	@$(PYTHON_RUN) scripts/sync-metalstorm-settings.py \
+	  "$(SETTINGS_SRC_PREFIX)" "$(ACCT3_PREFIX)" $(DRY)
 
 # Does an X11 focus guard work on this Wayland session? Run this, then alt-tab
 # between the game and another window for the duration. See scripts/focus-probe.py.
@@ -625,6 +637,8 @@ g1: WINE_PREFIX := $(ACCT1_PREFIX)
 g1: ensure-virtual-desktop g
 g2: WINE_PREFIX := $(ACCT2_PREFIX)
 g2: ensure-virtual-desktop g
+g3: WINE_PREFIX := $(ACCT3_PREFIX)
+g3: ensure-virtual-desktop g
 
 r1: WINE_PREFIX := $(ACCT1_PREFIX)
 r1: WINGMAN_ENV += WINGMAN_ACCOUNT=acct1
@@ -632,6 +646,9 @@ r1: ensure-virtual-desktop rd
 r2: WINE_PREFIX := $(ACCT2_PREFIX)
 r2: WINGMAN_ENV += WINGMAN_ACCOUNT=acct2
 r2: ensure-virtual-desktop rd
+r3: WINE_PREFIX := $(ACCT3_PREFIX)
+r3: WINGMAN_ENV += WINGMAN_ACCOUNT=acct3
+r3: ensure-virtual-desktop rd
 
 # --- ADR 099 nested display lane --------------------------------------------
 # nested-setup and nested-focus are unconditional prerequisites of every run
@@ -654,7 +671,7 @@ nested-status:
 nested-stop:
 	@$(PYTHON_RUN) scripts/nested-display.py stop
 
-.PHONY: g1 g2 r1 r2 ensure-virtual-desktop sync-settings-1 sync-settings-2 sync-account-settings stop-game nested-setup nested-focus nested-status nested-stop
+.PHONY: g1 g2 g3 r1 r2 r3 ensure-virtual-desktop sync-settings-1 sync-settings-2 sync-settings-3 sync-account-settings stop-game nested-setup nested-focus nested-status nested-stop
 
 # Launch MetalStorm via umu-run + GE-Proton (no Heroic UI click needed).
 # Always kills any stale instance and relaunches fresh so the window comes to front.
@@ -761,10 +778,6 @@ setup-capture:
 	@echo "Token saved to ~/.config/wingman/pw_restore_token.json for future runs."
 	@echo ""
 	$(PYTHON_RUN) wingman/portal.py
-
-# ADR37 replay integration smoke path (temporary until full screenshot catalog exists)
-y:
-	$(PYTEST_RUN) tests/test_replay_integration_make_y.py -q
 
 # ADR037 real-OCR integration tests (PATH1 + PATH2).
 # Requires real game screenshots in test_screenshots/integration_test/.

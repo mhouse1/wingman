@@ -44,6 +44,10 @@ _APPROVED_SITES = {
         1, "once per session, on the guard's own thread (ADR 099 V3): the pixel it "
            "holds on top of the game lives exactly as long as this connection, so it "
            "cannot ride on the shared one, which reconnects on an error"),
+    ("nested_size_guard.py", "_open_display"): (
+        1, "once per session, on the guard's own thread (ADR 162): it polls the "
+           "nested screen's size every second, and an Xlib connection is not safe "
+           "to share with the injection thread that owns the shared one"),
 }
 
 _GUIDANCE = """

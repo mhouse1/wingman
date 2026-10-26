@@ -129,9 +129,40 @@ def test_start_leaves_an_idle_running_display_alone():
     """
     with mock.patch.object(nd, "probe_display", return_value="up"), \
          mock.patch("wingman.game_shutdown.find_game_pids", return_value=[]), \
+         mock.patch("wingman.game_shutdown.find_nested_display_pids", return_value=[4242]), \
          mock.patch("subprocess.Popen") as popen:
         assert nd.start(":3", "1920x1200") == 0
     popen.assert_not_called()
+
+
+def test_start_refuses_to_reuse_a_server_that_is_not_the_nested_xwayland(capsys):
+    """2026-10-25 12:04 and 12:49: a pytest Xvfb left on :3 answered, no game
+    was attached, and `make r2` reused it. The game could not start on it and
+    wingman captured an all-black frame for the whole session."""
+    with mock.patch.object(nd, "probe_display", return_value="up"), \
+         mock.patch("wingman.game_shutdown.find_game_pids", return_value=[]), \
+         mock.patch("wingman.game_shutdown.find_nested_display_pids", return_value=[]), \
+         mock.patch.object(nd, "_x_socket_owner_pids", return_value=[2142480]), \
+         mock.patch.object(nd, "_describe_pids", return_value="Xvfb pid 2142480"), \
+         mock.patch("subprocess.Popen") as popen:
+        assert nd.start(":3", "1920x1200") == 1
+    popen.assert_not_called()
+    assert "Xvfb pid 2142480" in capsys.readouterr().err
+
+
+def test_the_socket_owner_is_found_by_its_listening_inode(tmp_path):
+    proc = tmp_path / "proc"
+    (proc / "net").mkdir(parents=True)
+    (proc / "net" / "unix").write_text(
+        "Num RefCount Protocol Flags Type St Inode Path\n"
+        "0000: 00000002 00000000 00010000 0001 01 111 @/tmp/.X11-unix/X3\n"
+        "0000: 00000002 00000000 00010000 0001 01 222 /tmp/.X11-unix/X30\n")
+    for pid, target in ((500, "socket:[111]"), (600, "socket:[222]"), (700, "/dev/null")):
+        (proc / str(pid) / "fd").mkdir(parents=True)
+        (proc / str(pid) / "fd" / "3").symlink_to(target)
+        (proc / str(pid) / "comm").write_text("Xvfb\n")
+    assert nd._x_socket_owner_pids(":3", proc=str(proc)) == [500]
+    assert nd._describe_pids([500], proc=str(proc)) == "Xvfb pid 500"
 
 
 def test_start_restarts_a_display_with_a_game_still_attached():

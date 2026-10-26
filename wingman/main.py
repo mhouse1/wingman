@@ -666,6 +666,7 @@ def main():
     # ADR 157: the guard that releases modifiers left held on the nested display.
     stuck_modifier_guard = None
     present_copy_guard = None
+    nested_size_guard = None
     if _nested_on and sys.platform != "win32":
         nested_display = str(_nested.get("display") or ":3").strip()
         from .input_linux import (set_injection_display, set_injected_keys,
@@ -736,6 +737,13 @@ def main():
             from .present_copy_guard import PresentCopyGuard
             present_copy_guard = PresentCopyGuard(nested_display)
             present_copy_guard.start()
+        # ADR 162 / Anomaly 015: resizing the nested window resizes the nested
+        # screen, and a screen smaller than the capture region fails every grab.
+        if bool(_nested.get("restore_size", schema_default("nested.restore_size"))):
+            from .nested_size_guard import NestedSizeGuard
+            nested_size_guard = NestedSizeGuard(nested_display,
+                                                str(_nested.get("size") or "1920x1200"))
+            nested_size_guard.start()
 
     # ADR 098: gate injection on the game having focus. Installed process-wide
     # because the injection sites are module-level in controller.
@@ -1595,7 +1603,11 @@ def main():
             # nested lane the leftover is a black window with nothing behind
             # it. Unlike the guards this needs no safe point: there is no
             # aircraft in flight to abandon when there is no game.
-            if game_watch.game_has_gone():
+            # Not in replay or capture runs: the watch scans every process on
+            # the box, so an operator's game quitting mid-run ended a replay of
+            # recorded screenshots (2026-10-25, PATH1 stopped at 45 s of 94).
+            if (not replay_mode and not capture_mode
+                    and game_watch.game_has_gone()):
                 logger.warning(
                     "\033[93m🎮 GAME GONE: MetalStorm is no longer running — "
                     "ending the session (ADR 105)\033[0m")
@@ -2087,6 +2099,13 @@ def main():
             stuck_modifier_guard.stop()
         if present_copy_guard is not None:
             present_copy_guard.stop()
+        if nested_size_guard is not None:
+            nested_size_guard.stop()
+        # Anomaly 014: the GAME_LOBBY escape loop stops only on a state change,
+        # and none comes once the loop above has exited. STANDBY keeps the
+        # process alive, so it pressed ESC into the operator's game every 45 s
+        # (2026-10-21, and 33 times on 2026-10-25).
+        _stop_lobby_escape_loop()
         ctrl.cleanup(keep_hotkeys=standby_armed)
         # ADR 156: make sure the operator's mouse is attached. A click normally
         # reattaches it itself; this covers one that was cut short by the exit.

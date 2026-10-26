@@ -99,12 +99,6 @@ def test_disabled_tracker_records_nothing(tmp_path):
 
 # --- the analyzer side ------------------------------------------------------
 
-def test_analyzer_exposes_latency_marks():
-    """The tick handler needs three marks to compute the split."""
-    from wingman.analyzer import GameStateAnalyzer
-    assert hasattr(GameStateAnalyzer, "get_incoming_latency_marks")
-
-
 def test_marks_are_zero_before_any_detection():
     """Zeros mean 'no data', and the tick handler must skip rather than record
     a fabricated segment."""

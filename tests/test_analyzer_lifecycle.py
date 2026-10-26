@@ -13,6 +13,7 @@ import yaml
 
 from constants import CONFIG_PATH
 from wingman.analyzer import GameStateAnalyzer, GameState
+from wingman.state import GameEvent
 
 
 def _load_config():
@@ -107,7 +108,7 @@ def test_trigger_runs_side_effect_callbacks_outside_state_lock(cfg):
         if ok:
             analyzer._state_lock.release()
 
-    analyzer.set_on_cancel_mission(_cancel_side_effect)
+    analyzer.subscribe(GameEvent.CANCEL_MISSION, _cancel_side_effect, name="test")
 
     assert analyzer._trigger("manual_reset") is True
     assert analyzer.game_state == GameState.GAME_LOBBY
@@ -125,8 +126,8 @@ def test_fsm_unattended_lifecycle_and_starting_loop_callbacks(cfg):
     def _on_start_loop():
         events["start_loop"] += 1
 
-    analyzer.set_on_cancel_mission(_on_cancel)
-    analyzer.set_on_start_game_starting_loop(_on_start_loop)
+    analyzer.subscribe(GameEvent.CANCEL_MISSION, _on_cancel, name="test")
+    analyzer.subscribe(GameEvent.START_GAME_STARTING_LOOP, _on_start_loop, name="test")
 
     assert analyzer.game_state == GameState.GAME_UNKNOWN
 

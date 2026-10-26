@@ -20,6 +20,7 @@ from wingman.analyzer import (
     _split_telemetry_rows,
 )
 from wingman.crop_region import get_crop
+from wingman.state import GameEvent
 from constants import (
     CONFIG_PATH,
     TEST_SCREENSHOT,
@@ -385,7 +386,8 @@ def test_waiting_cancel_diff_none_without_baseline(analyzer: GameStateAnalyzer):
 def test_unknown_starts_and_classifies_to_lobby_with_debounce(monkeypatch):
     a = GameStateAnalyzer(load_config())
     transitions = []
-    a.set_on_fsm_transition(lambda trigger, _prev, _next, _ts: transitions.append(trigger))
+    a.subscribe(GameEvent.FSM_TRANSITION,
+                lambda trigger, _prev, _next, _ts: transitions.append(trigger), name="test")
     frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
 
     monkeypatch.setattr(a, "scan_region_for_click_to", lambda _frame: False)

@@ -530,6 +530,18 @@ def test_standby_keeps_the_hotkey_hooks_alive():
     assert "if keep_hotkeys:" in ctrl_src
 
 
+def test_standby_stops_the_lobby_escape_loop_before_handing_over():
+    """Anomaly 014: the GAME_LOBBY escape loop is a thread that only a state
+    change stopped. After the main loop exits no state change comes, and
+    STANDBY keeps the process alive: on 2026-10-25 it pressed ESC into the
+    operator's game 33 times, 45 s apart, opening the menu over their flight."""
+    shutdown = MAIN_SRC.split("    finally:\n        _arm_shutdown_watchdog()")[1]
+    shutdown = shutdown.split("elif standby_armed:")[0]
+    stop = shutdown.find("_stop_lobby_escape_loop()")
+    assert stop != -1, "the shutdown path never stops the lobby escape loop"
+    assert stop < shutdown.index("ctrl.cleanup(keep_hotkeys=standby_armed)")
+
+
 def test_standby_still_releases_every_injected_key():
     """The operator flies manually straight after: a key wingman was holding
     would fight them. cleanup() must run its release pass regardless."""

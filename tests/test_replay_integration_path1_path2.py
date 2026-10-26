@@ -571,6 +571,11 @@ def _run_replay(
     monkeypatch.setattr(
         wingman_main, "_claim_single_instance",
         lambda: _orig_claim(f"wingman-replay-test-{path_name}-{tmp_path.name}"))
+    # main()'s finally arms ADR 121's 90 s shutdown watchdog and nothing cancels
+    # it, because a real process exits first. In-process it outlives main() and
+    # calls os._exit(2) inside whatever test is running 90 s later: on
+    # 2026-10-25 `make ocr` died in test_telemetry_corpus with no summary.
+    monkeypatch.setattr(wingman_main, "_arm_shutdown_watchdog", lambda *a, **k: None)
 
     old_argv = sys.argv
     sys.argv = [
