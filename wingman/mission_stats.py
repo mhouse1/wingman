@@ -206,6 +206,7 @@ class MissionStatsTracker:
         # is counted apart, so the totals say how many rounds they cover.
         # ADR 166: each reading of the squadron leaderboard, in order.
         self._squadron_rankings: list = []
+        self._jet: "str | None" = None      # ADR 167: read in the lobby, for the next round
         self._rounds_read = 0
         self._rounds_unread = 0
         self._round_totals = {"score": 0, "kills": 0, "deaths": 0, "assists": 0}
@@ -748,6 +749,15 @@ class MissionStatsTracker:
                            **{key: sum(p[key] for p in read) for key in self._round_totals}}
         return by_arm
 
+    def record_jet(self, name: "str | None") -> None:
+        """The jet on the lobby as PLAY was clicked (ADR 167), for the rounds from
+        that click on. None drops the last one: a lobby whose read fails leaves its
+        round without a jet, not under the previous round's. A mission that starts
+        with no click keeps it: a jet changes only in the lobby, and the operator's
+        double `n` restarts a mission in the same round (2026-10-31 07:09:39)."""
+        with self._lock:
+            self._jet = name
+
     def _start_mission(self, ts: float) -> None:
         self._in_mission = True
         self._mission_start_ts = ts
@@ -765,6 +775,7 @@ class MissionStatsTracker:
             "outcome": "unknown",
             "performance": None,
             "trial_arm": None,          # ADR 165: the evade trial's arm for this round
+            "tags": {"jet": self._jet} if self._jet else {},    # ADR 167
         }
 
     def _end_mission(self, ts: float, outcome: str) -> None:

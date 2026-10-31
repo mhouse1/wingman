@@ -135,17 +135,26 @@ def test_an_unreadable_prefix_warns_once_and_never_raises(tmp_path, caplog):
 
 
 @pytest.mark.skipif(shutil.which("make") is None, reason="make not installed")
-def test_the_run_targets_tell_wingman_the_accounts_prefix():
-    """r1's WINE_PREFIX is target-specific; it has to reach r's recipe, the one
-    that logs to wingman.log."""
+@pytest.mark.parametrize("target, prefix, tag", [
+    ("r", "Metalstorm-acct1", "acct1"),
+    ("r1", "Metalstorm", None),
+    ("r2", "Metalstorm-acct2", "acct2"),
+    ("r3", "Metalstorm-acct3", "acct3")])
+def test_the_run_targets_tell_wingman_the_accounts_prefix(target, prefix, tag):
+    """A target's WINE_PREFIX is target-specific; it has to reach r's recipe, the
+    one that logs to wingman.log. The tag and the prefix belong together: the
+    dashboard names a session's pilot from its tag (Makefile, 2026-10-31)."""
     root = Path(__file__).resolve().parent.parent
-    out = subprocess.run(["make", "-n", "r1", "GAME_LAUNCH_DEPS="], cwd=root,
+    out = subprocess.run(["make", "-n", target, "GAME_LAUNCH_DEPS="], cwd=root,
                          capture_output=True, text=True, timeout=60).stdout
     run = [line for line in out.splitlines() if "-m wingman.main" in line]
     assert len(run) == 1, out
     assert "--log-file wingman.log" in run[0]
     assert 'WINGMAN_WINE_PREFIX="' in run[0]
-    assert run[0].split('WINGMAN_WINE_PREFIX="')[1].split('"')[0].endswith("Metalstorm-acct1")
+    assert Path(run[0].split('WINGMAN_WINE_PREFIX="')[1].split('"')[0]).name == prefix
+    # r2 and r3 add their tag after r's own, and the last one wins in the shell.
+    tags = [word.split("=")[1] for word in run[0].split() if word.startswith("WINGMAN_ACCOUNT=")]
+    assert (tags[-1] if tags else None) == tag
 
 
 ACCT1_REG = Path.home() / "Games/Heroic/Prefixes/Metalstorm-acct1/user.reg"

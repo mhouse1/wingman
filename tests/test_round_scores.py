@@ -68,21 +68,33 @@ def test_a_file_from_before_the_reader_gives_no_rows():
 
 def test_the_account_comes_from_the_run_id_suffix():
     (row,) = rs.rows_from_stats(_stats([_mission(0)], run_id="20261029_071302_acct3"))
-    assert row.tags == {"account": "acct3"}
+    assert row.tags == {"account": "mobius3"}
+
+
+@pytest.mark.parametrize("run_id, pilot", [
+    ("20261031_023505_acct1", "mobius0"),     # its end screen at 03:16 reads MOBIUS0
+    ("20261030_162007", "mobius1"),           # its end screen at 16:25 reads MOBIUS1
+    ("20261031_043634_acct2", "mobius2"),
+    ("20261030_223038_acct3", "mobius3"),
+    ("20261031_043634_acct4", "acct4")])      # not named yet: it keeps its tag
+def test_each_prefix_is_its_pilot_and_the_numbers_do_not_line_up(run_id, pilot):
+    """Operator, 2026-10-31. The tag belongs to the prefix, so sessions from before
+    the Makefile swapped r and r1 keep their pilot."""
+    assert rs.account_of(run_id) == pilot
 
 
 def test_a_session_without_the_suffix_flew_the_main_account():
     """`make r` flies the main prefix, and its run_id has no suffix."""
     (row,) = rs.rows_from_stats(_stats([_mission(0)], run_id="20261028_052534"))
-    assert row.tags == {"account": "main"}
+    assert row.tags == {"account": "mobius1"}
 
 
 def test_session_and_mission_tags_are_copied_and_the_missions_win():
     data = _stats([_mission(0, tags={"jet": "j20"}), _mission(1)],
                   tags={"jet": "acs", "map": "countdown"})
     first, second = rs.rows_from_stats(data)
-    assert first.tags == {"account": "acct1", "jet": "j20", "map": "countdown"}
-    assert second.tags == {"account": "acct1", "jet": "acs", "map": "countdown"}
+    assert first.tags == {"account": "mobius0", "jet": "j20", "map": "countdown"}
+    assert second.tags == {"account": "mobius0", "jet": "acs", "map": "countdown"}
 
 
 def test_the_same_file_read_twice_gives_the_same_keys():
@@ -137,15 +149,40 @@ def _write_log(directory, name, first_time):
     return path
 
 
+def test_a_stats_files_jet_reaches_its_round():
+    (row,) = rs.rows_from_stats(_stats([_mission(0, tags={"jet": "J-10 FIREBIRD"})]))
+    assert row.tags["jet"] == "J-10 FIREBIRD"
+
+
+def test_a_log_keeps_a_jet_until_the_next_read():
+    log = [_line("02:50:00", "\x1b[93m✈️ JET NAME: SU-35 SUPER FLANKER\x1b[0m")] + _LOG
+    assert [r.tags.get("jet") for r in rs.rows_from_log(log, "x")] == ["SU-35 SUPER FLANKER"] * 2
+    log = (log[:5] + [_line("02:58:00", "JET NAME: not read — no trophy icon on the label")]
+           + log[5:])
+    assert [r.tags.get("jet") for r in rs.rows_from_log(log, "x")] == ["SU-35 SUPER FLANKER", None]
+
+
+def test_a_log_keeps_a_jet_with_a_slash_or_a_dot():
+    for jet in ("F/A-18F SUPER HORNET", "M.III"):
+        log = [_line("02:50:00", f"✈️ JET NAME: {jet}")] + _LOG
+        assert rs.rows_from_log(log, "x")[0].tags["jet"] == jet
+
+
+def test_a_lobby_that_failed_to_read_gives_a_log_round_no_jet():
+    log = [_line("02:40:00", "✈️ JET NAME: SU-35 SUPER FLANKER"),
+           _line("02:50:00", "JET NAME: not read — no trophy icon on the label")] + _LOG
+    assert "jet" not in rs.rows_from_log(log, "x")[0].tags
+
+
 def test_a_log_takes_its_account_from_the_run_file_line():
     """2026-10-30 07:25: a `make r2` session the shutdown watchdog ended wrote no
     stats file, and its 12 rounds showed as "no account"."""
     named = _LOG + [_line("03:10:00", "PerformanceTracker: session data written to "
                                       "docs/performance/current/run_20261029_025030_acct2.json")]
-    assert {r.tags["account"] for r in rs.rows_from_log(named, "x")} == {"acct2"}
+    assert {r.tags["account"] for r in rs.rows_from_log(named, "x")} == {"mobius2"}
     main = [_line("03:10:00", "PerformanceTracker: session data written to "
                               "docs/performance/current/run_20261029_025030.json")]
-    assert {r.tags["account"] for r in rs.rows_from_log(_LOG + main, "x")} == {"main"}
+    assert {r.tags["account"] for r in rs.rows_from_log(_LOG + main, "x")} == {"mobius1"}
     assert all("account" not in r.tags for r in rs.rows_from_log(_LOG, "x")), \
         "a log cut off before the line names no account"
 
@@ -189,7 +226,7 @@ def test_the_copy_csv_has_nulls_json_tags_and_offsets():
     first, second = list(csv.reader(io.StringIO(text)))
     assert first[:2] == ["20261028_004906_acct1", "0"]
     assert datetime.fromisoformat(first[3]).utcoffset() == timedelta(0)
-    assert json.loads(first[9]) == {"account": "acct1", "note": 'a "b", c'}
+    assert json.loads(first[9]) == {"account": "mobius0", "note": 'a "b", c'}
     assert second[4:8] == ["", "", "", ""]
     assert ",,,," in text.splitlines()[1], "unquoted empty fields, which COPY reads as NULL"
 
@@ -209,7 +246,7 @@ def test_a_stats_files_squadron_readings_become_rows_with_its_account():
     data = _stats([], squadron_rankings=[{"ts": 1793430302.0, "rank": 659, "trophies": 358032}])
     (row,) = rs.rankings_from_stats(data)
     assert (row.run_id, row.rank, row.trophies, row.tags) == (
-        "20261028_004906_acct1", 659, 358032, {"account": "acct1"})
+        "20261028_004906_acct1", 659, 358032, {"account": "mobius0"})
     assert row.read_at == datetime.fromtimestamp(1793430302.0, timezone.utc)
     assert rs.rankings_from_stats(_stats([])) == []
 
@@ -221,7 +258,7 @@ def test_a_logs_squadron_lines_become_rows_with_the_account_it_names():
                              "docs/performance/current/run_20261029_025030_acct2.json")]
     (row,) = rs.rankings_from_log(log, "x")
     assert (row.rank, row.trophies, row.tags) == (659, 358032,
-                                                  {"source": "log", "account": "acct2"})
+                                                  {"source": "log", "account": "mobius2"})
     assert row.read_at == datetime(2026, 10, 29, 2, 10, 0, 123000, tzinfo=rs.TZ)
 
 
@@ -411,11 +448,47 @@ def test_both_moving_averages_are_lines_and_the_takeover_one_shows_its_points():
     assert props["manual takeover, moving average"]["custom.showPoints"] == "always"
 
 
+def _by_jet():
+    dashboard = json.loads(Path("grafana/dashboards/score-per-round.json").read_text(encoding="utf-8"))
+    return next(p for p in dashboard["panels"] if p["title"] == "Wingman by jet")
+
+
+def test_the_jet_panel_ranks_wingmans_rounds_and_shows_how_much_it_rests_on():
+    sql = _by_jet()["targets"][0]["rawSql"]
+    assert "manual_takeovers = 0" in sql and "tags @> ${tags:sqlstring}::jsonb" in sql
+    assert '"Mean score" DESC NULLS LAST' in sql
+    for column in ('"Jet"', '"Rounds read"', '"± 95%"'):
+        assert column in sql
+
+
+def test_rounds_without_a_jet_are_shown_but_never_ranked_among_the_jets():
+    sql = _by_jet()["targets"][0]["rawSql"]
+    assert "'not recorded'" in sql
+    assert sql.index("tags->>'jet' IS NULL") < sql.index('"Mean score" DESC')
+
+
+def test_a_jet_with_few_rounds_cannot_top_the_jets_that_have_many():
+    """In a trial on real rounds, one lucky round topped the table at 755, above a
+    jet with 47 rounds read."""
+    sql = _by_jet()["targets"][0]["rawSql"]
+    assert sql.index("count(score) < 10") < sql.index('"Mean score" DESC')
+
+
+def test_the_jet_panels_bars_are_one_colour_not_good_and_bad():
+    """A bar's colour must not rank the jets: its length does that."""
+    (bars,) = _by_jet()["fieldConfig"]["overrides"]
+    assert bars["matcher"]["options"] == "Mean score"
+    properties = {p["id"]: p["value"] for p in bars["properties"]}
+    assert properties["custom.cellOptions"]["type"] == "gauge"
+    assert properties["color"] == {"mode": "fixed", "fixedColor": "blue"}
+
+
 def test_the_accounts_have_their_own_colours():
     dashboard = json.loads(Path("grafana/dashboards/score-per-round.json").read_text(encoding="utf-8"))
     panel = next(p for p in dashboard["panels"] if p["title"].startswith("Score per round"))
     named = {o["matcher"]["options"] for o in panel["fieldConfig"]["overrides"]}
-    assert {"main", "acct1", "acct2", "acct3", "no account"} <= named
+    assert {"mobius0", "mobius1", "mobius2", "mobius3", "no account"} <= named
+    assert not {"main", "acct1", "acct2", "acct3"} & named
 
 
 # -- Phase 2: the ingest after a session ---------------------------------------------

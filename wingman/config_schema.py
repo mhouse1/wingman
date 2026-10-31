@@ -698,9 +698,13 @@ SCHEMA = Section(
         # Design 018 Phase 3, ADR 166: the squadron leaderboard, read in the lobby.
         "squadron_ranking": Section(children={
             "enabled": Leaf(types=(bool,), default=False),
-            "every_min": Leaf(types=(int, float), default=60, minimum=0),
+            "queue_at": Leaf(types=(str,), default="09:38:30"),
             "step_timeout_s": Leaf(types=(int, float), default=8.0, minimum=0.5),
             "squadron": Leaf(types=(str,), default="Mobius Squadron"),
+            "capture": Leaf(types=(bool,), default=False),
+        }),
+        # ADR 167: each round's jet, read off the lobby.
+        "jet_name": Section(children={
             "capture": Leaf(types=(bool,), default=False),
         }),
         # Design 018: the score dashboard (Grafana and Postgres, `make grafana`).

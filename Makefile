@@ -487,6 +487,9 @@ UNAME_S := $(shell uname -s 2>/dev/null || echo Windows)
 
 ifeq ($(UNAME_S),Linux)
 GAME_LAUNCH_DEPS := nested-setup launch-game wait-game nested-focus
+# The tag of the prefix `make r` flies. It goes ahead of WINGMAN_ENV in r's recipe,
+# so the WINGMAN_ACCOUNT that r2 and r3 add wins; r1 clears it.
+WINGMAN_ACCOUNT_ENV := WINGMAN_ACCOUNT=acct1
 else
 GAME_LAUNCH_DEPS :=
 endif
@@ -536,7 +539,7 @@ endif
 # printed and ignored, and the recipe keeps wingman's exit status. r1 to r3 run
 # this recipe too.
 r: $(GAME_LAUNCH_DEPS)
-	$(WINGMAN_ENV) $(WINGMAN_NESTED_ENV) $(WINGMAN_PREFIX_ENV) $(WINGMAN_NICE) $(PYTHON_RUN) -m wingman.main --log-file wingman.log $(RECORD_FLAG); \
+	$(WINGMAN_ACCOUNT_ENV) $(WINGMAN_ENV) $(WINGMAN_NESTED_ENV) $(WINGMAN_PREFIX_ENV) $(WINGMAN_NICE) $(PYTHON_RUN) -m wingman.main --log-file wingman.log $(RECORD_FLAG); \
 	status=$$?; \
 	$(PYTHON_RUN) scripts/round-scores.py after-session; \
 	exit $$status
@@ -575,6 +578,14 @@ clip:
 # setup but NOT the session, so each prefix is an independent account rather
 # than a clone of one login — no risk of two targets sharing a session. The
 # duplicated generatedDeviceIdentifier did not prevent a fresh login.
+#
+# The target's number is the call sign's number (operator, 2026-10-31). The login
+# and the tag belong to the prefix, so a tag keeps naming one pilot in the history:
+#   r, g    MOBIUS0  Metalstorm-acct1  tag acct1
+#   r1, g1  MOBIUS1  Metalstorm        no tag
+#   r2, g2  MOBIUS2  Metalstorm-acct2  tag acct2
+#   r3, g3  MOBIUS3  Metalstorm-acct3  tag acct3
+MAIN_PREFIX  ?= $(HOME)/Games/Heroic/Prefixes/Metalstorm
 ACCT1_PREFIX ?= $(HOME)/Games/Heroic/Prefixes/Metalstorm-acct1
 ACCT2_PREFIX ?= $(HOME)/Games/Heroic/Prefixes/Metalstorm-acct2
 ACCT3_PREFIX ?= $(HOME)/Games/Heroic/Prefixes/Metalstorm-acct3
@@ -589,8 +600,8 @@ VIRTUAL_DESKTOP_SIZE ?= 1920x1200
 # Copy settings + keybindings from the main prefix into a per-account prefix,
 # WITHOUT copying identity (ADR 052 Open Question 3). launch-game does this
 # before every launch of an account prefix (sync-account-settings), so g, g1, g2
-# and g3 fly the same bindings and settings: change one under `make g` and each
-# account picks it up at its next launch. A change made inside an account is
+# and g3 fly the same bindings and settings: change one under `make g1` (the main
+# prefix) and each account picks it up at its next launch. A change made inside an account is
 # replaced at that account's next launch.
 #   make sync-settings-1 DRY=--dry-run   # list what would be copied to acct1
 #   make sync-settings-1                 # copy now, without launching
@@ -661,15 +672,15 @@ ensure-virtual-desktop:
 	@$(PYTHON_RUN) scripts/ensure-virtual-desktop.py \
 	  "$(WINE_PREFIX)" "$(VIRTUAL_DESKTOP_SIZE)"
 
-g1: WINE_PREFIX := $(ACCT1_PREFIX)
+g1: WINE_PREFIX := $(MAIN_PREFIX)
 g1: ensure-virtual-desktop g
 g2: WINE_PREFIX := $(ACCT2_PREFIX)
 g2: ensure-virtual-desktop g
 g3: WINE_PREFIX := $(ACCT3_PREFIX)
 g3: ensure-virtual-desktop g
 
-r1: WINE_PREFIX := $(ACCT1_PREFIX)
-r1: WINGMAN_ENV += WINGMAN_ACCOUNT=acct1
+r1: WINE_PREFIX := $(MAIN_PREFIX)
+r1: WINGMAN_ACCOUNT_ENV :=
 r1: ensure-virtual-desktop r
 r2: WINE_PREFIX := $(ACCT2_PREFIX)
 r2: WINGMAN_ENV += WINGMAN_ACCOUNT=acct2
@@ -706,8 +717,8 @@ nested-stop:
 # NOTE: pattern split via shell variable — literal "Metalstorm.exe" never appears in the
 # recipe shell's cmdline, so pkill cannot match and kill the recipe shell itself.
 PROTON_ROOT    ?= $(HOME)/.var/app/com.heroicgameslauncher.hgl/config/heroic/tools/proton/GE-Proton-latest
-WINE_PREFIX    ?= $(HOME)/Games/Heroic/Prefixes/Metalstorm
-GAME_EXE       ?= $(HOME)/Games/Heroic/Metalstorm/Metalstorm.exe
+WINE_PREFIX    ?= $(ACCT1_PREFIX)
+GAME_EXE      ?= $(HOME)/Games/Heroic/Metalstorm/Metalstorm.exe
 UMU_RUN        ?= $(HOME)/.local/bin/umu-run
 # Extra Unity player args, e.g. GAME_ARGS=-force-d3d11 to work around a
 # graphics-backend crash on some GPUs. Empty by default — no effect unless set.

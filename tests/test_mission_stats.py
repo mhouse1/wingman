@@ -1015,3 +1015,60 @@ class TestEvadeTrialRounds:
             t.print_summary()
         assert "Round performance : 1 of 1 rounds read" in caplog.text
         assert "evade arm" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# ADR 167: the jet of each round
+# ---------------------------------------------------------------------------
+
+def _finish(t, name="x", path=None):
+    return t.finalize(run_id=name)["missions"]
+
+
+def test_a_round_carries_the_jet_read_in_its_lobby(tmp_path):
+    t = _tracker(tmp_path)
+    t.on_fsm_transition("x", "GAME_UNKNOWN", "GAME_LOBBY", 0.0)
+    t.record_jet("J-10 FIREBIRD")
+    _enter_battle(t, ts=1.0)
+    _leave_battle(t, ts=2.0)
+    assert _finish(t)[0]["tags"] == {"jet": "J-10 FIREBIRD"}
+
+
+def test_a_mission_restarted_without_a_click_keeps_its_jet(tmp_path):
+    """2026-10-31 07:09:39: the operator's double `n` forced GAME_LOBBY in a battle.
+    The round went on as a second mission, the one that gets its score, and no PLAY
+    click came between them to read the jet again."""
+    t = _tracker(tmp_path)
+    t.on_fsm_transition("x", "GAME_UNKNOWN", "GAME_LOBBY", 0.0)
+    t.record_jet("KF-21 BORAMAE")
+    _enter_battle(t, ts=1.0)
+    t.on_fsm_transition("n", "GAME_BATTLE", "GAME_LOBBY", 2.0)
+    t.on_fsm_transition("x", "GAME_LOBBY", "GAME_STARTING", 3.0)
+    t.on_fsm_transition("x", "GAME_STARTING", "GAME_BATTLE", 4.0)
+    _leave_battle(t, ts=5.0)
+    assert [m["tags"] for m in _finish(t)] == [{"jet": "KF-21 BORAMAE"}] * 2
+
+
+def test_the_next_click_replaces_the_jet(tmp_path):
+    t = _tracker(tmp_path)
+    t.on_fsm_transition("x", "GAME_UNKNOWN", "GAME_LOBBY", 0.0)
+    t.record_jet("J-10 FIREBIRD")
+    _enter_battle(t, ts=1.0)
+    _leave_battle(t, ts=2.0)
+    t.on_fsm_transition("x", "GAME_END_B", "GAME_LOBBY", 3.0)
+    t.record_jet(None)
+    t.record_jet("KF-21 BORAMAE")
+    _enter_battle(t, ts=4.0)
+    _leave_battle(t, ts=5.0)
+    assert [m["tags"] for m in _finish(t)] == [{"jet": "J-10 FIREBIRD"},
+                                               {"jet": "KF-21 BORAMAE"}]
+
+
+def test_a_failed_read_drops_the_last_jet(tmp_path):
+    t = _tracker(tmp_path)
+    t.on_fsm_transition("x", "GAME_UNKNOWN", "GAME_LOBBY", 0.0)
+    t.record_jet("J-10 FIREBIRD")
+    t.record_jet(None)
+    _enter_battle(t, ts=1.0)
+    _leave_battle(t, ts=2.0)
+    assert _finish(t)[0]["tags"] == {}

@@ -62,10 +62,12 @@ _SCORE_ALLOWLIST = "0123456789,."
 # A round's counts run to two digits, without a leading zero: the scoreboard's
 # columns read as '63/4/040' on 2026-10-29 03:18, which the old pattern took.
 _KDA_RE = re.compile(r"(0|[1-9]\d?)/(0|[1-9]\d?)/(0|[1-9]\d?)")
-# A score is one run of digits, or thousands groups with a separator between
+# A score is up to three digits, or thousands groups with a separator between
 # each: OCR splits "1,255" at the comma, and a group of other than three digits
-# means a box was misread or lost.
-_SCORE_RE = re.compile(r"0|[1-9]\d{0,5}|[1-9]\d{0,2}(?:,\d{3})+")
+# means a box was misread or lost. The panel prints the comma, and all 28 saved
+# scores of 1,000 or more read with it (2026-10-31), so a longer run of digits
+# is a comma read as a digit.
+_SCORE_RE = re.compile(r"0|[1-9]\d{0,2}(?:,\d{3})*")
 # The panel's "KDA" label sits this far below the KDA figures, as a share of
 # the frame's height: 60 to 62 px of 1200 at all three heights measured.
 _LABEL_BELOW = (0.03, 0.075)
@@ -145,14 +147,7 @@ def _find_kda(reader, frame, kda_crop) -> "tuple[str, tuple | None, float | None
     return " | ".join(text for text, _y in boxes), None, None
 
 
-def _read_score(reader, frame, score_crop, row: float) -> str:
-    gray, _scale, _top = _region(frame, score_crop, row - _ROW_HALF, row + _ROW_HALF)
-    if gray is None:
-        return ""
-    # Doubled: OCR found no text in a score of a lone "0" at the measured size
-    # (2026-10-29 06:53, three frames) and read it doubled; the 36 other panel
-    # frames saved that day read the same either way.
-    gray = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+def _score_text(reader, gray) -> str:
     # Left to right, a separator between boxes: OCR splits "1,255" at the comma
     # and lists the pieces in no set order. Joined as listed, a 1,255 was booked
     # as 25513 (2026-10-30 09:10, acct3), and the 03:48 frame of a 1,295 reads 2951.
@@ -160,6 +155,20 @@ def _read_score(reader, frame, score_crop, row: float) -> str:
                             allowlist=_SCORE_ALLOWLIST)
     return ",".join(str(text) for _x, text in
                     sorted((min(p[0] for p in box), text) for box, text, _conf in boxes))
+
+
+def _read_score(reader, frame, score_crop, row: float) -> str:
+    gray, _scale, _top = _region(frame, score_crop, row - _ROW_HALF, row + _ROW_HALF)
+    if gray is None:
+        return ""
+    # Doubled only when the row at its own size gives nothing, which is a lone
+    # "0": all 36 saved. Doubling splits a score at its comma, 10 of the 28 saved
+    # scores of 1,000 or more, and can read the comma as a digit: a 1,210 was
+    # booked as 13210 (2026-10-31 15:37, acct2). None of the 383 saved panels
+    # split at its own size, and all read right.
+    return (_score_text(reader, gray)
+            or _score_text(reader, cv2.resize(gray, None, fx=2, fy=2,
+                                              interpolation=cv2.INTER_CUBIC)))
 
 
 def read_panel(reader, frame, score_crop, kda_crop) -> PanelRead:

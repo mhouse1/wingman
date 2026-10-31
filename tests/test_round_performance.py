@@ -41,7 +41,9 @@ def test_the_kda_is_three_numbers_between_slashes(text, expected):
     ("1,,255", 1255), ("1,255", 1255), ("12,345", 12345),
     ("1,3,255", None),      # a stray box between the groups
     ("1,63", None),         # a three-digit score split in two
-    ("1,", None), (",255", None)])
+    ("1,", None), (",255", None),
+    ("13210", None),        # a comma read as a digit, 2026-10-31 15:37
+    ("1210", None)])        # the panel prints the comma
 def test_the_score_is_a_number(text, expected):
     assert parse_score(text) == expected
 
@@ -56,18 +58,25 @@ class _Reader:
     """An EasyOCR stand-in. The KDA band's read answers `boxes`, each (text,
     middle row in the frame); the score's read, the one with an allowlist,
     answers `score`, each text or (text, left edge), placed left to right in
-    the order given unless its edge says otherwise."""
+    the order given unless its edge says otherwise. The row doubled answers
+    `doubled` the same way."""
 
-    def __init__(self, boxes, score=()):
+    def __init__(self, boxes, score=(), doubled=()):
         self.boxes = boxes
-        self.score = [s if isinstance(s, tuple) else (s, 100 * i) for i, s in enumerate(score)]
+        self.score = self._placed(score)
+        self.doubled = self._placed(doubled)
         self.calls = []
+
+    @staticmethod
+    def _placed(score):
+        return [s if isinstance(s, tuple) else (s, 100 * i) for i, s in enumerate(score)]
 
     def readtext(self, img, detail=0, paragraph=False, workers=0, allowlist=None):
         self.calls.append((detail, allowlist, img.shape[0]))
         if allowlist is None:
             return [_box(0, y, text) for text, y in self.boxes]
-        return [_box(x, 40, text) for text, x in self.score]
+        score = self.doubled if img.shape[0] > 120 else self.score
+        return [_box(x, 40, text) for text, x in score]
 
 
 _SCORE = CropCoords(0.0, 0.0, 0.5, 1.0)
@@ -84,7 +93,7 @@ def test_the_kda_is_found_by_the_label_under_it_and_the_score_on_its_row():
         RoundPerformance(100, 1, 5, 0), "1/5/0", "100")
     (band, _), (row, allowlist) = [(c[0], c[1]) for c in reader.calls]
     assert (band, row, allowlist) == (1, 1, "0123456789,.")
-    assert 140 <= reader.calls[1][2] <= 180, "the KDA's row, doubled; not the band"
+    assert 70 <= reader.calls[1][2] <= 90, "the KDA's row at its own size; not the band"
 
 
 def test_the_scoreboards_kdas_have_their_label_above_and_do_not_read():
@@ -110,6 +119,22 @@ def test_a_split_score_reads_left_to_right():
     reader = _Reader(_PANEL_BOXES, [("295", 277), ("1,", 191)])
     assert read_panel(reader, _FRAME, _SCORE, _KDA) == PanelRead(
         RoundPerformance(1295, 1, 5, 0), "1/5/0", "1,,295")
+
+
+def test_a_lone_zero_is_read_doubled():
+    """2026-10-29 06:53: OCR finds no text in a lone "0" at the row's own size."""
+    reader = _Reader(_PANEL_BOXES, [], doubled=["0"])
+    assert read_panel(reader, _FRAME, _SCORE, _KDA) == PanelRead(
+        RoundPerformance(0, 1, 5, 0), "1/5/0", "0")
+
+
+def test_a_score_read_at_its_own_size_is_not_read_doubled():
+    """2026-10-31 15:37, acct2: doubled, a 1,210 split at the comma, its "1," read
+    as a number, and the round was booked at 13210."""
+    reader = _Reader(_PANEL_BOXES, ["1,210"], doubled=[("13", 151), ("210", 296)])
+    assert read_panel(reader, _FRAME, _SCORE, _KDA) == PanelRead(
+        RoundPerformance(1210, 1, 5, 0), "1/5/0", "1,210")
+    assert len(reader.calls) == 2, "no doubled read"
 
 
 def test_a_stray_box_between_the_groups_is_no_reading():
@@ -235,6 +260,8 @@ _CASES = [
     # the 09:10 one was booked at 25513.
     ("panel_split_score_1295_8-5-3.jpg", RoundPerformance(1295, 8, 5, 3)),
     ("panel_split_score_1255_6-2-2.jpg", RoundPerformance(1255, 6, 2, 2)),
+    # 2026-10-31 15:37: doubled, the comma of this 1,210 read as a digit, booked at 13210.
+    ("panel_comma_score_1210_7-4-2.jpg", RoundPerformance(1210, 7, 4, 2)),
     ("podium.jpg", None),
     ("scoreboard_a.jpg", None),
     ("scoreboard_b.jpg", None),

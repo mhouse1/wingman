@@ -250,7 +250,7 @@
         "type": "grafana-postgresql-datasource",
         "uid": "wingman-pg"
       },
-      "description": "Every read round at the time it ended. Wingman's own rounds are dots, one colour per account (main is `make r`; no account, a round rebuilt from a log that names none), with the mean of their last $window read rounds over all accounts (blue line); rounds with a manual takeover are orange, with their own moving average. The operator expects the takeover rounds to score higher, and the two lines to close as wingman improves (2026-10-29).",
+      "description": "Every read round at the time it ended. Wingman's own rounds are dots, one colour per account (no account, a round rebuilt from a log that names none), with the mean of their last $window read rounds over all accounts (blue line); rounds with a manual takeover are orange, with their own moving average. The operator expects the takeover rounds to score higher, and the two lines to close as wingman improves (2026-10-29).",
       "gridPos": {
         "x": 0,
         "y": 4,
@@ -305,7 +305,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "main"
+              "options": "mobius1"
             },
             "properties": [
               {
@@ -320,7 +320,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "acct1"
+              "options": "mobius0"
             },
             "properties": [
               {
@@ -335,7 +335,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "acct2"
+              "options": "mobius2"
             },
             "properties": [
               {
@@ -350,7 +350,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "acct3"
+              "options": "mobius3"
             },
             "properties": [
               {
@@ -555,6 +555,70 @@
       "options": {}
     },
     {
+      "id": 10,
+      "title": "Wingman by jet",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "wingman-pg"
+      },
+      "description": "Wingman's own rounds by the jet on the lobby as PLAY was clicked (ADR 167), the best mean score first. Kills, deaths and assists are per round. ± 95% is the margin on the mean: trust a gap between two jets only when their ranges do not overlap. A jet with under 10 read rounds comes after the rest, because so few prove little. A jet can fly on several accounts; narrow to one with the tags box. Rounds flown before 2026-10-31 have no jet recorded.",
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wingman-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "SELECT coalesce(tags->>'jet', 'not recorded') AS \"Jet\",\n       count(*) AS \"Rounds flown\",\n       count(score) AS \"Rounds read\",\n       round(avg(score)) AS \"Mean score\",\n       round(1.96 * stddev_samp(score) / sqrt(count(score))) AS \"± 95%\",\n       percentile_cont(0.5) WITHIN GROUP (ORDER BY score) AS \"Median score\",\n       round(avg(kills), 1) AS \"Kills\",\n       round(avg(deaths), 1) AS \"Deaths\",\n       round(avg(assists), 1) AS \"Assists\"\nFROM rounds\nWHERE $__timeFilter(ended_at) AND manual_takeovers = 0\n  AND tags @> ${tags:sqlstring}::jsonb\nGROUP BY tags->>'jet'\nORDER BY tags->>'jet' IS NULL, count(score) < 10, \"Mean score\" DESC NULLS LAST"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Mean score"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "basic",
+                  "valueDisplayMode": "text"
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              },
+              {
+                "id": "min",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "options": {}
+    },
+    {
       "id": 3,
       "title": "${aggregate:text} of $metric per $granularity",
       "type": "timeseries",
@@ -565,7 +629,7 @@
       "description": "The chosen aggregate over every read round that ended in each period (America/New_York). An unread round adds nothing; Rounds per period counts it.",
       "gridPos": {
         "x": 0,
-        "y": 22,
+        "y": 30,
         "w": 12,
         "h": 9
       },
@@ -606,7 +670,7 @@
       "description": "Rounds read and not read in each period; together, the rounds flown.",
       "gridPos": {
         "x": 12,
-        "y": 22,
+        "y": 30,
         "w": 12,
         "h": 9
       },
@@ -651,7 +715,7 @@
       "description": "One row per $granularity: rounds flown and read, and the sum, mean, median, minimum and maximum of $metric over the read rounds.",
       "gridPos": {
         "x": 0,
-        "y": 31,
+        "y": 39,
         "w": 16,
         "h": 10
       },
@@ -682,10 +746,10 @@
         "type": "grafana-postgresql-datasource",
         "uid": "wingman-pg"
       },
-      "description": "Each tag key and value among the rounds in range, with its count of rounds. Filter with the tags box, for example {\"account\": \"acct1\"}.",
+      "description": "Each tag key and value among the rounds in range, with its count of rounds. Filter with the tags box, for example {\"account\": \"mobius0\"}.",
       "gridPos": {
         "x": 16,
-        "y": 31,
+        "y": 39,
         "w": 8,
         "h": 10
       },

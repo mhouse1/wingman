@@ -2,7 +2,9 @@
 
 import logging
 import threading
+from datetime import datetime, time
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -10,6 +12,7 @@ import pytest
 import yaml
 
 from wingman import squadron_ranking as sr
+from wingman.config_schema import schema_default, validate_config
 from wingman.crop_region import CropCoords
 from wingman.squadron_ranking import (Navigation, RowRead, SquadronRanking, SquadronReading,
                                       parse_count, read_row)
@@ -243,17 +246,90 @@ def test_the_navigation_has_no_way_to_press_escape():
 
 # -- the schedule ------------------------------------------------------------------
 
+QUEUE_AT = "09:38:30"
+
+
+def _morning(hour, minute, second=0, day=31):
+    return datetime(2026, 10, day, hour, minute, second)
+
+
+def _next_morning(hour, minute, second=0):
+    return datetime(2026, 11, 1, hour, minute, second)
+
+
 class _Steps:
-    def __init__(self):
-        self.t = 0.0
+    def __init__(self, t):
+        self.t = t
 
     def __call__(self):
         return self.t
 
 
-def test_a_reading_is_due_at_the_first_lobby_and_every_period_after_an_attempt():
-    clock = _Steps()
-    schedule = SquadronRanking(True, 3600.0, clock)
+class _Read:
+    def run(self):
+        return SquadronReading(659, 358046), "read"
+
+
+class _GaveUp:
+    def run(self):
+        return None, "the menu did not open"
+
+
+def test_the_reading_queues_at_the_time_of_day_and_waits_for_a_lobby():
+    clock = _Steps(_morning(4, 39))
+    schedule = SquadronRanking(True, QUEUE_AT, clock)
+    assert not schedule.due() and not schedule.holds_play(), "a new session does not read"
+    clock.t = _morning(9, 38, 29)
+    assert not schedule.due()
+    clock.t = _morning(9, 38, 30)
+    assert schedule.due() and schedule.holds_play()
+    clock.t = _morning(9, 44, 10)
+    assert schedule.due(), "it stays queued while the round in progress ends"
+
+
+@pytest.mark.parametrize("navigation", [_Read(), _GaveUp()], ids=["read", "gave up"])
+def test_one_navigation_a_day_read_or_not(navigation):
+    """2026-10-31 02:17 also read back to back in one lobby, and no round would
+    have started: PLAY must go ahead after the navigation."""
+    clock = _Steps(_morning(9, 38, 30))
+    schedule = SquadronRanking(True, QUEUE_AT, _Steps(_morning(4, 39)))
+    schedule.now = clock
+    schedule.start(navigation, lambda *a: None).join(5)
+    assert not schedule.due() and not schedule.holds_play()
+    for later in (_morning(9, 38, 31), _morning(23, 59, 59), _next_morning(9, 38, 29)):
+        clock.t = later
+        assert not schedule.due()
+    clock.t = _next_morning(9, 38, 30)
+    assert schedule.due()
+
+
+@pytest.mark.parametrize("started", [_morning(9, 38, 30), _morning(9, 38, 31), _morning(20, 0)])
+def test_a_session_started_after_the_time_waits_for_the_next_day(started):
+    """Nothing is saved between sessions, so this is what keeps a restart from
+    reading a second time in a day."""
+    clock = _Steps(started)
+    schedule = SquadronRanking(True, QUEUE_AT, clock)
+    assert not schedule.due()
+    clock.t = _next_morning(9, 38, 30)
+    assert schedule.due()
+
+
+def test_a_session_flying_through_the_time_for_days_reads_once_each_day():
+    clock = _Steps(_morning(8, 0))
+    schedule = SquadronRanking(True, QUEUE_AT, clock)
+    reads = []
+    for moment in (_morning(9, 0), _morning(9, 40), _morning(9, 50), _next_morning(9, 0),
+                   _next_morning(9, 45), _next_morning(9, 55)):
+        clock.t = moment
+        if schedule.due():
+            schedule.start(_Read(), lambda *a: None).join(5)
+            reads.append(moment)
+    assert reads == [_morning(9, 40), _next_morning(9, 45)]
+
+
+def test_the_schedule_while_a_navigation_runs():
+    schedule = SquadronRanking(True, QUEUE_AT, _Steps(_morning(9, 0)))
+    schedule.now = _Steps(_morning(9, 40))
     assert schedule.due() and schedule.holds_play()
     done = threading.Event()
 
@@ -263,26 +339,6 @@ def test_a_reading_is_due_at_the_first_lobby_and_every_period_after_an_attempt()
             return None, "the lobby is not on screen"
     schedule.start(_Nav(), lambda *a: done.set()).join(5)
     assert done.is_set() and not schedule.active()
-    assert not schedule.due(), "a navigation that gave up counts as the attempt"
-    schedule.lobby_left()
-    clock.t = 3599.0
-    assert not schedule.due()
-    clock.t = 3600.0
-    assert schedule.due()
-
-
-def test_every_lobby_means_once_a_lobby_not_back_to_back():
-    """2026-10-31 02:17: with every_min 0 the leaderboard was read at 02:17:50 and
-    opened again at 02:17:55, in the same lobby, and no round would have started."""
-    schedule = SquadronRanking(True, 0.0, _Steps())
-
-    class _Nav:
-        def run(self):
-            return SquadronReading(659, 358046), "read"
-    schedule.start(_Nav(), lambda *a: None).join(5)
-    assert not schedule.due() and not schedule.holds_play(), "PLAY goes ahead after a reading"
-    schedule.lobby_left()
-    assert schedule.due()
 
 
 def test_play_stays_held_from_due_through_the_start_of_the_navigation():
@@ -291,12 +347,16 @@ def test_play_stays_held_from_due_through_the_start_of_the_navigation():
     seen = []
 
     class _Clock:
-        """The attempt's time is taken only once the navigation counts as active."""
+        """The next day's reading is booked only once the navigation counts as active."""
+        armed = False
 
         def __call__(self):
-            seen.append(schedule.active())
-            return 0.0
-    schedule = SquadronRanking(True, 3600.0, _Clock())
+            if self.armed:
+                seen.append(schedule.active())
+            return _morning(9, 40)
+    clock = _Clock()
+    schedule = SquadronRanking(True, QUEUE_AT, _Steps(_morning(9, 0)))
+    schedule.now = clock
     release = threading.Event()
 
     class _Nav:
@@ -304,6 +364,7 @@ def test_play_stays_held_from_due_through_the_start_of_the_navigation():
             release.wait(5)
             return None, "x"
     assert schedule.holds_play()
+    clock.armed = True
     thread = schedule.start(_Nav(), lambda *a: None)
     assert schedule.holds_play()
     release.set()
@@ -312,12 +373,13 @@ def test_play_stays_held_from_due_through_the_start_of_the_navigation():
 
 
 def test_off_is_never_due():
-    schedule = SquadronRanking(False, 0.0, _Steps())
+    schedule = SquadronRanking(False, QUEUE_AT, _Steps(_morning(9, 0)))
+    schedule.now = _Steps(_morning(9, 40))
     assert not schedule.due() and not schedule.holds_play()
 
 
 def test_a_navigation_that_raises_still_ends_and_reports():
-    schedule = SquadronRanking(True, 60.0, _Steps())
+    schedule = SquadronRanking(True, QUEUE_AT, _Steps(_morning(9, 0)))
     answers = []
 
     class _Nav:
@@ -377,9 +439,8 @@ def test_play_and_ready_are_not_clicked_once_a_navigation_runs():
     assert guard < click and "handled = True" in branch
 
 
-def test_main_holds_play_while_due_or_running_and_resets_each_lobby():
+def test_main_holds_play_while_due_or_running():
     assert "pending=lambda: (squadron.holds_play() and" in MAIN_SRC
-    assert "squadron.lobby_left()" in MAIN_SRC
 
 
 def test_the_escape_loop_and_the_deferred_exit_wait_for_the_errand():
@@ -443,6 +504,39 @@ def test_every_crop_the_navigation_uses_is_calibrated_and_it_ships_off():
     cfg = yaml.safe_load(Path("wingman/config.yaml").read_text(encoding="utf-8"))
     assert set(sr.CROPS) <= set(cfg["crops"])
     assert cfg["squadron_ranking"]["enabled"] is False
+
+
+def _schedule_from(section, live=True):
+    from wingman.main import _squadron_ranking
+    analyzer = SimpleNamespace(crops=dict.fromkeys(sr.CROPS))
+    return _squadron_ranking({"squadron_ranking": section}, analyzer, live, logging.getLogger("t"))
+
+
+def test_the_queue_time_ships_at_the_operators_time_and_is_a_string():
+    """Unquoted, YAML takes a time from 10:00:00 up for a number, and the schema
+    then refuses it."""
+    cfg = yaml.safe_load(Path("wingman/config.yaml").read_text(encoding="utf-8"))
+    assert cfg["squadron_ranking"]["queue_at"] == "09:38:30"
+    assert validate_config(cfg) == []
+    assert schema_default("squadron_ranking.queue_at") == "09:38:30"
+    assert _schedule_from({"enabled": True}).queue_at == time(9, 38, 30)
+
+
+def test_the_schedule_takes_its_time_from_the_config_and_runs_live_only():
+    assert _schedule_from({"enabled": True, "queue_at": "10:05:00"}).queue_at == time(10, 5)
+    assert _schedule_from({"enabled": True}).enabled is True
+    assert _schedule_from({"enabled": True}, live=False).enabled is False
+    assert _schedule_from({"enabled": False}).enabled is False
+
+
+def test_a_queue_time_that_is_no_time_of_day_stops_the_start():
+    with pytest.raises(ValueError):
+        _schedule_from({"enabled": True, "queue_at": "9:99"})
+
+
+def test_every_min_is_gone_so_a_stale_override_is_refused():
+    assert any("every_min" in problem
+               for problem in validate_config({"squadron_ranking": {"every_min": 0}}))
 
 
 # -- real OCR on the operator's screenshots (2026-10-31) -----------------------------

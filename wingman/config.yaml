@@ -154,6 +154,12 @@ crops:
     coords:
     - [0.937, 0.925]
     - [0.995, 0.98]
+  # The selected jet's label on the lobby (wingman/jet_name.py, ADR 167). Wide, as
+  # the label is centred: the reader cuts it at the trophy icon.
+  JET_NAME:
+    coords:
+    - [0.38, 0.198]
+    - [0.64, 0.2325]
   PERF_SCORE:
     coords:
     - [0.5208, 0.06]
@@ -1157,16 +1163,23 @@ round_performance:
 
 # Design 018 Phase 3, ADR 166: the squadron's rank and trophies, read off the
 # game's squadron leaderboard in the lobby between rounds. Off here; the operator
-# switches it on per machine in config.local.yaml. A reading is due at the first
-# lobby and every_min after the last attempt; each step of the navigation waits
-# step_timeout_s for its screen. `squadron` is the name in our row. `capture`
-# keeps the frame of each reading, and the last frame of a navigation that gave
-# up, in test_screenshots/squadron_ranking/.
+# switches it on per machine in config.local.yaml. One reading a day: queue_at,
+# local time and quoted (YAML takes an unquoted 10:38:30 for a number), queues it
+# and the next lobby takes it. Each step of the navigation waits step_timeout_s
+# for its screen. `squadron` is the name in our row. `capture` keeps the frame of
+# each reading, and the last frame of a navigation that gave up, in
+# test_screenshots/squadron_ranking/.
 squadron_ranking:
   enabled: false
-  every_min: 60
+  queue_at: "09:38:30"
   step_timeout_s: 8.0
   squadron: Mobius Squadron
+  capture: true
+
+# ADR 167: each round's jet, read off the lobby as PLAY is clicked. `capture` keeps
+# the label each name was read from, and the whole frame when none came of it, in
+# test_screenshots/jet_name/.
+jet_name:
   capture: true
 
 # Design 018: the score dashboard, a Grafana and Postgres stack on VEDA fed from

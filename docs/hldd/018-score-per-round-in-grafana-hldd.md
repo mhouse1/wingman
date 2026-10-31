@@ -25,9 +25,11 @@ dashboard, for example the sum of score per month or the mean per week. The desi
    - a marker on every chart for each change that can affect play, from the change log;
    - all of it narrowed by a tag filter, when one is set.
 
-The dashboard pools every round, whichever account or jet flew it (operator, 2026-10-28). Each
-round also carries tags, so that a query can filter on them: the account it flew on from the
-start, and the jet once wingman records it. The score needs no change to wingman's runtime,
+The dashboard pools every round, whichever account or jet flew it (operator, 2026-10-28), except
+Wingman by jet, which compares the jets (operator, 2026-10-31,
+[ADR 167](../adr/167-read-each-rounds-jet-from-the-lobby.md)). Each round also carries tags, so that
+a query can filter on them: the account it flew on, and from 2026-10-31 its jet. The score needs no
+change to wingman's runtime,
 because the data is already in the stats files and logs. One change to wingman came first,
 separately: the panel reader missed a third of the rounds, mostly the worse ones. Its cause was
 found and the reader fixed on 2026-10-29 (Phase 0, see Rollout and [Action Item 005](../action-item/005-round-performance-reader-and-hldd-018-corrections.md)).
@@ -127,9 +129,11 @@ Two properties of this data shape the design:
 
 ## Non-goals
 
-- **Panels per account or jet.** It does not matter which account or jet flew a round (operator,
-  2026-10-28), so the panels pool all rounds. Tags make a filter possible in any query (see Tags),
-  but no panel splits by them.
+- **Panels per account.** It does not matter which account flew a round (operator, 2026-10-28), so
+  the panels pool all rounds. Tags make a filter possible in any query (see Tags). The jet was a
+  non-goal too until the operator asked to compare jets on 2026-10-31
+  ([ADR 167](../adr/167-read-each-rounds-jet-from-the-lobby.md)); Wingman by jet is the one panel
+  that splits by a tag.
 - **Live updates within a session.** The stats file is written at session end, so a session's
   rounds appear after it ends.
 - **Other hosts.** The dashboard runs only on VEDA, and rounds flown anywhere else are not
@@ -283,10 +287,13 @@ Each round carries tags: string keys with string values, such as `account` and `
 one `jsonb` column, so a new key needs no change to the table, the ingest or the dashboard.
 
 - **Where they come from.** The ingest builds each round's tags from its stats file.
-  - `account` comes from the `_acctN` suffix of the session's `run_id`, which `make r1` to `r3`
-    set through `WINGMAN_ACCOUNT`. A session with no suffix flew `main`, the prefix `make r`
-    flies, so there are four accounts: `main`, `acct1`, `acct2` and `acct3` (operator,
-    2026-10-29). Score per round draws each in its own colour.
+  - `account` is the pilot who logs in on the session's Wine prefix. The `_acctN` suffix of the
+    `run_id`, set through `WINGMAN_ACCOUNT`, names the prefix, and a session with no suffix flew
+    the main prefix. The ingest turns that into the pilot's name (`ACCOUNT_NAMES`, operator,
+    2026-10-31): `acct1` is `mobius0`, the main prefix `mobius1`, `acct2` `mobius2` and `acct3`
+    `mobius3`. The name's number is the make target's (`make r` flies mobius0, `make r1` mobius1),
+    but the tag stays with the prefix, so sessions from before the Makefile swapped `r` and `r1`
+    keep their pilot. Score per round draws each in its own colour.
   - A round rebuilt from a log gets `source: log`, and the `account` of the run_id that
     PerformanceTracker's `session data written to …run_<id>.json` line names, the one place a log
     names it. A log cut off before that line has no `account`; Score per round draws its rounds as
@@ -294,12 +301,13 @@ one `jsonb` column, so a new key needs no change to the table, the ingest or the
     stats file but did write that line, and its 12 rounds were first drawn as "no account".
   - Any `tags` object in the stats file is copied through. One at the top of the file covers the
     whole session; one in a mission record covers a value that can change between rounds, and
-    wins over the session's. Wingman writes neither yet. Recording the jet means writing `jet`
-    into one of them, and nothing downstream changes.
+    wins over the session's. Wingman writes `jet` into each mission record
+    ([ADR 167](../adr/167-read-each-rounds-jet-from-the-lobby.md)). A round rebuilt from a log takes
+    it from the log's `JET NAME:` line.
 - **Past rounds.** The ingest re-reads every stats file and updates rows that already exist, so a
   new tag also reaches past rounds whose files are still on VEDA.
 - **In a query.** `WHERE tags->>'jet' = 'j20'` filters on one tag, and
-  `WHERE tags @> '{"account": "acct1", "jet": "j20"}'` on several at once. The GIN index serves
+  `WHERE tags @> '{"account": "mobius0", "jet": "j20"}'` on several at once. The GIN index serves
   the second form.
 - **On the dashboard.** The `tags` variable holds the tags to match, as JSON. Its default, `{}`,
   matches every round, and every panel's query adds `AND tags @> ${tags:sqlstring}::jsonb`.
@@ -307,7 +315,7 @@ one `jsonb` column, so a new key needs no change to the table, the ingest or the
   the box can end the string and run as SQL, and malformed JSON shows as an error on the panels
   instead (check the format in the pinned Grafana version; `${tags:raw}` inside quotes did
   neither, and only the read-only role limited the damage). Typing
-  `{"account": "acct1"}` narrows every panel to that account. The Tags panel lists each key and
+  `{"account": "mobius0"}` narrows every panel to that account. The Tags panel lists each key and
   value among the rounds in range, so the keys in use are easy to find. A dropdown for a key used
   often can be added later as an ordinary dashboard variable.
 
@@ -356,7 +364,8 @@ Wingman flies in Mobius Squadron, tag `[ISAF]` ([Job Aid 013](../job-aids/013-jo
   the list, rank and trophies, and goes back with the page's back arrow. The navigation must:
   - run only in the lobby between rounds: not during matchmaking, in a party or with an invite
     open, and not when a stop is pending;
-  - run at most once an hour (`squadron_ranking.every_min`, a starting value);
+  - run at most once a day: `squadron_ranking.queue_at` (09:38:30 local time, operator
+    2026-10-31) queues a reading, and the next lobby takes it;
   - return to the lobby every time, by the screens' own controls. It must never press ESC, which
     opens Exit to Desktop on the lobby;
   - hold off wingman's stall handling while it runs: the lobby quick-scan, stall recovery (which
@@ -527,6 +536,7 @@ reading in each period instead (see Squadron ranking).
 | Periods | Table | One row per period: rounds flown, rounds read, sum, mean, median, minimum and maximum |
 | Tags | Table | Each tag key and value among the rounds in range, with its count of rounds |
 | Squadron rank per reading and Squadron trophies per reading (Phase 3, operator 2026-10-31) | Time series | One line with a dot at each reading, under Score per round. The figures are the squadron's, so the account does not matter and the tags box does not apply |
+| Wingman by jet (operator 2026-10-31, [ADR 167](../adr/167-read-each-rounds-jet-from-the-lobby.md)) | Table | Wingman's own rounds per jet, the best mean score first, with the margin on each mean. A jet with under 10 read rounds ranks after the rest, and rounds with no jet come last as `not recorded` |
 | Squadron now (Phase 3, operator 2026-10-31) | Stat | The latest reading in the time range: the squadron's rank and trophies, and how long ago it was read |
 
 Every time panel shows the change markers (see Change markers). The wingman version stays in each
@@ -616,7 +626,7 @@ followed by a check that `grafana/.env` exists.
 | `grafana/dashboards/score-per-round.json` | The dashboard |
 | `scripts/round-scores.py` | The ingest, and the `check` that the targets run first |
 | `tests/test_round_scores.py` | V1 |
-| `wingman/config.yaml`, `wingman/config_schema.py` | `score_dashboard.enabled`, shipped `false`, and its schema default. From Phase 3, `squadron_ranking.enabled` (shipped `false`) and `squadron_ranking.every_min` |
+| `wingman/config.yaml`, `wingman/config_schema.py` | `score_dashboard.enabled`, shipped `false`, and its schema default. From Phase 3, `squadron_ranking.enabled` (shipped `false`) and `squadron_ranking.queue_at` |
 | `wingman/squadron_ranking.py`, `wingman/main.py`, `wingman/analyzer.py` (Phase 3, ADR 166) | The lobby navigation and the leaderboard reader, with their `SQ_*` crops in `wingman/config.yaml` |
 | `Makefile`, `.gitignore` | The three targets; `grafana/.env` |
 
@@ -633,7 +643,7 @@ Everything in this table is tracked, except `grafana/.env`. The switch is turned
     - Figures are empty when the panel was not read.
     - `ended_at` is the start plus the duration.
     - A file without `round_performance` gives no rows.
-  - **Tags.** `account` comes from the `run_id` suffix, and is `main` without one. Session and
+  - **Tags.** `account` is the pilot of the `run_id` suffix's prefix, `mobius1` without one. Session and
     mission `tags` are copied through, with the mission's value winning.
   - **Idempotence.** The same file read twice gives the same keys.
   - **The log fallback.** A log with `ROUND PERFORMANCE` lines and no stats file gives one row per
@@ -725,7 +735,7 @@ Everything in this table is tracked, except `grafana/.env`. The switch is turned
   and prints a failed ingest without failing; the recipe kept a failing and a passing command's
   exit status. V4 waits for the first session started after it: a running `make` keeps the recipe
   it began with.
-- **Phase 3, the squadron ranking.** Built 2026-10-31, in live trial: the navigation is
+- **Phase 3, the squadron ranking.** Live 2026-10-31, V5 met (10 of 10 readings correct): the navigation is
   [ADR 166](../adr/166-read-the-squadron-leaderboard-from-the-lobby.md). Wingman reads the rank and
   the trophies and records them, the ingest loads them into `squadron_rankings` (which gains a
   `trophies` column), and the squadron charts draw both. Validation V5 and ADR 166's.
@@ -734,7 +744,7 @@ Everything in this table is tracked, except `grafana/.env`. The switch is turned
 
 | Risk | Mitigation |
 |------|------------|
-| A misread panel enters as a reading. The reader needs two frames that read alike, so only a repeated misread gets through | It stands out on the per-round panel; an outlier rule is open question 2 |
+| A misread panel enters as a reading. The reader needs two frames that read alike, so only a repeated misread gets through. Two have: a 1,255 on 2026-10-30 and a 1,210 on 2026-10-31 | It stands out on the per-round panel, and the saved frame shows the true figure. Both were fixed at the reader ([Action Item 005](../action-item/005-round-performance-reader-and-hldd-018-corrections.md)); an outlier rule is open question 2 |
 | Unread rounds are the worse ones (more deaths), so the mean overstates wingman and a sum is short | Phase 0 fixed the reader on 2026-10-29 (V0 in progress); for the sessions before it, rounds flown and read stay beside every aggregate |
 | Sums move with the hours flown | Rounds flown are shown beside every aggregate; compare means |
 | Small periods mislead (standard deviation 212 per round) | Counts beside means, the moving average, and "Reading the dashboard" |
@@ -800,7 +810,9 @@ Everything in this table is tracked, except `grafana/.env`. The switch is turned
 1. **Answered** (operator, 2026-10-28). A period's summary SUM()s all the data within the period,
    with no estimate for the unread rounds (see Period summaries).
 2. **Answered** (operator, 2026-10-29). Kept as read, with no outlier rule: all 32 readings checked
-   against their saved panels on 2026-10-29 were correct (Action Item 005).
+   against their saved panels on 2026-10-29 were correct (Action Item 005). Two misreads came
+   after that, on 2026-10-30 and 2026-10-31; both were fixed at the reader and corrected by hand,
+   and the rule stands.
 3. **Answered** (2026-10-28). Yes: the ingest rebuilds a session without a stats file from its log
    (see The ingest).
 4. **Answered** (2026-10-29). On 2026-10-28 00:49 the click-through logged 28 readings against 24

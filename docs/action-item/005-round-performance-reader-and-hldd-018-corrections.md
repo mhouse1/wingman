@@ -289,6 +289,20 @@ figure was corrected by hand to 1,255 with a `corrected` note and reloaded. Left
 comma read as a digit inside one box (`13` and `255` would read 13,255); the read line does
 not log the OCR text, so the next one would need its saved frame.
 
+**2026-10-31, the second wrong reading: a 1,210 booked as 13210.** The operator found it on Score
+per round (account 2, a taken-over round that ended 15:37:52). Its saved frame
+(`20261031_153753_p1_f1_read-13210-7-4-2.jpg`) shows **1,210** and 7/4/2. Cause (measured): the
+case left uncaught above, and doubling the score row is what lets it happen. Re-read, the doubled
+row gives `210` at confidence 1.0 and, where the "1," stands, a box of `12` at 0.19; the live read
+made that box `13` (the saved frame is a JPEG). At its own size the same row gives `1,210`. Over
+all 383 saved panel frames re-read on the CPU reader, the doubled row split 10 of the 28 scores of
+1,000 or more. At its own size the row split none and read every score right, and found no text
+only in the 36 frames of a lone "0", the case doubling was added for. Both wrong readings came
+from the doubled read. Fix: the row is read at its own size and doubled only when that finds
+nothing, and a score of more than three digits must carry its separator, as all 28 do. The frame
+is in the corpus. The stats file's figure was corrected by hand to 1,210 with a `corrected` note
+and reloaded.
+
 ### AI-005-3 — Book no unread round for a second click-through
 
 **Why.** The 18 readings that belong to no round (Where this starts) count as unread rounds in the
@@ -376,4 +390,7 @@ built.
 `${tags:sqlstring}::jsonb` in the Tags section and all three SQL sketches; the read-only role's
 future grants name the superuser that creates the tables; Phase 2 and V4 say a missed ingest is
 made up by the next; the log fallback reads the repeated daylight-time hour as its first
-occurrence. Open: the Phase 3 split, the operator's decision.
+occurrence. The Phase 3 split is settled too (2026-10-31): the operator showed the route and asked
+for it built, and the navigation has its own ADR,
+[ADR 166](../adr/166-read-the-squadron-leaderboard-from-the-lobby.md). `squadron_rankings` stays in
+`grafana/schema.sql`, because Phase 3 now fills it.

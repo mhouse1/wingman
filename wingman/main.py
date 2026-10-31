@@ -47,6 +47,8 @@ from .mission_stats import MissionStatsTracker
 from .round_performance import (CAPTURE_DIR as ROUND_PERFORMANCE_DIR, KDA_CROP, SCORE_CROP,
                                 describe_read, frame_tag, read_panel, read_round,
                                 save_frame as save_round_frame, unread_reason)
+from . import jet_name
+from .jet_name import read_jet
 from . import squadron_ranking
 from .squadron_ranking import Navigation as SquadronNavigation, SquadronRanking
 from .performance import PerformanceTracker
@@ -199,8 +201,34 @@ def _squadron_ranking(cfg, analyzer, live: bool, logger) -> SquadronRanking:
     missing = [c for c in squadron_ranking.CROPS if c not in analyzer.crops]
     if enabled and missing:
         logger.warning("SQUADRON RANKING: off — crops not calibrated: %s", ", ".join(missing))
-    every_min = float(section.get("every_min", schema_default("squadron_ranking.every_min")))
-    return SquadronRanking(enabled and live and not missing, every_min * 60.0)
+    schedule = SquadronRanking(enabled and live and not missing, str(section.get(
+        "queue_at", schema_default("squadron_ranking.queue_at"))))
+    if schedule.enabled:
+        logger.info("SQUADRON RANKING: next reading queues at %s (ADR 166)", schedule.next_queue)
+    return schedule
+
+
+def _save_jet_frame(frame, name: str) -> bool:
+    return save_round_frame(jet_name.CAPTURE_DIR, frame, name)
+
+
+def _note_jet(read, frame, logger, record, save_frame, stamp=None) -> None:
+    """Log and book the jet read off the lobby (ADR 167), and keep what it was
+    read from: the label, or the whole frame when no name came of it."""
+    stamp = stamp or time.strftime("%Y%m%d_%H%M%S")
+    name = None if read is None else read.name
+    if name is not None:
+        logger.info("\033[93m✈️ JET NAME: %s\033[0m", name)
+        record(name)
+    else:
+        logger.warning("JET NAME: not read — %s", "no OCR" if read is None else (
+            f"OCR read {read.text!r}" if read.text else "no trophy icon on the label"))
+    if not save_frame:
+        return
+    if name is not None:
+        save_frame(read.band, f"{stamp}_{jet_name.file_stem(name)}")
+    else:
+        save_frame(frame, f"{stamp}_unread")
 
 
 def _save_squadron_frame(frame, name: str) -> bool:
@@ -1527,6 +1555,23 @@ def main():
 
     analyzer.subscribe(GameEvent.FSM_TRANSITION, _stats_fsm_cb, name="mission_stats")
 
+    # ADR 167: each round's jet, off the frame PLAY or READY was clicked on. Live
+    # only, as the round's score. The read leaves the quick-scan's thread at once,
+    # so the click does not wait for it.
+    if not replay_mode and not capture_mode and jet_name.CROP in analyzer.crops:
+        jet_capture = bool((cfg.get("jet_name") or {}).get(
+            "capture", schema_default("jet_name.capture")))
+
+        def _read_jet(frame):
+            _note_jet(analyzer.run_ocr(read_jet, frame, analyzer.crops[jet_name.CROP]), frame,
+                      logger, stats_tracker.record_jet, jet_capture and _save_jet_frame)
+
+        def _on_play_click_read_jet(_crop, frame):
+            stats_tracker.record_jet(None)
+            threading.Thread(target=_read_jet, args=(frame,), daemon=True,
+                             name="jet-name").start()
+        analyzer.subscribe(GameEvent.LOBBY_PLAY_CLICK, _on_play_click_read_jet, name="jet_name")
+
     # Operator, 2026-10-26: each round's score and K/D/A, read off the
     # PERFORMANCE panel during the end-of-round click-through and totalled in
     # the session summary. Live only, as the kill card: a replay's end screens
@@ -2016,8 +2061,6 @@ def main():
                     lobby_escape_thread.start()
                 else:
                     _stop_lobby_escape_loop()
-                if new_game_state != GameState.GAME_LOBBY:
-                    squadron.lobby_left()     # ADR 166: one reading per lobby at most
                 waiting_fallback.on_state_change(new_game_state, prev_game_state)
                 enemy_presence.on_state_change(new_game_state, prev_game_state)
                 unknown_anomaly.on_state_change(new_game_state, prev_game_state)

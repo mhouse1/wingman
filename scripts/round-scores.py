@@ -78,6 +78,9 @@ _RUN_ID_RE = re.compile(r"^\d{8}_\d{6}")
 # session the shutdown watchdog ends later still has it (2026-10-30 07:25, acct2).
 _RUN_FILE = "session data written to"
 _RUN_FILE_RE = re.compile(r"session data written to \S*run_(\d{8}_\d{6}\w*)\.json")
+# The jet read off the lobby for the next round (ADR 167). "not read" has no match.
+_JET_NAME = "JET NAME: "
+_JET_NAME_RE = re.compile(r"JET NAME: ([A-Z0-9][A-Z0-9 ./-]*)$")
 _RANKING = "SQUADRON RANKING: rank"
 _RANKING_RE = re.compile(r"SQUADRON RANKING: rank (\d+), trophies ([\d,]+)")
 RANKING_COLUMNS = ("run_id", "read_at", "rank", "trophies", "tags")
@@ -151,16 +154,22 @@ class Ranking:
 
 # -- rows from a stats file -------------------------------------------------------
 
-# The account `make r` flies: the main Wine prefix, whose run_id has no suffix.
+# The main Wine prefix, whose run_id has no suffix.
 MAIN_ACCOUNT = "main"
+# The pilot who logs in on each prefix (operator, 2026-10-31). A run_id names the
+# prefix, not the make target, so this holds on both sides of the Makefile's swap
+# of r and r1. The numbers do not line up: acct1 is mobius0, the main prefix mobius1.
+ACCOUNT_NAMES = {"acct1": "mobius0", MAIN_ACCOUNT: "mobius1", "acct2": "mobius2",
+                 "acct3": "mobius3"}
 
 
 def account_of(run_id: str) -> str:
-    """The account a session flew on: from the `_acctN` suffix `make r1` to `r3`
-    give its run_id, else `main`, the prefix `make r` flies (operator, 2026-10-29:
-    four accounts, r, r1, r2, r3)."""
+    """The pilot a session flew as, from its run_id: the `_acctN` suffix names the
+    prefix, and no suffix is the main prefix. A prefix ACCOUNT_NAMES does not list
+    keeps its own tag."""
     m = _ACCOUNT_RE.search(run_id)
-    return m.group(1) if m else MAIN_ACCOUNT
+    prefix = m.group(1) if m else MAIN_ACCOUNT
+    return ACCOUNT_NAMES.get(prefix, prefix)
 
 
 def _string_tags(tags) -> dict:
@@ -231,23 +240,31 @@ def rows_from_log(lines, run_id: str) -> "list[Round]":
     """One row per `ROUND PERFORMANCE` line of a log, read or not, at the line's
     time, tagged `source: log`, and with the `account` of the run_id that
     PerformanceTracker's line names; a log cut off before that line names no
-    account (a run_id without a suffix is `main`). A line with no
+    account (a run_id without a suffix is the main prefix). A line with no
     `Game state: … → GAME_END_B` line since the last GAME_END_B exit, or since the
     last line counted, is not a round: a second click-through of the same end
     screens logged it (Design 018, open question 4). Each `→ GAME_BATTLE_MANUAL`
-    line in a round is one of its manual takeovers (operator, 2026-10-29)."""
+    line in a round is one of its manual takeovers (operator, 2026-10-29). A
+    `JET NAME:` line gives the rounds after it their `jet`, until the next one
+    (ADR 167)."""
     rows = []
     at_end = False
     takeovers = 0
     account = None
+    jet = None
     for raw in lines:
         if ("GAME_END_B" not in raw and "ROUND PERFORMANCE" not in raw
-                and "GAME_BATTLE_MANUAL" not in raw and _RUN_FILE not in raw):
+                and "GAME_BATTLE_MANUAL" not in raw and _RUN_FILE not in raw
+                and _JET_NAME not in raw):
             continue
         line = _ANSI_RE.sub("", raw)
         named = _RUN_FILE_RE.search(line)
         if named:
             account = account_of(named.group(1))
+            continue
+        if _JET_NAME in line:
+            read_jet = _JET_NAME_RE.search(line)
+            jet = read_jet.group(1) if read_jet else None
             continue
         if _TO_MANUAL_RE.search(line):
             takeovers += 1
@@ -267,8 +284,8 @@ def rows_from_log(lines, run_id: str) -> "list[Round]":
             continue
         at_end = False
         figures = tuple(int(g) for g in read.groups()) if read else (None, None, None, None)
-        rows.append(Round(run_id, len(rows), None, when, *figures, None, {"source": "log"},
-                          takeovers))
+        tags = {"source": "log"} | ({"jet": jet} if jet else {})
+        rows.append(Round(run_id, len(rows), None, when, *figures, None, tags, takeovers))
         takeovers = 0
     if account is None:
         return rows

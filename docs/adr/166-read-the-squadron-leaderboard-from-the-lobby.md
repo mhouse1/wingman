@@ -62,10 +62,14 @@ the row only once the page title reads LEADERBOARDS. Each step waits up to
 **D6. Schedule and switch.**
 - The setting is `squadron_ranking.enabled`. It ships `false` and is turned on per machine in
   `config.local.yaml`, like the score dashboard.
-- A reading is due at the first lobby of a session, and `every_min` (60) after the last attempt,
-  read or not, and at most once in a lobby.
-- VEDA sets `every_min` to 0 in `config.local.yaml`: a reading at every lobby, so one point per
-  round on the dashboard (operator, 2026-10-31).
+- One reading a day at most (operator, 2026-10-31). At `squadron_ranking.queue_at`, 09:38:30 local
+  time, a reading is queued. It runs at the next lobby, so a round being flown ends first. A lobby
+  already on screen at that moment takes it at once, because no round is under way.
+- Starting the navigation books the next day's reading, read or not: one that gives up is not
+  tried again that day.
+- Nothing is saved between sessions. A session that starts after `queue_at` waits for the next
+  day's, so a restart cannot read twice in a day. A session that stops with a reading still queued
+  loses it.
 - The navigation runs live only, with every crop calibrated.
 
 **D7. Records.**
@@ -96,8 +100,10 @@ the row only once the page title reads LEADERBOARDS. Each step waits up to
 ## Consequences
 
 - **Time.** Each reading delays the next round by the length of the trip: 6.7 to 12.2 s from
-  `opening` to the PLAY click, median 8.6 s, over the 5 trips of 2026-10-31 02:35 to 02:58. VEDA
-  reads at every lobby, so each round pays that.
+  `opening` to the PLAY click, median 8.2 s, over the 8 trips of 2026-10-31 02:35 to 03:17. One
+  round a day pays that.
+- **Gaps.** A day has no point on the charts if no session is running at `queue_at`, if the session
+  ends before its next lobby, or if that day's navigation gives up.
 - **New risks.**
   - A game update can move the menu or the list. A step whose screen does not come gives up and
     goes back, and the crops are recalibrated with `make calibrate-crop`.
@@ -123,17 +129,21 @@ the row only once the page title reads LEADERBOARDS. Each step waits up to
 - **V4, the open menu.** Not yet seen: whether a second click on the menu button shuts the menu
   (D4).
 - **V5, the dashboard.** The readings show on the two squadron charts and on Squadron now.
+- **V6, the daily schedule.** Not yet seen live. The start of a session logs `next reading queues
+  at`, naming the next 09:38:30. The first `opening the squadron leaderboard` after it comes at the
+  first solo lobby after that time, and it is the only one that day.
 
 ## Trial record
 
 Code: branch `acs-terrain-avoidance` at f286e2a plus the uncommitted ADR 166 work (3598 tests
 passed, 2026-10-31 02:16). Game client: the build the operator's screenshots were taken on
-(2026-10-31 01:44). Readings at every lobby (`every_min` 0 in `config.local.yaml`).
+(2026-10-31 01:44). Readings at every lobby, the schedule of the time (`every_min` 0 in
+`config.local.yaml`; D6 has since replaced it).
 
 | Session | Account | Navigations | Read | Matched the frame by eye | Back in the lobby | Notes |
 |---|---|---|---|---|---|---|
 | 20261031_0217, `make r1` | acct1 | 2 | 2 | 2 of 2 (659, 358,046) | 1 of 1 checked | stopped at 02:18 with `z`: two bugs, below |
-| 20261031_0235, `make r1` | acct1 | 5 so far (to 03:00) | 5 | 5 of 5 | 5 of 5 | with both fixes; running |
+| 20261031_0235, `make r1` | acct1 | 8 | 8 | 8 of 8 | 8 of 8 | with both fixes; stopped with `z` in battle, 03:19 |
 
 **02:17, the first live run.**
 - The first navigation (measured) went lobby, menu, leaderboards, SQUADRONS tab, read, back arrow,
@@ -156,9 +166,27 @@ passed, 2026-10-31 02:16). Game client: the build the operator's screenshots wer
 - The session was stopped with `z` in `GAME_WAITING`, which closes the game at once (the run's own
   error: the press was not made conditional on the state).
 
-**02:35, the second run, with both fixes (measured to 03:00).** Five lobbies, five navigations, one
-each. Every one read, came back by the back arrow, and was followed by the PLAY click and a battle.
-There was no `STILL OFF TARGET`, no ESC press, no stall count and no give-up. All 7 readings so far
-match their frames by eye. They follow the count both ways: 358,046, 358,039, 358,047, 358,059. The
-rank went from 659 to 660 between the runs with the trophies unchanged, which the frames confirm.
-From `opening` to the reading took 5.6 to 8.3 s, and back arrow to lobby 0.8 to 1.8 s.
+**02:35, the second run, with both fixes (measured to 03:19).** Eight lobbies, eight navigations,
+one each. Every one read, came back by the back arrow, and was followed by the PLAY click and a
+battle. There was no `STILL OFF TARGET`, no ESC press, no stall count and no give-up. All 10 readings
+of the two runs match their frames by eye, which meets V1. They follow the count both ways: 358,046,
+358,039, 358,047, 358,059, 358,067, 358,075, 358,083. The rank went from 659 to 660 between the runs
+with the trophies unchanged, which the frames confirm. From `opening` to the reading took 5.6 to
+8.3 s, and back arrow to lobby 0.8 to 1.8 s (V3).
+
+The stop was pressed in battle at 03:19. With it pending, no navigation started in the last lobby:
+wingman reached it at 03:23:49 and exited at 03:23:52. The after-session ingest loaded the 8 readings
+and they show on the dashboard (V5). No match start was missed (V2).
+
+Verdict, 2026-10-31: V1, V2, V3 and V5 are met. Open: V4 (a second click on the menu button shuts the
+menu) has not come up, because no step has failed, and the give-up paths have run only in tests. So
+the ADR stays `Draft` until a give-up happens live.
+
+**The daily schedule, 2026-10-31.** Operator: "update the rank and trophy reads to only happen at
+max once perday, and at time 9:38:30 in the morning is when it queues the function to read after
+the next round is over". D6 now says so. `queue_at` replaces `every_min`, and `lobby_left` (Bug 1's
+fix) is gone, because a reading can no longer follow another in the same lobby.
+
+The operator's session of 05:25 (main prefix) is the first on this code. It logged `next reading
+queues at 2026-10-31 09:38:30`. Measured to 06:00: 5 lobbies, 5 PLAY clicks, no navigation and no
+PLAY held, so the rounds no longer pay for a trip. The queue itself has not been seen live (V6).

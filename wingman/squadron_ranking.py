@@ -16,6 +16,7 @@ import logging
 import re
 import threading
 import time
+from datetime import datetime, timedelta
 from typing import NamedTuple
 
 import cv2
@@ -266,32 +267,31 @@ class Navigation:
 
 
 class SquadronRanking:
-    """When the next reading is due, and the one navigation in flight.
+    """When the next reading is queued, and the one navigation in flight.
 
-    A reading is due at the first lobby of the session and `every_s` after the
-    last attempt, read or not, and at most once in a lobby: the lobby must be
-    left (`lobby_left`) before the next. Without that, `every_s` 0 read the
-    leaderboard back to back and never started a round (2026-10-31 02:17).
+    One reading a day (operator, 2026-10-31): `queue_at`, local time, queues it,
+    and it stays queued until a lobby takes it, so a round being flown ends
+    first. Starting it books the next day's, read or not. Nothing is saved
+    between sessions: a session started after `queue_at` waits for the next
+    day's, which is what keeps restarts from reading twice in a day.
     While one is due or running, the lobby's PLAY click waits (`holds_play`);
     while one runs, the lobby quick-scan, the escape loop and the deferred exit
     wait too (`active`)."""
 
-    def __init__(self, enabled: bool, every_s: float, clock=time.monotonic):
+    def __init__(self, enabled: bool, queue_at: str, now=datetime.now):
         self.enabled = enabled
-        self.every_s = every_s
-        self.clock = clock
-        self._last_attempt: "float | None" = None
-        self._tried_this_lobby = False
+        self.queue_at = datetime.strptime(queue_at, "%H:%M:%S").time()
+        self.now = now
+        self.next_queue = self._after(now())
         self._active = threading.Event()
 
-    def due(self) -> bool:
-        return (self.enabled and not self._active.is_set() and not self._tried_this_lobby
-                and (self._last_attempt is None
-                     or self.clock() - self._last_attempt >= self.every_s))
+    def _after(self, moment: datetime) -> datetime:
+        """The first `queue_at` after `moment`."""
+        today = datetime.combine(moment.date(), self.queue_at)
+        return today if moment < today else today + timedelta(days=1)
 
-    def lobby_left(self) -> None:
-        """The game left the lobby: the next lobby may take a reading."""
-        self._tried_this_lobby = False
+    def due(self) -> bool:
+        return self.enabled and not self._active.is_set() and self.now() >= self.next_queue
 
     def active(self) -> bool:
         return self._active.is_set()
@@ -302,13 +302,12 @@ class SquadronRanking:
     def start(self, navigation: Navigation, on_done) -> threading.Thread:
         """Run the navigation on a thread of its own; `on_done(reading, why,
         navigation)` gets its answer. The attempt counts from now, so a
-        navigation that gives up is not retried before `every_s`, nor in this
-        lobby. Active first: `holds_play` must not drop for an instant between
-        a reading being due and its navigation running (2026-10-31 02:17:56,
-        the quick-scan clicked PLAY in that gap)."""
+        navigation that gives up is not retried before the next day's. Active
+        first: `holds_play` must not drop for an instant between a reading being
+        due and its navigation running (2026-10-31 02:17:56, the quick-scan
+        clicked PLAY in that gap)."""
         self._active.set()
-        self._tried_this_lobby = True
-        self._last_attempt = self.clock()
+        self.next_queue = self._after(self.now())
 
         def _run():
             try:
