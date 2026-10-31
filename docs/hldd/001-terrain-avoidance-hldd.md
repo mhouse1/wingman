@@ -4,9 +4,86 @@
 |--------|------------|-----------------|
 | Active | 2026-09-20 | 1.8.9           |
 
+## Where it stands (2026-10-24, wingman 1.9.3): the ground ahead is the missing input
+
+Status: the envelope protection below is built and flying (parts 1 and 2); part 3's floor per map was measured
+and rejected; part 4's forward-view warnings, scored as triggers, are too imprecise to act on. Next: a warning
+from the picture, scored offline on labelled black-box frames before anything flies. Operator, 2026-10-24:
+"review the wingman 4hr run today improve the terrain nav behavior", then "update hldd1 then proceed with
+steps 1 and 2". Evidence rows: [Code Review 019](../code-review/019-2026-10.md), 2026-10-24.
+
+**Decision.** Stop tuning the telemetry triggers: they now trade alarms for warned crashes at about the same
+precision. What is missing is how high the ground ahead is. Build candidate warnings from the game's own
+pictures and score them offline, on the seconds before crashes against the seconds before shoot-downs, before
+any of them flies, even in shadow. A candidate goes to shadow only if it beats the live pull-out trigger on the
+same windows; in the 4-hour run below, 11.8% of that trigger's alarms were followed by a crash in 2 to 10 s.
+
+**Why** (measured unless marked):
+
+- **The recovery now keeps its nose-up.** Until 2026-10-24 another owner's key release cut the emergency
+  climb's nose-up pulse: 128 times in 62 missions, 87 of them the pursuit handing the airframe over (ADR 148),
+  and 14 of 228 deaths came within 8 s of such a cut. Since the pitch keys are leased
+  ([ADR 151](../adr/151-one-actuator-and-throttle-leases.md) D6), none in 84 missions. Part 2's nose-up rates
+  were measured while the cuts happened (inferred: some pulses lasted a fraction of a second), so they are due
+  for a re-measure on logs after D6.
+- **A floor per map does not follow the terrain (part 3).** Over 660 matches the crash heights spread as widely
+  inside each map as between maps: the middle half spans 500 to 700 m on every map, the medians only 678 to
+  1,221 m. A floor per map at its crashes' lower quartile warns 2 s or more ahead of 55.1% of crashes at 4.91
+  alarms a match; one floor at that alarm rate, about 53.5%. Inside one standard error, and fitted to the same
+  crashes.
+- **What the crashes are (4-hour run, 2026-10-24 08:30 to 13:38, 49 missions, 35 crashes).** An emergency climb
+  started 2 s or more ahead of 18, under 2 s ahead of 7; 5 came while an objective held the recovery off; 5
+  had no warning (level flight, a median 2,022 m). Of the 18, 10 handed the airframe back before the impact:
+  6 to an objective in view while still descending, 4 after the path read +7 to +15 deg, then dived again.
+  Over 880 missions, keeping the climb through objective hand-backs while the pull-out still predicts a
+  lowest point under the floor would save about 0.01 crashes a mission and cost as many objectives reached.
+- **The forward-view warnings as triggers (part 4).** Same run, episodes 5 s apart, the share followed by a
+  crash in 2 to 10 s: LOOM 5.3% (3.1 a mission), SHAPE 6.1% (3.0), the planner's ESCAPE 8.2% (2.0), DETOUR
+  1.9% (3.3), the sky fraction 3.1% (8.0); the live pull-out trigger 11.8% (2.6). ESCAPE limited to views with
+  little free air reaches 10.0% (498 missions). Its false alarms are mostly real terrain beside or below the
+  flight path, and a third are outlines of cloud in open sky.
+- **The resupply approach's own speed cap (part 1's dose, 700 KPH toward 650).** Flown for 49 missions against
+  34 before: rearms 0.35 against 0.47 a mission, deaths within 20 s of a rearm climb-out 0 of 17 against 4 of
+  16, crashes 0.73 against 0.56. Inside the noise; it stays while the missions accumulate.
+
+**Next** ([Research 017](../research/017-camera-vision-for-terrain-avoidance.md) step 3):
+
+1. **Secure the labelled pictures.** The black box keeps the game's own frames for the 18 s before each death
+   (`hud.black_box.raw`, three a second, 960 x 600). On 2026-10-24 it held 506 deaths' frames, from 2026-10-23
+   20:27; its 20,000-file budget is full, so each new death deletes the oldest. They are hard-linked into a
+   dataset folder nothing prunes, and each death is labelled crash or shoot-down from its log's `DEATH CARD`
+   line, with the impact timed from the last HUD reading.
+2. **Score two picture measures against the pull-out trigger, on the same windows.** The share of terrain in a
+   corridor around the centre of the picture, terrain told from sky by its texture; and the same corridor in
+   the depth model's output (Depth Anything V2 Small, off live since 2026-10-16 for its cost, never scored on
+   crashes against shoot-downs). The test: how often each measure, and the pull-out trigger from the logged
+   readings, warns in the 2 to 6 s before a crash, against how often it warns 8 s or more before any death.
+3. **Shadow only for a winner.** Only a measure that beats the pull-out trigger on those windows goes to
+   shadow, where its alarm rate over whole battles is measured.
+
+**Steps 1 and 2 done (2026-10-24; Research 017, "Step 3 results").** 506 deaths' frames secured and labelled
+(87 crashes and 416 shoot-downs with an impact time). Neither picture measure alone beats the pull-out at its
+false-alarm rate: the live pull-out caught 26.4% of the crashes at 5.3% false alarms, the terrain share 27.6%,
+the depth model's proximity 24.1%. Combined with the telemetry, the depth model does: out of fold, telemetry
+alone catches 34.8% at 5.3% false alarms (47.2% at 10.6%), telemetry and depth 42.4% (63.4%); the texture
+share adds nothing. So the candidate is a telemetry-and-depth score, not a picture threshold. Before it flies,
+even in shadow, its false-alarm rate in ordinary flight is measured offline on a `make r1 v` session (death
+windows say nothing about it); then its cost live, where the GPU runtime comes in.
+
+**Ordinary flight (2026-10-25; Research 017, "Ordinary flight").** Over the 32 missions of a recorded session,
+the telemetry-and-depth score warned less precisely than the live pull-out (3.6% of its alarms followed by a
+crash at 2.59 a mission, against 6.4% at 2.44) and ranked the seconds before a crash no better than the
+telemetry's lowest predicted pull-out point alone (0.708 against 0.709). Its gain on the death windows does
+not carry over. The depth model does not go to shadow, and the GPU runtime is not needed for it.
+
+What remains for the ground ahead is the terrain database from the game's own map meshes (Research 017, open
+questions), the operator's decision: exact heights, but wingman would also need its own position on the map.
+
 ## Direction (2026-10-18, wingman 1.9.2): envelope protection
 
-Status: part 1 built and in its first A/B; parts 2 and 3 designed, not built. This section supersedes the
+Status (2026-10-18): part 1 built and in its first A/B; parts 2 and 3 designed, not built. Since then parts 1
+and 2 fly and part 3's floor per map was measured and rejected: see "Where it stands (2026-10-24)" above. This
+section supersedes the
 document's premise that terrain avoidance is first a perception problem. The forward-view detectors described
 below stay, as a secondary input. Operator, 2026-10-18: "review the design of hldd1 is there a better
 solution", then "update hldd1 with this recommendation".
@@ -79,27 +156,80 @@ margin.
    crash source (34 of 92 in the 10-hour session) and dived at up to 1,459 KPH. Log: `SPEEDCAP: 1100 KPH
    over the 850 KPH cap in a dive (-25 deg at 1500 m): airbrake for 2.0 s`. Not yet covered: dives outside
    a pursuit (the behavior tree's own tactics, the mission script).
-2. **Trigger the recovery on whether a pull-out still fits (part 2, designed).** Predict the height a
+2. **Trigger the recovery on whether a pull-out still fits (part 2, in shadow since cycle 32).** Predict the height a
    pull-out loses from the current speed and dive angle with the measured pitch-rate curve, and start the
    emergency climb when the predicted lowest point would fall below the floor. Time to ground, the trigger
    now, assumes the current descent continues all the way to sea level and ignores how long the pull-out
-   takes. With a constant pitch rate the loss is about half the descent rate times the time to level
-   (inferred, an approximation over the measured medians):
+   takes. With the nose coming up at a constant rate q, the path comes level in T = |g| / q and the height
+   lost is v T (1 - cos g) / g, g in radians (`wingman/pullout.py`; the rates are the measured medians):
 
    | Speed (KPH) | Nose rate (deg/s) | Time to level from -35 deg | Height lost |
    |-------------|-------------------|----------------------------|-------------|
-   | 500 | 21 | 1.6 s | about 65 m |
-   | 700 | 8 | 4.4 s | about 240 m |
-   | 900 | 7 | 4.8 s | about 340 m |
-   | 1,100 | 5 | 6.5 s | about 570 m |
-   | 1,300 | 3 | 13.0 s | about 1,340 m |
+   | 500 | 21 | 1.7 s | about 70 m |
+   | 700 | 8 | 4.4 s | about 250 m |
+   | 900 | 7 | 5.0 s | about 370 m |
+   | 1,100 | 5 | 7.0 s | about 630 m |
+   | 1,300 | 3 | 11.7 s | about 1,250 m |
 
    The rates were measured during the emergency climb's pulsed nose-up, not a continuous pull, so a better
-   pull may lose less. Re-measure the curve once part 2 holds the key continuously.
+   pull may lose less. Re-measure the curve once part 2 holds the key continuously. Re-measured on the 14
+   Su-33 logs of 2026-10-17/18 (645 sample pairs): 15, 14, 11, 5.4 and 0 deg/s across the same bands, so
+   faster than cycle 21's medians at 600 to 999 KPH and not rising at all at 1,200 to 1,399 KPH (half the
+   pairs rising). Scored offline, the two curves give the same trigger within a point (600 m floor: 55%
+   against 55% two seconds ahead, 43% against 41% four seconds ahead, 17% precision both), so the code
+   keeps cycle 21's. Whether the flat 1,200 KPH band is the aircraft or the climb's pulsed nose-up is
+   open.
+
+   Built in shadow (Code Review 019 cycle 32): `behavior_tree.climb.pullout` (`floor_m` 600, `reaction_s`
+   2.0) computes the lowest point from the raw HUD altitude, speed and path every tree tick and logs
+   `BT: PULL-OUT WOULD NOT CLEAR — lowest point ... under the 600m floor ... [SHADOW - not actuating]` once
+   an episode; time to ground still flies. Scored offline over 23 logs of 2026-10-17/18 (373 missions,
+   499 kill-card crashes), against the emergency climbs that did start (an observational comparison: the
+   real climbs changed what followed):
+
+   | Trigger | Fires 2 s or more before the crash | 4 s or more | Followed by a crash | A mission |
+   |---|---|---|---|---|
+   | Emergency climbs that started | 43% | 28% | 18% | 4.6 |
+   | Lowest point under 600 m, 2 s reaction | 55% | 41% | 17% | 4.8 |
+   | Lowest point under 900 m, 2 s reaction | 60% | 47% | 14% | 6.4 |
+
+   At the same alarm rate and precision it warns earlier for a further 12% of the crashes. One floor
+   cannot fit every map: carried down from the last reading, the crashes hit at a median 760 m and a
+   quarter above 1,170 m, which is part 3's case.
+
+   Before it flies (cycle 33, same logs plus two more, 401 missions): a reading whose path clamps at
+   85 degrees or more (the altitude fell faster than the aircraft flies) is a misread and neither fires
+   nor clears it (alarms -10%, precision 16.5% to 18.5%, 1.8 points less warned two seconds ahead).
+   Slowing the aircraft in the model during the pull-out (the airbrake's 100 to 300 KPH/s) ranks
+   crashes worse at the same alarm rate, so the model keeps the speed constant: its pessimism at speed
+   tracks the risk, which grows with speed. An altitude cap changes nothing. Flown together with the
+   triggers that start the climb today it would warn two seconds ahead of 60% of the crashes (43%
+   now) and four seconds ahead of 46% (28%), for 6.1 climbs a mission instead of 4.5.
+
+   The objective hold-off (operator, 2026-10-08: no recovery while the pursuit has its target or an
+   objective in view) acted within 10 s before 55% of those crashes, and touched 65% of the ones the
+   trigger warns two seconds ahead; its alarms during the hold-off predict crashes as well as the rest
+   (18.8% against 18.3% at 600 m). So the trigger flies in two steps: first under the hold-off (cycle
+   34), then with alarms under 300 m allowed to break it (24% of those were followed by a crash), as
+   two agreeing warnings may, each step judged on crashes and objectives a mission. Both are built: the
+   trigger flies since cycle 34 and `pullout.bypass_holdoff_below_m` (300) since cycle 36. Cycle 35 made
+   the emergency climb itself skip misread paths (`telemetry.path_is_misread`): 80 of 144 of its
+   nose-down pulses had come at a clamped +90 deg reading, pushing the nose down in dive recoveries.
+
+   How old the reading is (cycle 38). Every climb trigger acted on a frame a median 1.54 s old (409
+   triggers, five logs of 2026-10-18/19; p10 1.51 s, p90 1.61 s), while its OCR took 0.41 s (p95
+   0.51 s): the finished reading waited for the next 1.5 s tick, and the tree decided about 0.1 s into
+   each tick, before its own reading existed. The emergency climb's own readings were as old. Since
+   cycle 38 a reading enters the filter when its OCR finishes, and in a live battle tick the tree waits
+   for that tick's reading, at most `telemetry.bt_wait_s` (0.75 s) from the tick start. Reading twice
+   as often instead would have saved about 0.4 s on average for a second OCR each tick. `reaction_s`
+   (2.0) was sized with the old age in it; re-fit it once the new age is measured live.
 3. **A terrain floor (part 3, designed).** HUD altitude is above sea level, so the true height of the terrain
    is unknown. Start with one conservative floor for every map, since the risk concentrates under 2,000 m.
    Then learn a floor per map from the altitudes of kill-card crashes, or revive
-   [Design 017](017-terrain-map-from-flight-footage-hldd.md)'s height map.
+   [Design 017](017-terrain-map-from-flight-footage-hldd.md)'s height map. 2026-10-24: the floor per map was
+   measured and rejected (the crash heights vary as much inside a map as between maps; "Where it stands" at the
+   top); a height map remains.
 4. **The forward view as a secondary input.** The Phase 1 and Phase 2 detectors stay, for level flight into
    terrain that stands above the floor, which telemetry cannot see. The agreement trigger (cycle 25) is live
    in the shipped `config.yaml`; on VEDA it is in shadow through `config.local.yaml` while part 1's A/B runs,

@@ -2,7 +2,7 @@
 
 | Status | Date       | Wingman Version |
 |--------|------------|-----------------|
-| Draft  | 2026-09-27 | 1.8.11          |
+| Draft  | 2026-10-25 | 1.9.3           |
 
 Wingman flies in MetalStorm as `[ISAF] 🄼🄾🄱🄸🅄🅂1`, a member of **Mobius
 Squadron**. The squadron is open to human pilots as well. This job aid explains
@@ -37,3 +37,33 @@ Members can take a numbered call sign in the squadron's style:
 - `[ISAF] 🄼🄾🄱🄸🅄🅂0`
 - `[ISAF] 🄼🄾🄱🄸🅄🅂1`
 - `[ISAF] 🄼🄾🄱🄸🅄🅂2`
+- `[ISAF] 🄼🄾🄱🄸🅄🅂3`
+
+## Set a call sign in the game
+
+MetalStorm allows one name change per account, so paste the call sign rather
+than typing it. The keyboard cannot type the boxed letters anyway.
+
+Copying on the desktop does not work: Ctrl-V in the game pastes nothing. The
+game runs on its own X display, `:3` ([ADR 099](../adr/099-nested-display-lane-for-unattended-operation.md)), which has its own
+clipboard. Put the call sign on that clipboard instead:
+
+1. Launch the account (`make r3`, for example) and wait for the lobby.
+2. Press **Backspace** in the game to put Wingman on standby, so it does not
+   click lobby buttons while the name dialog is open.
+3. In a terminal:
+
+   ```bash
+   make clip TEXT='🄼🄾🄱🄸🅄🅂3'
+   ```
+
+   It prints `clipboard on :3 holds '🄼🄾🄱🄸🅄🅂3' for 900 s` and keeps running.
+4. Open the name change in the game, click the name field and press
+   **Ctrl-V**. The terminal prints `pasted`.
+5. Check the name in the field before you confirm. You get one change.
+
+The clipboard stays set for 15 minutes (`SECONDS=60` for less), until anything
+else is copied on `:3`, or until the display closes. Ctrl-C ends it early.
+`make clip` prints `start the game first` when `:3` is not running.
+
+Used on 2026-10-25 to name acct3 `🄼🄾🄱🄸🅄🅂3`.

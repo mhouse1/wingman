@@ -141,10 +141,12 @@ def test_eject_preempt_releases(monkeypatch):
     assert _releases(kb)
 
 
-def test_release_skipped_while_climb_holds_the_key(monkeypatch):
-    """ADR 076 d2 ownership rule: with a climb hold active, the guard must
-    not issue the OS-level key-up — releasing would yank a climb pitch pulse
-    in progress. The bracket is still decremented."""
+def test_guard_ending_under_a_climb_keeps_the_climbs_key_and_ends_its_lease(monkeypatch):
+    """ADR 076 d2 ownership rule, through the ADR 151 D6 lease: with a climb
+    holding the pitch key, the guard's end must not lift it, and must not leave
+    its own lease behind either. 2026-10-24 02:10:25: the guard skipped its
+    release, its lease stayed, and every later climb release left nose-up held
+    (the aircraft looped from +16 to -90 deg). The bracket is still decremented."""
     kb = _FakeKeyboard()
     ctrl = _make_ctrl(monkeypatch, kb, _FakeStateAnalyzer())
 
@@ -152,13 +154,18 @@ def test_release_skipped_while_climb_holds_the_key(monkeypatch):
     time.sleep(0.1)
     ctrl._climbing.set()
     try:
+        ctrl._climb_key(NOSE_UP_KEY, press=True, action="climb")
         ctrl._sg_stop.set()
         assert _wait_done(ctrl)
         assert not _releases(kb), \
             "guard released the pitch key out from under an active climb hold"
+        assert controller_module._actuator.held() == {NOSE_UP_KEY: ("climb",)}, \
+            "the guard's lease outlived the guard"
         with ctrl._programmatic_key_lock:
             assert ctrl._programmatic_key_counts.get(NOSE_UP_KEY, 0) == 0, \
                 "bracket not decremented on ownership-aware release"
+        ctrl._climb_key(NOSE_UP_KEY, press=False, action="climb")
+        assert _releases(kb), "the climb's release did not lift nose-up"
     finally:
         ctrl._climbing.clear()
 

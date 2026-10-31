@@ -22,10 +22,11 @@ import numpy as np
 import pytest
 import yaml
 
+from constants import MINIMAP_CORPUS_DIR
 from wingman.analyzer import GameStateAnalyzer
 
 ROOT = Path(__file__).parent.parent
-CORPUS = ROOT / "test_screenshots" / "unknown_anomalies"
+CORPUS = MINIMAP_CORPUS_DIR
 CROSSINGS = sorted(CORPUS.glob("rtb_*.png"))
 BLIND = sorted(CORPUS.glob("blind_2026090[567]_*.png"))
 

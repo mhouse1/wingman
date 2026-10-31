@@ -16,8 +16,8 @@ commands rather than like a configuration error.
 # --- Flight controls --------------------------------------------------------
 NOSE_UP_KEY = 'i'          # FLIGHT_CONTROL_KEY
 NOSE_DOWN_KEY = 'k'        # FLIGHT_CONTROL_KEY
-ROLL_LEFT_KEY = 'j'        # FLIGHT_CONTROL_KEY
-ROLL_RIGHT_KEY = 'l'       # FLIGHT_CONTROL_KEY
+ROLL_LEFT_KEY = 'j'        # FLIGHT_CONTROL_KEY barrel roll
+ROLL_RIGHT_KEY = 'l'       # FLIGHT_CONTROL_KEY barrel roll
 YAW_LEFT = ';'             # yaw axis - left rudder (ADR 070)
 AFTERBURNER_KEY = 'e'
 AIRBRAKE_KEY = 'd'

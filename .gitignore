@@ -20,6 +20,8 @@ untrack_todo.md
 to_be_added/
 docs/code-review/*
 docs/FUTURE/
+# Design 019: the promo video plan, and its script and shot-list folder — kept local
+docs/hldd/019-*
 wingman.log
 wingman_live.log
 *.log
@@ -45,3 +47,7 @@ docs/performance/runtime-performance-trends.preview.html
 .claude/settings.local.json
 # CR-018-16: the operator's per-machine settings, merged over config.yaml by a live run.
 wingman/config.local.yaml
+# Design 018: the score dashboard's passwords, made from grafana/.env.example.
+grafana/.env
+# Design 018: the dashboard's change log, kept local.
+grafana/changes.yaml

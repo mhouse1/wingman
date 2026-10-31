@@ -2452,6 +2452,47 @@ def test_the_marked_objective_being_flown_at_keeps_the_steering_from_the_resuppl
     assert not any("rearm focus begins" in m for m in messages)
 
 
+def test_the_objective_keeps_the_steering_through_a_short_miss_of_its_marker(
+        monkeypatch, caplog):
+    """Operator, 2026-10-20: "why did it see target 'A' then steer away when it
+    was clearly in view". At 02:40:48.8 the scan missed A, 20 px off the centre,
+    for about 0.6 s; the 0.5 s memory ran out, the resupply marker took the
+    steering, and A, found again a cycle later, never got it back. Here the crown
+    on the right has the steering and the scan misses it for 0.7 s while the
+    resupply marker waits on the left: the steering stays right, and the held
+    marker is not reported to the crash recovery as in view."""
+    monkeypatch.setattr(controller_module, "find_resupply_marker",
+                        lambda _frame, **_kw: ResupplyMarker(500, 600, 40, 40, 300, 180))
+    first = []
+
+    def crown():
+        now = time.monotonic()
+        if not first:
+            first.append(now)
+        return None if 0.6 <= now - first[0] < 1.3 else _priority_marker(1400, 600)
+
+    reports = []
+    note = Controller._note_pursuit_objective
+
+    def noting(self, kind):
+        reports.append((time.monotonic(), kind))
+        note(self, kind)
+
+    monkeypatch.setattr(Controller, "_note_pursuit_objective", noting)
+    _ctrl, messages, _calls = _priority_pursuit(
+        monkeypatch, caplog, marker=crown,
+        analyzer=_SequenceAnalyzer([4, 2, 2]), empty_confirm_reads=1,
+        resupply_priority_actuate=True, run_s=2.0,
+        pursue_kwargs={"weapon_already_switched": True})
+
+    joined = "\n".join(messages)
+    assert "roll_left - pressing" not in joined, "the resupply marker took the steering"
+    assert "roll_right - pressing" in joined
+    assert not any("rearm focus begins" in m for m in messages)
+    in_miss = [kind for t, kind in reports if 0.7 <= t - first[0] < 1.25]
+    assert in_miss and "priority target" not in in_miss, in_miss
+
+
 def _pin(angle_deg):
     import math
     from wingman.icon_steering import RingIcon

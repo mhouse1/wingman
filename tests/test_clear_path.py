@@ -233,18 +233,20 @@ def _square(x1, y1, x2, y2):
     return [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
 
 
-def test_free_air_is_tinted_and_outside_the_view_is_dimmed(tmp_path):
+def test_free_air_is_blue_objects_orange_and_outside_the_view_grey(tmp_path):
+    """Research 018, 2026-10-26: a fill on each side of the split, so it reads
+    at a glance; the picture the perception does not analyse loses its colour."""
     renderer = HudRenderer(str(tmp_path / "live_hud.png"), interval_sec=0.0)
     texture = np.zeros((288, 576), np.uint8)
     texture[100:200, 200:300] = 255                  # one textured block
-    canvas = np.full((_H, _W, 3), 120, np.uint8)
+    canvas = np.full((_H, _W, 3), (90, 120, 150), np.uint8)
     renderer._draw_path_view(canvas, _view([], texture=texture))
-    outside = canvas[20, 20]
-    free = canvas[72 + 50, 192 + 50]
-    solid = canvas[72 + 150, 192 + 250]
-    assert int(outside[0]) < 120 and int(outside[1]) < 120      # dimmed
-    assert int(free[1]) > 120 and int(free[0]) < 120            # greener
-    assert tuple(int(c) for c in solid) == (120, 120, 120)      # left as it was
+    b, g, r = (int(c) for c in canvas[20, 20])                  # outside the view
+    assert b == g == r and b < 120                              # grey, dimmed
+    b, g, r = (int(c) for c in canvas[72 + 50, 192 + 50])       # free air
+    assert b > 90 and r < 150                                   # bluer
+    b, g, r = (int(c) for c in canvas[72 + 150, 192 + 250])     # the textured block
+    assert r > 150 and b < 90                                   # oranger
 
 
 @pytest.mark.parametrize("tau, colour", [

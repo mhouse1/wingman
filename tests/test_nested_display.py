@@ -120,7 +120,7 @@ def test_an_unreadable_window_tree_returns_empty_rather_than_raising():
 # --- start is idempotent, and refuses the one env that cannot work ------------
 
 def test_start_leaves_an_idle_running_display_alone():
-    """Safe as a Makefile prerequisite: a second `make rd` must not spawn a
+    """Safe as a Makefile prerequisite: a second `make r` must not spawn a
     second server on the same display when nothing is using the existing one.
 
     ADR 119 moved the seam from `display_is_up` to `probe_display`, which
@@ -129,9 +129,40 @@ def test_start_leaves_an_idle_running_display_alone():
     """
     with mock.patch.object(nd, "probe_display", return_value="up"), \
          mock.patch("wingman.game_shutdown.find_game_pids", return_value=[]), \
+         mock.patch("wingman.game_shutdown.find_nested_display_pids", return_value=[4242]), \
          mock.patch("subprocess.Popen") as popen:
         assert nd.start(":3", "1920x1200") == 0
     popen.assert_not_called()
+
+
+def test_start_refuses_to_reuse_a_server_that_is_not_the_nested_xwayland(capsys):
+    """2026-10-25 12:04 and 12:49: a pytest Xvfb left on :3 answered, no game
+    was attached, and `make r2` reused it. The game could not start on it and
+    wingman captured an all-black frame for the whole session."""
+    with mock.patch.object(nd, "probe_display", return_value="up"), \
+         mock.patch("wingman.game_shutdown.find_game_pids", return_value=[]), \
+         mock.patch("wingman.game_shutdown.find_nested_display_pids", return_value=[]), \
+         mock.patch.object(nd, "_x_socket_owner_pids", return_value=[2142480]), \
+         mock.patch.object(nd, "_describe_pids", return_value="Xvfb pid 2142480"), \
+         mock.patch("subprocess.Popen") as popen:
+        assert nd.start(":3", "1920x1200") == 1
+    popen.assert_not_called()
+    assert "Xvfb pid 2142480" in capsys.readouterr().err
+
+
+def test_the_socket_owner_is_found_by_its_listening_inode(tmp_path):
+    proc = tmp_path / "proc"
+    (proc / "net").mkdir(parents=True)
+    (proc / "net" / "unix").write_text(
+        "Num RefCount Protocol Flags Type St Inode Path\n"
+        "0000: 00000002 00000000 00010000 0001 01 111 @/tmp/.X11-unix/X3\n"
+        "0000: 00000002 00000000 00010000 0001 01 222 /tmp/.X11-unix/X30\n")
+    for pid, target in ((500, "socket:[111]"), (600, "socket:[222]"), (700, "/dev/null")):
+        (proc / str(pid) / "fd").mkdir(parents=True)
+        (proc / str(pid) / "fd" / "3").symlink_to(target)
+        (proc / str(pid) / "comm").write_text("Xvfb\n")
+    assert nd._x_socket_owner_pids(":3", proc=str(proc)) == [500]
+    assert nd._describe_pids([500], proc=str(proc)) == "Xvfb pid 500"
 
 
 def test_start_restarts_a_display_with_a_game_still_attached():
@@ -286,7 +317,7 @@ def test_config_drives_the_lane(tmp_path):
 
 
 def test_override_forces_the_lane_off():
-    """`make rd NESTED=0` must escape a global config flag — otherwise two
+    """`make r NESTED=0` must escape a global config flag — otherwise two
     simultaneous accounts are forced into the same lane."""
     with mock.patch.object(nd, "load_nested_config", nd.load_nested_config):
         with mock.patch("builtins.open", mock.mock_open(
@@ -424,10 +455,10 @@ def test_the_capture_lane_launches_the_game_on_the_real_display():
 
 
 def test_the_nested_lane_is_still_the_default_for_ordinary_runs():
-    """Only the real-screen lane opts out. `make r` / `make rd` keep the ADR 099
-    default, which is what lets the operator use the machine."""
+    """Only the real-screen lane opts out. `make r` keeps the ADR 099 default,
+    which is what lets the operator use the machine."""
     mk = _makefile()
-    for target in ("r:", "rd:", "g:"):
+    for target in ("r:", "g:"):
         line = next(ln for ln in mk.splitlines() if ln.startswith(target))
         assert "GAME_LAUNCH_DEPS" in line
-    assert "r: NESTED" not in mk and "rd: NESTED" not in mk
+    assert "r: NESTED" not in mk

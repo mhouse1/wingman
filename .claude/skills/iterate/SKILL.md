@@ -264,7 +264,7 @@ exists to run (an unattended run is the normal case, not a special one).
 2. **Launch**, backgrounded (`run_in_background: true`), never in the foreground:
 
    ```bash
-   make r1                       # account 1 (r2: account 2). Kills and relaunches the game,
+   make r1                       # account 1 (r2, r3: accounts 2, 3). Kills and relaunches the game,
                                  # then wingman with DEBUG to wingman.log
    make r1 v                     # the same plus --record-session: session video and BT
                                  # trace, and the only mode that arms the eject-stuck check
@@ -272,7 +272,8 @@ exists to run (an unattended run is the normal case, not a special one).
                                  # nested-setup in it: it closes a running game
    ```
 
-   `make r` writes no log file, so it is no use here. Read a target's recipe
+   `make r` writes the same log but runs on the main prefix with no account
+   tag, so use `rN` here. Read a target's recipe
    before running one you have not used; `make tp`, `tp-full`, `wrelease` and
    `rr-live-path1-gate` are operator-run and are not launched by this skill.
 
@@ -369,7 +370,7 @@ until ! pgrep -f "[w]ingman.main" >/dev/null; do sleep 2; done
 half an hour. Never report "stopped" or "running" without a check in the same
 turn.
 
-**Bracket the pattern.** `pgrep -f "wingman.main"` and `pkill -f "make rd"` also
+**Bracket the pattern.** `pgrep -f "wingman.main"` and `pkill -f "make r1"` also
 match the shell command line that contains them, so an unbracketed `pkill`
 kills the calling shell. Three tool calls died that way in one session, each
 reported only as an exit code. Write `[w]ingman.main`, or use `pgrep -x`.

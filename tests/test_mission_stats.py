@@ -5,6 +5,7 @@ import json
 import pytest
 
 from wingman.mission_stats import MissionStatsTracker
+from wingman.round_performance import RoundPerformance
 
 
 # ---------------------------------------------------------------------------
@@ -568,6 +569,55 @@ class TestMissileEngagements:
         with caplog.at_level("INFO"):
             t.print_summary()
         assert "Missile engagements" in caplog.text
+        assert "pursuit trial" not in caplog.text      # no trial engagement, no line
+
+    def test_the_pursuit_trial_is_counted_by_arm(self, tmp_path):
+        """ADR 163: by the arm drawn, whether or not the evade could start."""
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        # Evade arm, evaded, survived.
+        t.on_event("flare_burst_deployed", 100.0)
+        t.on_event("evade_trial_evade", 100.0)
+        t.on_event("missile_evade", 100.0)
+        # Evade arm, the evade could not start (a dive recovery), died.
+        t.on_event("flare_burst_deployed", 200.0)
+        t.on_event("evade_trial_evade", 200.0)
+        t.on_event("respawn_detected", 204.0)
+        # Control arm, died.
+        t.on_event("flare_burst_deployed", 300.0)
+        t.on_event("evade_trial_control", 300.0)
+        t.on_event("respawn_detected", 303.0)
+        # Outside the trial: no arm.
+        t.on_event("flare_burst_deployed", 400.0)
+        eng = t.finalize()["missile_engagements"]
+        assert (eng["trial_evade_total"], eng["trial_evade_died"]) == (2, 1)
+        assert (eng["trial_control_total"], eng["trial_control_died"]) == (1, 1)
+        assert eng["trial_evade_survival"] == 0.5
+        assert eng["trial_control_survival"] == 0.0
+        assert [e["trial_arm"] for e in eng["detail"]] == ["evade", "evade", "control", None]
+
+    def test_an_arm_attaches_only_to_its_own_engagement(self, tmp_path):
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        t.on_event("flare_burst_deployed", 100.0)
+        t.on_event("evade_trial_control", 140.0)    # no engagement this recent
+        eng = t.finalize()["missile_engagements"]
+        assert eng["trial_control_total"] == 0
+        assert eng["detail"][0]["trial_arm"] is None
+
+    def test_the_summary_prints_the_trial_line(self, tmp_path, caplog):
+        t = _tracker(tmp_path)
+        _enter_battle(t)
+        t.on_event("flare_burst_deployed", 100.0)
+        t.on_event("evade_trial_evade", 100.0)
+        t.on_event("flare_burst_deployed", 200.0)
+        t.on_event("evade_trial_control", 200.0)
+        t.on_event("respawn_detected", 203.0)
+        t.finalize()
+        with caplog.at_level("INFO"):
+            t.print_summary()
+        assert ("  pursuit trial   : evade arm 100%  (1/1), control arm   0%  (0/1)  (ADR 163)"
+                in caplog.text)
 
 
 # ---------------------------------------------------------------------------
@@ -735,3 +785,233 @@ class TestSpawnCrashes:
         _enter_battle(t)
         t.on_event("respawn_detected", 100.0)
         assert t.finalize()["spawn_crashes"]["count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Round performance: the end-of-round PERFORMANCE panel (operator, 2026-10-26)
+# ---------------------------------------------------------------------------
+
+class TestRoundPerformance:
+    @staticmethod
+    def _round_ended_by_click_to(t, start):
+        _enter_battle(t, ts=start)
+        t.on_fsm_transition("click_to_detected", "GAME_BATTLE", "GAME_END_B", start + 300.0)
+
+    def test_the_rounds_are_totalled(self, tmp_path):
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        self._round_ended_by_click_to(t, 0.0)
+        t.record_round_performance(RoundPerformance(163, 1, 2, 0))
+        self._round_ended_by_click_to(t, 400.0)
+        t.record_round_performance(None)
+        self._round_ended_by_click_to(t, 800.0)
+        t.record_round_performance(RoundPerformance(420, 3, 1, 2))
+        result = t.finalize()
+        assert result["round_performance"] == {
+            "rounds_read": 2, "rounds_unread": 1, "rounds_taken_over": 0,
+            "score": 583, "kills": 4, "deaths": 3, "assists": 2}
+        assert [m["performance"] for m in result["missions"]] == [
+            {"score": 163, "kills": 1, "deaths": 2, "assists": 0},
+            None,
+            {"score": 420, "kills": 3, "deaths": 1, "assists": 2}]
+
+    def test_a_reading_no_round_waits_for_is_not_counted(self, tmp_path):
+        """AI-005-3. Started on the end screen, no mission to book it on."""
+        t = _tracker(tmp_path)
+        t.record_round_performance(RoundPerformance(90, 0, 1, 1))
+        t.record_round_performance(None)
+        perf = t.finalize()["round_performance"]
+        assert (perf["rounds_read"], perf["rounds_unread"], perf["score"]) == (0, 0, 0)
+
+    def test_a_round_is_booked_once(self, tmp_path):
+        """AI-005-3. A second reading for one round, or one after a lobby exit,
+        is not counted and not written over the round's own."""
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        self._round_ended_by_click_to(t, 0.0)
+        t.record_round_performance(RoundPerformance(163, 1, 2, 0))
+        t.record_round_performance(RoundPerformance(50, 0, 0, 0))
+        _enter_battle(t, ts=400.0)
+        _leave_battle(t, next_state="GAME_LOBBY", ts=500.0)
+        t.record_round_performance(RoundPerformance(70, 0, 1, 0))
+        result = t.finalize()
+        assert result["missions"][0]["performance"]["score"] == 163
+        assert result["missions"][1]["performance"] is None
+        assert (result["round_performance"]["rounds_read"],
+                result["round_performance"]["score"]) == (1, 163)
+
+    def test_a_second_click_through_books_no_unread_round(self, tmp_path):
+        """2026-10-28 00:56: one round, two click-throughs, two unread lines; the
+        summary counted 28 rounds for 24."""
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        self._round_ended_by_click_to(t, 0.0)
+        t.record_round_performance(None)
+        t.record_round_performance(None)
+        perf = t.finalize()["round_performance"]
+        assert (perf["rounds_read"], perf["rounds_unread"]) == (0, 1)
+
+    def test_a_round_awaits_its_reading_until_it_is_tried(self, tmp_path):
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        assert not t.round_awaits_reading()               # no round yet
+        _enter_battle(t, ts=0.0)
+        assert not t.round_awaits_reading()               # still flying
+        t.on_fsm_transition("click_to_detected", "GAME_BATTLE", "GAME_END_B", 300.0)
+        assert t.round_awaits_reading()
+        t.record_round_performance(None)
+        assert not t.round_awaits_reading()               # tried once
+        _enter_battle(t, ts=400.0)
+        _leave_battle(t, next_state="GAME_LOBBY", ts=500.0)
+        assert not t.round_awaits_reading()               # a lobby exit has no end screen
+
+    def test_the_summary_prints_the_totals_and_per_round(self, tmp_path, caplog):
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        for start, reading in ((0.0, RoundPerformance(163, 1, 2, 0)),
+                               (400.0, RoundPerformance(420, 3, 1, 2)), (800.0, None)):
+            self._round_ended_by_click_to(t, start)
+            t.record_round_performance(reading)
+        t.finalize()
+        with caplog.at_level("INFO"):
+            t.print_summary()
+        assert ("Round performance : 2 of 3 rounds read  "
+                "(the end-of-round PERFORMANCE panel)") in caplog.text
+        assert "  score           : 583  (291.5 per round read)" in caplog.text
+        assert ("  K / D / A       : 4 / 3 / 2  (2.0 / 1.5 / 1.0 per round read)"
+                in caplog.text)
+
+    def test_a_round_taken_over_is_left_out_of_the_totals(self, tmp_path, caplog):
+        """Operator, 2026-10-29: not wingman's flying. The reading stays on the
+        round's record; every round figure leaves it out."""
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        _enter_battle(t, ts=0.0)
+        t.on_fsm_transition("manual_takeover", "GAME_BATTLE", "GAME_BATTLE_MANUAL", 100.0)
+        t.on_fsm_transition("click_to_detected", "GAME_BATTLE_MANUAL", "GAME_END_B", 300.0)
+        t.record_round_performance(RoundPerformance(900, 6, 1, 2))
+        self._round_ended_by_click_to(t, 400.0)
+        t.record_round_performance(RoundPerformance(200, 1, 3, 0))
+        result = t.finalize()
+        assert result["round_performance"] == {
+            "rounds_read": 1, "rounds_unread": 0, "rounds_taken_over": 1,
+            "score": 200, "kills": 1, "deaths": 3, "assists": 0}
+        assert result["missions"][0]["performance"]["score"] == 900
+        with caplog.at_level("INFO"):
+            t.print_summary()
+        assert "Round performance : 1 of 1 rounds read" in caplog.text
+        assert "  taken over      : 1  (a manual takeover; left out of these figures)" in caplog.text
+
+    def test_with_no_round_read_only_the_count_is_printed(self, tmp_path, caplog):
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        self._round_ended_by_click_to(t, 0.0)
+        t.record_round_performance(None)
+        t.finalize()
+        with caplog.at_level("INFO"):
+            t.print_summary()
+        assert "Round performance : 0 of 1 rounds read" in caplog.text
+        assert "K / D / A" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# ADR 165: the evade trial draws its arm per round, so each round carries one
+# ---------------------------------------------------------------------------
+
+class TestEvadeTrialRounds:
+    @staticmethod
+    def _round(t, start, arm, reading):
+        """A round that ends on the end screen, with one trial engagement of `arm`
+        (None: no trial engagement), then its PERFORMANCE reading."""
+        _enter_battle(t, ts=start)
+        t.on_event("flare_burst_deployed", start + 100.0)
+        if arm is not None:
+            t.on_event(f"evade_trial_{arm}", start + 100.0)
+        t.on_fsm_transition("click_to_detected", "GAME_BATTLE", "GAME_END_B", start + 300.0)
+        t.record_round_performance(reading)
+
+    def test_a_round_taken_over_is_no_trial_round(self, tmp_path):
+        """Operator, 2026-10-29: a takeover round is not wingman's flying."""
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        _enter_battle(t, ts=0.0)
+        t.on_event("flare_burst_deployed", 100.0)
+        t.on_event("evade_trial_control", 100.0)
+        t.on_fsm_transition("manual_takeover", "GAME_BATTLE", "GAME_BATTLE_MANUAL", 150.0)
+        t.on_fsm_transition("click_to_detected", "GAME_BATTLE_MANUAL", "GAME_END_B", 300.0)
+        t.record_round_performance(RoundPerformance(900, 6, 1, 2))
+        self._round(t, 400.0, "control", RoundPerformance(200, 1, 3, 0))
+        control = t._trial_rounds()["control"]
+        assert (control["rounds"], control["rounds_read"], control["score"]) == (1, 1, 200)
+
+    def test_a_round_keeps_the_arm_of_its_first_trial_engagement(self, tmp_path):
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        _enter_battle(t, ts=0.0)
+        t.on_event("flare_burst_deployed", 100.0)          # outside the trial
+        t.on_event("flare_burst_deployed", 200.0)
+        t.on_event("evade_trial_control", 200.0)
+        t.on_event("flare_burst_deployed", 300.0)
+        t.on_event("evade_trial_control", 300.0)
+        _leave_battle(t, ts=400.0)
+        _enter_battle(t, ts=500.0)                          # no trial engagement
+        _leave_battle(t, ts=600.0)
+        assert [m["trial_arm"] for m in t.finalize()["missions"]] == ["control", None]
+
+    def test_an_arm_outside_a_mission_marks_no_round(self, tmp_path):
+        t = _tracker(tmp_path)
+        t.on_event("flare_burst_deployed", 100.0)
+        t.on_event("evade_trial_evade", 100.0)
+        result = t.finalize()
+        assert result["missions"] == []
+        assert result["evade_trial_rounds"]["evade"]["rounds"] == 0
+
+    def test_the_rounds_are_summed_by_arm(self, tmp_path):
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        self._round(t, 0.0, "evade", RoundPerformance(400, 2, 3, 2))
+        self._round(t, 1000.0, "control", RoundPerformance(300, 1, 2, 1))
+        self._round(t, 2000.0, "evade", None)
+        self._round(t, 3000.0, "evade", RoundPerformance(200, 1, 1, 0))
+        self._round(t, 4000.0, None, RoundPerformance(999, 9, 9, 9))
+        result = t.finalize()
+        assert result["evade_trial_rounds"] == {
+            "evade": {"rounds": 3, "rounds_read": 2,
+                      "score": 600, "kills": 3, "deaths": 4, "assists": 2},
+            "control": {"rounds": 1, "rounds_read": 1,
+                        "score": 300, "kills": 1, "deaths": 2, "assists": 1}}
+        # The panel's own totals still count every round.
+        assert result["round_performance"]["score"] == 1899
+
+    def test_a_round_that_did_not_reach_the_end_screen_is_in_neither(self, tmp_path):
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        _enter_battle(t, ts=0.0)
+        t.on_event("flare_burst_deployed", 100.0)
+        t.on_event("evade_trial_evade", 100.0)
+        _leave_battle(t, next_state="GAME_LOBBY", ts=200.0)
+        assert t.finalize()["evade_trial_rounds"]["evade"]["rounds"] == 0
+
+    def test_the_summary_prints_each_arms_rounds(self, tmp_path, caplog):
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        self._round(t, 0.0, "evade", RoundPerformance(400, 2, 3, 2))
+        self._round(t, 1000.0, "evade", None)
+        self._round(t, 2000.0, "evade", RoundPerformance(200, 1, 1, 0))
+        self._round(t, 3000.0, "control", None)
+        t.finalize()
+        with caplog.at_level("INFO"):
+            t.print_summary()
+        assert ("\n  evade arm       : 2 of 3 rounds read: score 300.0, "
+                "K / D / A 1.5 / 2.0 / 1.0 per round read  (ADR 165)\n") in caplog.text
+        assert "\n  control arm     : 0 of 1 rounds read  (ADR 165)\n" in caplog.text
+
+    def test_no_arm_lines_without_a_trial_round(self, tmp_path, caplog):
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        self._round(t, 0.0, None, RoundPerformance(400, 2, 3, 2))
+        t.finalize()
+        with caplog.at_level("INFO"):
+            t.print_summary()
+        assert "Round performance : 1 of 1 rounds read" in caplog.text
+        assert "evade arm" not in caplog.text

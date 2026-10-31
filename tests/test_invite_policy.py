@@ -5,15 +5,18 @@ the INVITED crop sits on ACCEPT, so "don't accept" is not "don't click" — an
 undismissed invite dialog covers the lobby and strands the FSM.
 """
 
+import logging
 import pathlib
 import subprocess
 import sys
 
+import cv2
+import numpy as np
 import pytest
 import yaml
 
 from wingman.config_schema import validate_config
-from wingman.main import _invite_click_target
+from wingman.main import _invite_click_target, _save_invite_screenshot
 
 _ROOT = pathlib.Path(__file__).resolve().parents[1]
 _CROPS = {"INVITED": object(), "REJECT": object(), "PLAY": object()}
@@ -41,6 +44,26 @@ def test_decline_never_resolves_to_the_accept_button():
     absent, declining must not degrade into accepting."""
     for crops in ({}, {"INVITED": object()}, {"PLAY": object()}):
         assert _invite_click_target(False, crops) != "INVITED"
+
+
+# ---------------------------------------------------------------------------
+# Screenshot of the squad an accepted invite joined
+# ---------------------------------------------------------------------------
+
+_LOG = logging.getLogger("test_invite_policy")
+
+
+def test_accepted_invite_screenshot_lands_in_the_invite_folder(tmp_path):
+    frame = np.full((40, 60, 3), 128, dtype=np.uint8)
+    path = _save_invite_screenshot(frame, _LOG, directory=tmp_path / "invite")
+    assert path is not None and path.parent == tmp_path / "invite"
+    assert path.name.startswith("invite_") and path.suffix == ".png"
+    assert cv2.imread(str(path)).shape == frame.shape
+
+
+def test_a_failed_screenshot_never_raises(tmp_path):
+    """It runs on the thread that readies up after ACCEPT; raising would skip READY."""
+    assert _save_invite_screenshot(None, _LOG, directory=tmp_path / "invite") is None
 
 
 # ---------------------------------------------------------------------------

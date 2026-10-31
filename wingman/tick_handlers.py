@@ -720,7 +720,10 @@ class RespawnHandler:
 
     def tick_detect(self, frame, game_state, current_game_state) -> bool:
         """Detect and handle a respawn. Returns True when the loop must
-        sleep-and-continue (respawn screen still up)."""
+        sleep-and-continue (respawn screen still up).
+
+        @relation(SAF-001.4, scope=function)
+        """
         analyzer, ctrl = self._analyzer, self._ctrl
         self._sample_pre_crash_buffer(frame, game_state, current_game_state)
 
@@ -866,16 +869,22 @@ class RespawnHandler:
                     # not the default: shipped that way on 2026-08-30 and the
                     # operator hit two deaths in one takeover, each needing 'u'
                     # before wingman would fly again.
-                    if self._manual_persists_through_respawn:
+                    # SAF-001.4 (operator, 2026-10-30): a takeover by Enter
+                    # holds until the round ends, whatever the config says.
+                    manual_persists = (self._manual_persists_through_respawn
+                                       or ctrl.manual_held_for_round())
+                    if manual_persists:
                         logger.info(
                             "SAF-001: respawn while in manual — staying in "
-                            "GAME_BATTLE_MANUAL. Press the auto-mission key to "
-                            "return control to wingman.")
+                            "GAME_BATTLE_MANUAL%s. Press the auto-mission key to "
+                            "return control to wingman.",
+                            " (Enter holds it until the round ends)"
+                            if ctrl.manual_held_for_round() else "")
                     else:
                         analyzer.trigger_event("respawn_reset")
                 # Only promise an auto restart when wingman will actually own
                 # the aircraft; in manual the operator does.
-                if not (self._manual_persists_through_respawn
+                if not ((self._manual_persists_through_respawn or ctrl.manual_held_for_round())
                         and analyzer.game_state == GameState.GAME_BATTLE_MANUAL):
                     ctrl.set_auto_respawn_restart(True)  # always restart after respawn
                 # ADR 076 d1: death is latched — hold nose-up through the
@@ -951,6 +960,7 @@ class AmmoEventsHandler:
         self._last_incoming_alert_ts = 0.0
         self._fired_since_padlock = 0
         self._last_missile_count = None
+        self._in_battle = False
 
     # -- state --------------------------------------------------------------
 
@@ -961,6 +971,16 @@ class AmmoEventsHandler:
             self._last_missile_count = None
         self._zero_streak = 0
         self._missiles_empty_confirmed = False
+        # ADR 165: a round opens where the session summary opens a mission, on
+        # entering a battle state from outside one; the evade trial draws its arm
+        # once a round. Moves between battle states (an eject, a takeover) do not.
+        in_battle = new_state in _BATTLE_STATES
+        if in_battle and not self._in_battle:
+            try:
+                self._ctrl.pursuit_evade_new_round()
+            except Exception as exc:
+                log_suppressed(logger, "pursuit_evade_new_round", exc)
+        self._in_battle = in_battle
 
     def suppress_after_respawn(self, seconds: float = 10.0):
         """Ignore missile/incoming events for `seconds` — called by the respawn flow."""
@@ -1045,17 +1065,53 @@ class AmmoEventsHandler:
                         now - detect_done_ts, now - frame_ts)
             except Exception as e:
                 logger.debug("ADR096: reaction split unavailable: %s", e)
+        alert_ts = time.time()
         if self._stats is not None:
-            self._stats.on_event("flare_burst_deployed", time.time())
+            self._stats.on_event("flare_burst_deployed", alert_ts)
+
+        flares_done = threading.Event()
 
         def _flare_burst():
-            for _ in range(3):
-                self._ctrl.deploy_flares(hold_seconds=0.05, block=True, ignore_cancel=True)
-                time.sleep(0.3)
+            try:
+                for n in range(3):
+                    if n:
+                        time.sleep(0.3)
+                    self._ctrl.deploy_flares(hold_seconds=0.05, block=True, ignore_cancel=True)
+            finally:
+                # FR-011: the roll holds flare_roll_after_s from the last flare.
+                flares_done.set()
+            time.sleep(0.3)
             logger.info("\033[95m🚀 Flare burst complete\033[0m")
 
         threading.Thread(target=_flare_burst, daemon=True).start()
+        self._flare_roll(flares_done)
+        self._pursuit_evade(alert_ts)
         return True
+
+    def _flare_roll(self, flares_done: threading.Event) -> None:
+        """FR-011 / ADR 164: roll right through the burst and a little past it, on
+        every alert. After the flares, so nothing here can delay them."""
+        try:
+            self._ctrl.flare_roll(flares_done)
+        except Exception as exc:
+            log_suppressed(logger, "flare_roll", exc)
+
+    def _pursuit_evade(self, alert_ts: float) -> None:
+        """ADR 163: inside a pursuit the airframe's owner decides whether this
+        engagement gets the missile evade, and the session summary counts the
+        engagement, and its round (ADR 165), by arm. After the flares, so nothing
+        here can delay them."""
+        try:
+            arm, started = self._ctrl.pursuit_evade_on_alert(alert_ts)
+        except Exception as exc:
+            log_suppressed(logger, "pursuit_evade", exc)
+            return
+        if self._stats is None:
+            return
+        if arm is not None:
+            self._stats.on_event(f"evade_trial_{arm}", alert_ts)
+        if started:
+            self._stats.on_event("missile_evade", alert_ts)
 
     def handle_low_flares(self) -> None:
         """Press SPECIAL_ABILITY to reload flares when count reaches 2."""
@@ -1882,6 +1938,7 @@ class BehaviorTreeHandler:
         self._climb_last_hard_emergency_ts_fn = None
         self._climb_emergency_update_fn = None
         self._climb_terrain_ahead_fn = None
+        self._climb_pullout_lowest_fn = None
         self._terrain_ahead_prev = False
         # HLDD 001 Phase 1: evidence capture on the FALSE->TRUE edge of the
         # terrain-ahead trigger, same shape as _capture_crash_frame — cap-
@@ -1994,6 +2051,8 @@ class BehaviorTreeHandler:
                 self._tree, "climb_emergency_update_fn", None)
             self._climb_terrain_ahead_fn = getattr(
                 self._tree, "climb_terrain_ahead_fn", None)
+            self._climb_pullout_lowest_fn = getattr(
+                self._tree, "climb_pullout_lowest_fn", None)
 
     def set_hud_renderer(self, hud_renderer) -> None:
         """Wire in the HudRenderer so live_hud.png shows the terrain reading.
@@ -2376,6 +2435,16 @@ class BehaviorTreeHandler:
         if snapshot_obj is not None and snapshot_obj.altitude_fresh():
             altitude = snapshot_obj.altitude.stable_value
             altitude_rate = getattr(snapshot_obj.altitude, "rate", None)
+        # Code Review 019 cycle 32 (HLDD 001 part 2): the raw latest altitude and
+        # speed and the flight-path angle for the pull-out trigger, each None
+        # unless fresh (pitch_angle_deg needs both signals fresh).
+        altitude_now = speed_kph = path_deg = None
+        if snapshot_obj is not None:
+            if snapshot_obj.altitude_fresh():
+                altitude_now = snapshot_obj.altitude.value
+            if snapshot_obj.speed_fresh():
+                speed_kph = snapshot_obj.speed.value
+            path_deg = snapshot_obj.pitch_angle_deg()
         # Stored for _start_climb, which runs inside tree.tick() below and
         # needs the altitude the selection was made against (ADR 075).
         self._last_altitude = altitude
@@ -2484,6 +2553,9 @@ class BehaviorTreeHandler:
             terrain_warnings_agree=(self._warning_agreement is not None
                                     and current_game_state in _BATTLE_STATES
                                     and self._warning_agreement.agreeing(now)),
+            altitude_now=altitude_now,
+            speed_kph=speed_kph,
+            path_deg=path_deg,
         )
         self._writer.set("snapshot", snap)
         # Anomaly 007: refresh Climb's ttg emergency verdict unconditionally,
@@ -2497,6 +2569,11 @@ class BehaviorTreeHandler:
             except Exception as exc:
                 log_suppressed(logger, "climb_emergency_update_fn", exc)
         self._push_climb_emergency()
+        # Code Review 019 cycle 36: the live pull-out alarm's lowest point, every
+        # tick, for the controller's objective hold-off.
+        _set_pullout = getattr(self._ctrl, "set_pullout_lowest_m", None)
+        if self._climb_pullout_lowest_fn is not None and callable(_set_pullout):
+            _set_pullout(self._climb_pullout_lowest_fn())
         # HLDD 001 Phase 1: capture evidence on the FALSE->TRUE edge, right
         # after the update above refreshes terrain_ahead_active for THIS
         # tick and before the tree consumes it — mirrors the emergency
@@ -2807,6 +2884,10 @@ class WaitingFallbackHandler:
         """Returns True when the tick loop should `continue`."""
         if current_game_state != GameState.GAME_WAITING or self._waiting_since <= 0:
             return False
+        # Code Review 019: the matchmaking panel's mode and map, read once.
+        note_matchmaking = getattr(self._analyzer, "note_matchmaking_frame", None)
+        if callable(note_matchmaking):
+            note_matchmaking(frame)
 
         elapsed_waiting = time.time() - self._waiting_since
         if elapsed_waiting > self._timeout_s:

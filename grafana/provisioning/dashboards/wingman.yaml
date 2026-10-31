@@ -1,0 +1,13 @@
+# Design 018: loads grafana/dashboards/*.json. Saving from the UI is off: the
+# JSON file in the repository is the dashboard; to change it, edit it in
+# Grafana, export the JSON and replace the file.
+apiVersion: 1
+
+providers:
+  - name: wingman
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

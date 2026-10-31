@@ -572,7 +572,10 @@ def test_respawn_returns_control_to_wingman_by_default():
 def test_the_respawn_reset_is_gated_on_the_flag():
     import pathlib
     src = pathlib.Path("wingman/tick_handlers.py").read_text()
-    blk = src[src.index("if self._manual_persists_through_respawn:"):]
+    # SAF-001.4 (2026-10-30): the flag or an Enter hold keeps manual.
+    assert ("manual_persists = (self._manual_persists_through_respawn\n"
+            "                                       or ctrl.manual_held_for_round())") in src
+    blk = src[src.index("if manual_persists:"):]
     assert 'analyzer.trigger_event("respawn_reset")' in blk[:900], \
         "the reset must fire on the default path"
 
@@ -593,7 +596,8 @@ def test_no_auto_restart_is_promised_while_manual():
     GAME_BATTLE-gated while the FSM sat in manual."""
     import pathlib
     src = pathlib.Path("wingman/tick_handlers.py").read_text()
-    assert "if not (self._manual_persists_through_respawn" in src
+    assert ("if not ((self._manual_persists_through_respawn or ctrl.manual_held_for_round())"
+            in src), "neither the flag nor an Enter hold may promise a restart"
     assert "GameState.GAME_BATTLE_MANUAL)" in src
 
 

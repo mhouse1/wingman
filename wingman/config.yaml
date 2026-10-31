@@ -7,7 +7,7 @@
 # stays on the operator's DISPLAY, so backspace / end / i-j-k-l keep working
 # from wherever they are actually typed.
 #
-# Override per run without editing this file: make rd NESTED=0
+# Override per run without editing this file: make r NESTED=0
 nested:
   enabled: true
   display: ":3"
@@ -31,6 +31,11 @@ nested:
   # frames on Xwayland's fast path whatever the desktop does. Off until a
   # flight with the window covered for more than five minutes confirms it.
   block_page_flips: false
+  # ADR 162: resizing the nested window on the desktop resizes the nested
+  # screen with it (Xwayland 24.1.10, -decorate). Smaller than `size`, every
+  # grab fails: 2026-10-25 16:21, 3 pixels lost, ten minutes blind (Anomaly
+  # 015). true sets the screen back to `size` within a second of it shrinking.
+  restore_size: true
 
 # Design 011 (ACS Mode), step 1: which weapon-employment tactic the active
 # airframe supports. Read once at startup into AnalyzerSnapshot.has_padlock.
@@ -102,6 +107,61 @@ crops:
     - [0.8257, 0.9156]
     - [0.9243, 0.9444]
     text: [CONTINUE]
+  # The end-of-round PERFORMANCE panel's SCORE and KDA columns
+  # (wingman/round_performance.py). Tall bands: the panel's height follows the
+  # medals earned, so its figures sit anywhere from about y 0.27 (five medals)
+  # to 0.51 (none); the reader finds the KDA in its band by the label under it
+  # and reads the score on that row (Action Item 005, AI-005-2).
+  # The squadron leaderboard (wingman/squadron_ranking.py, ADR 166): the lobby's
+  # menu button, LEADERBOARDS in the open menu, the leaderboard's title, back
+  # arrow, SQUADRONS tab and list header, and our squadron's row pinned at the
+  # bottom (rank, name, trophies). Measured 2026-10-31 on the operator's four
+  # screenshots (tests/test-output/screenshot_20261031_0144*.png, 1920x1200).
+  # SQ_MENU is the house icon on the leaderboard page: clicked from the lobby only.
+  SQ_MENU:
+    coords:
+    - [0.9714, 0.008]
+    - [0.9922, 0.046]
+  SQ_MENU_LEADERBOARDS:
+    coords:
+    - [0.75, 0.255]
+    - [0.905, 0.305]
+  SQ_BOARD_TITLE:
+    coords:
+    - [0.04, 0.005]
+    - [0.15, 0.045]
+  SQ_BACK:
+    coords:
+    - [0.02, 0.008]
+    - [0.042, 0.045]
+  SQ_TAB_SQUADRONS:
+    coords:
+    - [0.745, 0.05]
+    - [0.845, 0.09]
+  SQ_BOARD_HEADER:
+    coords:
+    - [0.62, 0.355]
+    - [0.92, 0.385]
+  SQ_OWN_RANK:
+    coords:
+    - [0.6115, 0.925]
+    - [0.6604, 0.98]
+  SQ_OWN_NAME:
+    coords:
+    - [0.685, 0.925]
+    - [0.84, 0.98]
+  SQ_OWN_TROPHIES:
+    coords:
+    - [0.937, 0.925]
+    - [0.995, 0.98]
+  PERF_SCORE:
+    coords:
+    - [0.5208, 0.06]
+    - [0.7135, 0.62]
+  PERF_KDA:
+    coords:
+    - [0.75, 0.06]
+    - [0.9557, 0.62]
   HEALTH:
     coords:
     - [0.5833, 0.9333]
@@ -111,16 +171,19 @@ crops:
     - [0.85, 0.8933]
     - [0.9306, 0.9411]
     text: [PLAY]
-  # ADR 102 rev 2: the squad lobby's READY button, measured on the 2026-09-25
-  # 09:16:41 screenshot at 1606,1060 to 1863,1138 px (this crop is that box
-  # inset 3 px). The April crop covered only its upper-left corner, so READY was
-  # never read and three lobby dwells of 127 to 194 s ran before the operator
-  # clicked by hand. Not in tests/calibration_map.yaml (no capture path visits
-  # the squad lobby), so `make calibrate` will not move it.
+  # ADR 102 rev 2: the squad lobby's READY button. The April crop covered only
+  # its upper-left corner, so READY was never read and three lobby dwells of 127
+  # to 194 s ran before the operator clicked by hand. The October layout moved
+  # the word left of a rank badge: on the 2026-10-18 01:11:42 frame the white
+  # button is 1592,1062 to 1829,1140 px and the letters 1630,1079 to 1794,1121.
+  # This crop clears them by 4 px or more; the 2026-10-11 crop ended 1 px into
+  # the Y. The same crop reads the WAITING / CLICK TO UNREADY state. Not in
+  # tests/calibration_map.yaml (no capture path visits the squad lobby), so
+  # `make calibrate` will not move it.
   READY:
     coords:
     - [0.8451, 0.8911]
-    - [0.934, 0.9433]
+    - [0.9365, 0.9433]
     text: [READY]
   CANCEL:
     coords:
@@ -168,6 +231,26 @@ crops:
     - [0.5174, 0.4078]
     - [0.7, 0.4767]
     text: [SILVER]
+  # Code Review 019 (2026-10-19 09:14): "That party has ended." with one OK
+  # button, over the lobby at a start; it held the start in GAME_UNKNOWN until OK
+  # was clicked. PARTY_ENDED reads the message, PARTY_ENDED_OK is what is clicked
+  # (test_screenshots/PARTY_ENDED.png).
+  PARTY_ENDED:
+    coords:
+    - [0.33, 0.39]
+    - [0.67, 0.455]
+    text: [PARTYHASENDED, HASENDED]
+  PARTY_ENDED_OK:
+    coords:
+    - [0.4188, 0.4708]
+    - [0.5813, 0.5267]
+  # Code Review 019 (2026-10-19): the matchmaking panel's mode and map lines
+  # above CANCEL ("TEAM DEATHMATCH" / "ICEBOUND"), read once per matchmaking
+  # (test_screenshots/MATCHMAKING_ICEBOUND.png).
+  MATCH_MAP:
+    coords:
+    - [0.84, 0.828]
+    - [0.97, 0.875]
   ALTITUDE_SPEED:
     coords:
     - [0.3167, 0.6333]
@@ -352,7 +435,7 @@ liveness_guard:
   enabled: true
   stall_limit_s: 300.0        # log loudly, let recovery escalate
   hard_limit_s: 900.0         # end the session at the next safe point
-# Anomaly 003: diagnostic-only, only checked when --record-session (make rd v)
+# Anomaly 003: diagnostic-only, only checked when --record-session (make r v)
 # is active. 40s is a first estimate from one incident, not a calibrated
 # default — see docs/anomaly/003-eject-no-telemetry-false-death-leaves-
 # aircraft-unflown.md before trusting it beyond that one case.
@@ -361,7 +444,7 @@ eject_stuck_detector:
   eject_stuck_after_s: 40.0
 stall_recovery:
   action_after_s: 15.0        # dwell in GAME_UNKNOWN/GAME_STARTING_STALLED before acting
-  unready_dwell_s: 40.0       # UNREADY suppressing the PLAY click before leaving the squad
+  unready_dwell_s: 160.0      # UNREADY suppressing the PLAY click before leaving the squad (was 40; +2 min 2026-10-23 so a party leader has time to launch)
   squad_no_battle_s: 900.0    # squad lobby (READY shown, not PLAY) with no battle before leaving the squad
   scan_interval_s: 5.0        # how often the stall batch runs once the gate is open
   play_click_delay_s: 2.0     # after leaving the squad, before clicking PLAY
@@ -447,6 +530,8 @@ incoming_detection:
 # once it is over there is nothing left to hold, and requiring a keypress after
 # every death makes an unattended session need attending. Set true to keep the
 # takeover across deaths — then 'u' is the only way back to auto.
+# SAF-001.4 (operator, 2026-10-30): a takeover by Enter holds until the round
+# ends whatever this says; this setting governs the other takeover keys.
 mission: {manual_takeover: {persist_through_respawn: false},
   weapon_loop_interval: 1.0, no_missiles_consecutive_required: 2, no_missiles_abort_grace_s: 6.0,
   starting_stalled_reclassify_after_s: 3.0, respawn_clear_stability_s: 1.5, starting_max_wait_s: 150.0,
@@ -598,9 +683,21 @@ behavior_tree:
   # ADR 128 / FR-008: hold the afterburner while a missile is inbound, until
   # incoming has not been seen for afterburner_clear_s. Flares change what the
   # missile is tracking; speed changes whether it can still reach the aircraft.
+  # ADR 163: pursuit_share is the part of the engagements inside a pursuit that
+  # get the ADR 070 evade, the pursuit yielding to it. Drawn per engagement, with
+  # ADR 164's flare roll in both arms, the evade arm survived 61% against the
+  # control arm's 85% (V3, 2026-10-27), and the share went to 0. ADR 165: the
+  # arm is now drawn once per ROUND, so the session summary can set each arm's
+  # score and K/D/A per round beside its engagement survival ("pursuit trial");
+  # after share 0, assists per round fell on both accounts measured. 0.5 runs
+  # that trial; 0 is no evade inside a pursuit.
+  # FR-011 / ADR 164: every alert also holds roll-right, a barrel roll that leaves
+  # the flight path alone, until flare_roll_after_s after the burst's last flare
+  # (the operator's 2 s); a fault cap at flare_roll_max_s. Independent of enabled.
   missile_evade: {afterburner_clear_s: 4.0, afterburner_max_s: 20.0,
     enabled: true, clear_seconds: 3.0, min_clear_samples: 2, max_manoeuvre_s: 6.0,
-    max_hold_s: 15.0, pitch_down: false}
+    max_hold_s: 15.0, pitch_down: false, pursuit_share: 0.5,
+    flare_roll_after_s: 2.0, flare_roll_max_s: 15.0}
   # ADR 134 D8: a real hysteresis band, not one shared threshold. Burn from
   # wherever fuel is down to min_fuel_pct, then let it recharge (ADR 075) up
   # to rearm_fuel_pct before holding again — the operator's explicit design
@@ -769,6 +866,20 @@ behavior_tree:
     # (130 missions, 145 kill-card crashes) that agreement came 1 to 6 s before
     # 34% of the crashes, about twice a mission, a crash following 16% of them.
     warning_agreement: {enabled: true, shadow: false, window_s: 1.0, hold_s: 3.0}
+    # Code Review 019 cycle 32 (HLDD 001 part 2): the emergency climb starts when a
+    # pull-out started reaction_s from now would bottom out under floor_m, from the
+    # raw altitude, speed and path and the nose-up rates measured in cycle 21. Over
+    # 373 missions of 2026-10-17/18 (499 kill-card crashes), floor 600 m and 2 s of
+    # reaction would have fired 2 s or more before 55% of the crashes, where the
+    # emergency climbs that fired managed 43%, at the same alarms a mission (4.7)
+    # and precision (17%). Cycle 34: it flies, beside time to ground and under the same
+    # objective hold-off, after a MiG-31 shadow baseline (cycle 32). Cycle 36: an alarm
+    # predicting a lowest point under bypass_holdoff_below_m breaks the objective
+    # hold-off, as two agreeing warnings do: over 401 missions the hold-off acted
+    # within 10 s before 55% of the crashes, and alarms under 300 m during it were
+    # followed by a crash 24% of the time, 1.0 a mission.
+    pullout: {enabled: true, shadow: false, floor_m: 600, reaction_s: 2.0,
+      bypass_holdoff_below_m: 300}
   # HLDD 013 Phase 1: wires the existing, already-selected TACTIC_ATTACK_SUPPORT
   # fallback slot to the existing boundary reading — roll away from the nearest
   # map edge on ticks where nothing else steers at all. Ships shadow-only
@@ -1003,8 +1114,8 @@ terrain_avoidance:
 # Code Review 019 step 3a: the same outlines measured on the pursuit's own
 # frames (about 0.17 s apart) instead of the main tick's, logged as PATHVIEW
 # lines and drawn on live_hud.png under the picture they came from: free air
-# tinted, outlines coloured by time to contact, the point the picture expands
-# from. Shadow only. Uses terrain_avoidance.loom's settings with its own
+# tinted blue and objects orange, outlines coloured by time to contact, the
+# point the picture expands from. Shadow only. Uses terrain_avoidance.loom's settings with its own
 # detector instances; the main tick's readings above carry on unchanged.
 clear_path:
   enabled: true
@@ -1035,6 +1146,34 @@ clear_path:
 # and a DEATH CARDS summary at the end; read on the analyzer's OCR pool. Live only.
 kill_card:
   enabled: true
+
+# Action Item 005 (AI-005-1): keep the frames the end-of-round PERFORMANCE panel
+# reader looked at, in test_screenshots/round_performance/, as a corpus to
+# measure the reader against: the frame a read round was read on, every frame of an
+# unread one, and in an unread round each later page. JPEG, within the capture
+# budget. Live runs only. Turn off once the corpus is gathered.
+round_performance:
+  capture: true
+
+# Design 018 Phase 3, ADR 166: the squadron's rank and trophies, read off the
+# game's squadron leaderboard in the lobby between rounds. Off here; the operator
+# switches it on per machine in config.local.yaml. A reading is due at the first
+# lobby and every_min after the last attempt; each step of the navigation waits
+# step_timeout_s for its screen. `squadron` is the name in our row. `capture`
+# keeps the frame of each reading, and the last frame of a navigation that gave
+# up, in test_screenshots/squadron_ranking/.
+squadron_ranking:
+  enabled: false
+  every_min: 60
+  step_timeout_s: 8.0
+  squadron: Mobius Squadron
+  capture: true
+
+# Design 018: the score dashboard, a Grafana and Postgres stack on VEDA fed from
+# the session stats files (`make grafana`). Off here, so a clone runs none of
+# it; the operator switches it on per machine in config.local.yaml.
+score_dashboard:
+  enabled: false
 
 # Code Review 019 cycle 11 (operator, 2026-10-15: "shadow first"): relative
 # terrain depth from one picture (Depth Anything V2 Small), in a worker process
@@ -1078,6 +1217,15 @@ approach_brake:
   crown: true
   cap_kph: 850
   target_kph: 800
+  # 2026-10-24 (operator: the resupply missed twice, pulling out too early): over
+  # 25 logs (660 matches) the pull-out trigger broke the resupply hold-off in 143
+  # dives, at a median 938 m, -38 deg and 1,003 KPH, the reading before at 834
+  # (over 850 in 46%, over 700 in 82%); after the 138 scored, 24% rearmed and 13%
+  # crashed. From 938 m at -38 deg a pull-out bottoms out at -79 m from 1,000 KPH,
+  # 238 m from 850 and 403 m from 700, above the 300 m that breaks the hold-off.
+  # The nose comes up 21 deg/s under 600 KPH and 5 to 7 around 1,000.
+  resupply_cap_kph: 700
+  resupply_target_kph: 650
   decel_kph_s: 150
   max_dose_s: 3.0
   # Code Review 019 cycle 27 (envelope protection, part 1): the same dose in a
@@ -1731,6 +1879,15 @@ pursuit_mode:
   # too. In that day's session 19 of 269 recoveries started while a control point's
   # marker was steering; at 14:36:56 A was 12 px off the centre.
   crash_recovery_clear_view_s: 1.0
+  # Operator, 2026-10-20: "why did it see target 'A' then steer away when it was
+  # clearly in view". At 02:40:48.8 the scan missed A, 20 px off the centre, for
+  # about 0.6 s; the 0.5 s memory ran out, the resupply marker took the steering,
+  # and A, found again a cycle later, never got it back. In the logs of 10-15 to
+  # 10-20 an objective with the steering went unseen 1,747 times and came back
+  # within 4 s: 64% under 1.1 s, 85% under 1.5 s; 289 came back without the
+  # steering. A control point's or the crown's marker is now held this long. A
+  # held marker steers but does not count as in view for crash_recovery_clear_view_s.
+  objective_marker_hold_s: 1.5
   # HLDD 015 Icon-Directed Search (2026-09-26), SHADOW STAGE: each steering tick
   # finds the game's red ring icon (an arrowhead on a fixed ring around the screen
   # centre pointing at an off-screen enemy), adds points to a nose-down/up and a
@@ -1793,6 +1950,14 @@ pursuit_mode:
     # 470 m (HUD 1403 m, mean 1873 m at 20:19:28). Named guess.
     push_floor_lookahead_s: 3.0
     blind_search_after_s: 3.0
+    # Code Review 019 cycle 39 (the operator's resupply question, 2026-10-19): an
+    # icon within 5 deg of the horizon, or above it, gets no push. At 04:17:01.7
+    # the ammo pin moved level (-1 to +5 deg) and the push went on 3 s on the
+    # score a low-left sighting had left, into a -50 deg dive at 983 KPH, the
+    # pull-up alarm, a stall and a crash. Over 271 missions, 21 crashes came
+    # 1 to 15 s after a push with the icon level or above (9% of such pushes,
+    # 4% of the others).
+    level_band_deg: 5.0
 hud:
   # Back on (2026-09-21): the roll_right convergence investigation exhausted
   # what wingman.log alone can show (episode trace confirmed roll_right
@@ -1849,10 +2014,14 @@ hud:
   # Each planner alarm (DETOUR or ESCAPE, Code Review 019 cycle 5) also leaves a
   # 4 s clip in <dir>/alarms, taken 1.5 s after it: at most one every 30 s and 60
   # a session, so each alarm can be labelled true or false from what was on screen.
+  # Research 017 step 3: `raw` also keeps the game's own picture beside each
+  # annotated frame, in <dir>/raw under the same names (the annotated frames carry
+  # the planner's overlay over the analysed box). Its budget is under
+  # capture_budget.dirs: about 370 deaths.
   black_box: {enabled: true, dir: test_screenshots/path_blackbox, seconds: 18.0, rate_hz: 3.0,
-              alarm_max: 60, alarm_gap_s: 30.0, alarm_seconds: 4.0}
+              alarm_max: 60, alarm_gap_s: 30.0, alarm_seconds: 4.0, raw: true}
 # Design 012: opt-in via --record-session (the Makefile's 'v' argument, e.g.
-# "make rd v"), never the default — a multi-hour session's file size and CPU
+# "make r v"), never the default — a multi-hour session's file size and CPU
 # cost scale with fps. Low by design: this is reviewed at tactic-selection
 # cadence (seconds), not watched as smooth video.
 session_recording: {fps: 2.0, scale: 0.5}
@@ -1868,9 +2037,11 @@ capture_budget:
   dirs:
     # annotated frame (about 1 MB) plus raw scan (about 0.6 MB) per save
     tests/test-output/target_tracking: {max_files: 600, max_mb: 1024}
+    # Research 017 step 3: the black box's raw pictures, about 54 a death
+    test_screenshots/path_blackbox/raw: {max_files: 20000, max_mb: 3072}
   # logs/wingman_*.log, deleted oldest-first at startup
   rotated_logs: {max_files: 200, max_mb: 2048}
-  # logs/session_*.mp4 (make rd v), deleted oldest-first before recording
+  # logs/session_*.mp4 (make r v), deleted oldest-first before recording
   session_video: {max_files: 8, max_mb: 6144}
 telemetry:
   # ADR 123: NOSE_DIRECTION deadband. Level flight jitters around zero altitude
@@ -1906,6 +2077,12 @@ telemetry:
   # designed for the 1.5 s tick (max_gate_dt_s 1.5); each read is about 0.4 s
   # of OCR on the pool, in parallel with the other crops.
   ocr_every_n_ticks: 1
+  # Code Review 019 cycle 38: the behavior tree decides on this tick's reading,
+  # waiting for it at most this long after the tick starts (it lands about 0.45 s
+  # in). Deciding first left every climb trigger on a frame 1.54 s old (409
+  # triggers, 2026-10-18/19), 1.1 s of it a finished reading waiting for the next
+  # tick. Live runs only; 0 turns it off.
+  bt_wait_s: 0.75
   eject_closed_loop: {enabled: true, check_interval_s: 1.5, confirm_consecutive: 2,
     legacy_nose_hold_s: 5.0, over_rotation_after_s: 6.0, target_dive_angle_deg: 65.0,
     dive_angle_floor_deg: 55.0, descent_target_mps: 100.0, descent_floor_mps: 50.0,

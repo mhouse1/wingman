@@ -252,7 +252,9 @@ def test_the_airbrake_gives_way_to_the_afterburner_as_the_dive_shallows(monkeypa
         time.sleep(0.3)
         assert _presses(kb, AIRBRAKE_KEY) and not _presses(kb, AFTERBURNER_KEY)
 
-        analyzer.set(250.0, t0 + 0.1, angle=-19.0)
+        # Cycle 35: readings seconds apart, as the HUD gives them: the climb skips a
+        # path that turns faster than an airframe can (telemetry.path_is_misread).
+        analyzer.set(250.0, t0 + 3.0, angle=-19.0)
         time.sleep(0.6)
     assert _releases(kb, AIRBRAKE_KEY), "airbrake still held in a shallow dive"
     assert _presses(kb, AFTERBURNER_KEY), "the burner never lit after the airbrake"
@@ -274,7 +276,9 @@ def test_a_dive_that_steepens_trades_the_afterburner_for_the_airbrake(monkeypatc
         time.sleep(0.3)
         assert _presses(kb, AFTERBURNER_KEY) and not _presses(kb, AIRBRAKE_KEY)
 
-        analyzer.set(250.0, t0 + 0.1, angle=-64.0)
+        # Cycle 35: readings seconds apart, as the HUD gives them: the climb skips a
+        # path that turns faster than an airframe can (telemetry.path_is_misread).
+        analyzer.set(250.0, t0 + 3.0, angle=-64.0)
         time.sleep(0.6)
     assert _presses(kb, AIRBRAKE_KEY), "a steep dive never braked"
     burner_off = _releases(kb, AFTERBURNER_KEY)
@@ -678,7 +682,9 @@ def test_climb_burner_does_not_relight_while_over_pitch_ceiling(monkeypatch):
 
     # Back inside the ceiling with the same fuel: the gate is angle-specific,
     # not a blanket block, so the burner must come back.
-    analyzer.set(5000.0, t0 + 2.0, angle=40.0)
+    # Cycle 35: readings seconds apart, as the HUD gives them: the climb skips a
+    # path that turns faster than an airframe can (telemetry.path_is_misread).
+    analyzer.set(5000.0, t0 + 4.0, angle=40.0)
     time.sleep(0.8)
     assert len(_presses(kb, AFTERBURNER_KEY)) > lit_at_ceiling, \
         "burner never relit after the nose came back inside the ceiling"
@@ -1543,10 +1549,12 @@ def test_the_fast_dive_brake_holds_down_to_the_release_then_lets_the_burner_in(m
     with caplog.at_level("INFO", logger="wingman.controller"):
         ctrl.climb_mode(emergency=True)
         time.sleep(0.4)
-        analyzer.set(300.0, t0 + 0.1, angle=-25.0, speed=800)     # under 900, over 750
+        # Cycle 35: readings seconds apart, as the HUD gives them: the climb skips a
+        # path that turns faster than an airframe can (telemetry.path_is_misread).
+        analyzer.set(300.0, t0 + 1.0, angle=-25.0, speed=800)     # under 900, over 750
         time.sleep(0.5)
         assert ctrl._climb_emergency_active, "let go above the release speed"
-        analyzer.set(300.0, t0 + 0.2, angle=-20.0, speed=700)
+        analyzer.set(300.0, t0 + 2.0, angle=-20.0, speed=700)
         time.sleep(0.6)
     assert not ctrl._climb_emergency_active
     assert _releases(kb, AIRBRAKE_KEY)
@@ -1614,10 +1622,82 @@ def test_a_dive_that_ends_is_released_as_no_longer_a_dive(monkeypatch, caplog):
     with caplog.at_level("INFO", logger="wingman.controller"):
         ctrl.climb_mode(emergency=True)
         time.sleep(0.4)
-        analyzer.set(300.0, t0 + 0.1, angle=30.0, speed=1090)
+        # Cycle 35: readings seconds apart, as the HUD gives them: the climb skips a
+        # path that turns faster than an airframe can (telemetry.path_is_misread).
+        analyzer.set(300.0, t0 + 3.0, angle=30.0, speed=1090)
         time.sleep(0.6)
     messages = [r.getMessage() for r in caplog.records]
     assert any("path +30 deg is no longer a dive: airbrake released" in m for m in messages)
     assert not any("slow enough" in m for m in messages)
     ctrl._climb_stop.set()
     assert _wait_done(ctrl)
+
+
+# ---------------------------------------------------------------------------
+# Code Review 019 cycle 35: a misread path must not push the nose down in a
+# dive recovery. Of 144 nose-down pulses in emergency climbs on five logs of
+# 2026-10-18, 80 came at a clamped +90 deg (rates of +330 to +412 m/s, the
+# rebound of an altitude misread), and 25 of the 61 crashes during an
+# emergency climb had one.
+# ---------------------------------------------------------------------------
+
+import pytest  # noqa: E402
+
+from wingman.telemetry import path_is_misread  # noqa: E402
+
+CEILING = dict(CFG, max_climb_s=3.0, pitch_pulse_s=0.2, pulse_observe_s=0.2,
+               max_pitch_deg=80.0, pitch_lead_s=3.0)
+
+
+@pytest.mark.parametrize("angle, prev, dt, speed, misread", [
+    (90.0, None, None, 900, True),   # clamped: the altitude rate outran the airspeed
+    (-90.0, -60.0, 1.5, 1400, True),
+    (85.0, None, None, 900, False),  # steep, possible, nothing to compare with
+    (40.0, -30.0, 1.5, 900, True),   # 47 deg/s
+    (-10.0, -30.0, 1.5, 900, False),  # 13 deg/s
+    (40.0, -30.0, 3.0, 900, False),  # 23 deg/s
+    (90.0, -60.0, 0.5, 18, False),   # live 21:32:32.7: vertical at 18 KPH is real
+    (90.0, None, None, None, False),  # no speed, no verdict
+])
+def test_a_path_no_airframe_can_fly_is_a_misread(angle, prev, dt, speed, misread):
+    assert path_is_misread(angle, prev, dt, speed) is misread
+
+
+def _dive_recovery(monkeypatch, then_angle, then_ts_after):
+    from wingman.controller import NOSE_DOWN_KEY
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=800.0, ts=t0, fuel=100, angle=-30.0, speed=900)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, CEILING)
+    ctrl.climb_mode(emergency=True)
+    time.sleep(0.4)
+    analyzer.set(780.0, t0 + then_ts_after, angle=then_angle, speed=900)
+    time.sleep(0.8)
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+    return _presses(kb, NOSE_DOWN_KEY)
+
+
+def test_a_clamped_climb_reading_in_a_dive_does_not_push_the_nose_down(monkeypatch):
+    assert not _dive_recovery(monkeypatch, 90.0, 1.5)
+
+
+def test_a_path_that_turned_impossibly_fast_does_not_push_the_nose_down(monkeypatch):
+    """-30 to +40 deg in 1.5 s: the 47 deg/s rate, carried 3 s ahead, put the
+    predicted angle at +180 deg, far over the 80 deg ceiling."""
+    assert not _dive_recovery(monkeypatch, 40.0, 1.5)
+
+
+def test_the_ceiling_still_holds_a_real_climb(monkeypatch):
+    from wingman.controller import NOSE_DOWN_KEY
+    t0 = time.time()
+    analyzer = _FakeTelemetryAnalyzer(stable_value=800.0, ts=t0, fuel=100, angle=60.0, speed=600)
+    kb = _FakeKeyboard()
+    ctrl = _make_ctrl(monkeypatch, kb, analyzer, CEILING)
+    ctrl.climb_mode(target_alt=9000.0, max_s=3.0)
+    time.sleep(0.4)
+    analyzer.set(900.0, t0 + 3.0, angle=85.0, speed=500)      # 8 deg/s: possible
+    time.sleep(0.8)
+    ctrl._climb_stop.set()
+    assert _wait_done(ctrl)
+    assert _presses(kb, NOSE_DOWN_KEY), "the ceiling no longer pushed a real climb down"

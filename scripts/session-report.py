@@ -8,7 +8,7 @@ wingman), and prints the numbers the target-tracking work is judged on.
 
 What it needs from the log:
 - `PURSUIT SUMMARY:` and `DIVE SUMMARY:` lines (INFO, since Cycle 7);
-- `TRACKPICK:` lines (DEBUG, `make rd` / `make r1` write them) for the acquisition
+- `TRACKPICK:` lines (DEBUG, `make r` / `make r1` write them) for the acquisition
   and steering-point sections; without them those sections say so.
 
 Usage: python3 scripts/session-report.py [wingman.log] [more logs...]
@@ -220,7 +220,7 @@ def render(r: dict, name: str = "wingman.log") -> str:
     out.append("")
     out.append("TRACKING (TRACKPICK lines)")
     if not r["ticks"]:
-        out.append("  no TRACKPICK lines: this needs a DEBUG log (make rd / make r1)")
+        out.append("  no TRACKPICK lines: this needs a DEBUG log (make r / make r1)")
     else:
         out.append(f"  ticks {r['ticks']:,}   lock ticks {r['locks']} ({_pct(r['locks'], r['ticks'])})")
         out.append(f"  acquisitions {r['acquisitions']}   outside the old box {r['acq_outside_old']}"

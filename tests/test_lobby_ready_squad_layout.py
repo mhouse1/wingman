@@ -8,7 +8,7 @@ while the quick-scan logged:
     Click-to OCR re-enabled: GAME_LOBBY blackout - the forced state may be wrong
 
 The operator pressed 'm' to click the button by hand each time. The screenshot
-they captured mid-stall (tests/fixtures/lobby_ready_squad_br.png is its
+they captured mid-stall (tests/fixtures/lobby_ready_squad_br.png was its
 bottom-right corner, at the offset below) shows a fully visible lobby.
 
 Measured on that frame with the real OCR path, before this change:
@@ -27,6 +27,14 @@ ends 53% of the way across and 42% of the way down).
 'UNREADY' contains 'READY', so widening the crop over the button has a second
 edge: after the click the button reads UNREADY and would match again. The
 GAME_LOBBY scan must read that as "already ready", not click a second time.
+
+The October game update redrew the button: READY now sits left of a rank badge
+on the button's right edge, the mode text moved above it and the "0 / 2 READY"
+count below. On 2026-10-25 the fixture was replaced with the same corner of the
+2026-10-18 01:11:42 squad lobby, the layout the 2026-10-24 'make r1 v'
+recording shows. The September frame measured above is the file's version in
+c327742. tests/fixtures/ is gitignored, so a fixture under a new name would be
+left out of `git add .`.
 """
 
 from pathlib import Path
@@ -89,7 +97,7 @@ def _overlap(a, b):
 def test_the_fixture_shows_the_squad_ready_button():
     box = _button_bbox(_frame())
     w, h = box[2] - box[0], box[3] - box[1]
-    assert 240 <= w <= 270 and 70 <= h <= 85, box   # 257 x 78 as measured
+    assert 225 <= w <= 250 and 70 <= h <= 85, box   # 237 x 78 as measured (257 before the badge)
 
 
 def _letters_bbox(frame, button, edge=6, thr=120):
@@ -107,11 +115,14 @@ def test_the_ready_crop_contains_the_buttons_letters():
 
     This used to demand 90% of the button's width and height, on the premise
     that anything less cuts the letters off. The crop recalibrated on
-    2026-09-25 (e12f9d9) wraps the letters with 3-4 px to spare and covers
-    66% x 63% of the button: the real-OCR test below reads READY through it on
-    this fixture, and on 2026-09-27 it found and clicked READY in 7 of 7 squad
-    lobbies live. The 2026-04 crop this test was written against ended 92 px
-    short of the letters, which this still catches.
+    2026-09-25 (e12f9d9) wrapped the letters with 3-4 px to spare and covered
+    66% x 63% of the button, and on 2026-09-27 it found and clicked READY in 7
+    of 7 squad lobbies live. The 2026-04 crop this test was written against
+    ended 92 px short of the letters, which this still catches.
+
+    On the October layout the 2026-10-11 crop ended 1 px into the Y (crop to
+    1793, letters to 1794) and still read READY live on 2026-10-24; the right
+    edge now clears it by 4 px.
     """
     frame = _frame()
     letters = _letters_bbox(frame, _button_bbox(frame))

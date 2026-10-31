@@ -20,9 +20,10 @@ copy the main prefix. Do not copy it; see [Why not copy the main prefix](#why-no
 
 | Targets                 | Prefix under `~/Games/Heroic/Prefixes/` | Run tag |
 |-------------------------|------------------------------------------|---------|
-| `make g`, `r`, `rd`     | `Metalstorm` (the main prefix)           | none    |
+| `make g`, `make r`      | `Metalstorm` (the main prefix)           | none    |
 | `make g1`, `make r1`    | `Metalstorm-acct1`                       | `acct1` |
 | `make g2`, `make r2`    | `Metalstorm-acct2`                       | `acct2` |
+| `make g3`, `make r3`    | `Metalstorm-acct3`                       | `acct3` |
 
 - `gN` launches the game only. `rN` launches the game and Wingman, logging to
   `wingman.log`.
@@ -34,8 +35,8 @@ copy the main prefix. Do not copy it; see [Why not copy the main prefix](#why-no
 
 ## Add an account
 
-The Makefile already has targets for acct1 and acct2. For a third account, first
-do [Add targets for a third account](#add-targets-for-a-third-account).
+The Makefile already has targets for acct1, acct2 and acct3. For a fourth
+account, first do [Add targets for another account](#add-targets-for-another-account).
 
 The steps below use acct2. Replace the number for another account.
 
@@ -172,29 +173,29 @@ up is lost. That is how acct2 first came up without bindings on 2026-10-11.
 | Game window is `Metalstorm`, not `Wine Desktop`, after Step 1 | It was launched with `make g WINE_PREFIX=…` instead of `make gN` | Launch with `make gN` |
 | A new prefix comes up logged in as the main account | The prefix was copied from the main prefix | Delete the copy and build it with Step 1 |
 
-## Add targets for a third account
+## Add targets for another account
 
-Add these to the Makefile beside the acct1 and acct2 lines. Recipe lines start
+Add these to the Makefile beside the acct1, acct2 and acct3 lines. Recipe lines start
 with a tab.
 
 ```make
-ACCT3_PREFIX ?= $(HOME)/Games/Heroic/Prefixes/Metalstorm-acct3
+ACCT4_PREFIX ?= $(HOME)/Games/Heroic/Prefixes/Metalstorm-acct4
 
-sync-settings-3:
+sync-settings-4:
 	@$(PYTHON_RUN) scripts/sync-metalstorm-settings.py \
-	  "$(SETTINGS_SRC_PREFIX)" "$(ACCT3_PREFIX)" $(DRY)
+	  "$(SETTINGS_SRC_PREFIX)" "$(ACCT4_PREFIX)" $(DRY)
 
-g3: WINE_PREFIX := $(ACCT3_PREFIX)
-g3: ensure-virtual-desktop g
+g4: WINE_PREFIX := $(ACCT4_PREFIX)
+g4: ensure-virtual-desktop g
 
-r3: WINE_PREFIX := $(ACCT3_PREFIX)
-r3: WINGMAN_ENV += WINGMAN_ACCOUNT=acct3
-r3: ensure-virtual-desktop rd
+r4: WINE_PREFIX := $(ACCT4_PREFIX)
+r4: WINGMAN_ENV += WINGMAN_ACCOUNT=acct4
+r4: ensure-virtual-desktop rd
 ```
 
-Also add `g3 r3 sync-settings-3` to the `.PHONY` line that lists `g1 g2 r1 r2`.
-Check the result with `make -n r3`: the `WINEPREFIX=` in the launch line must
-name the acct3 prefix, and the last line must carry `WINGMAN_ACCOUNT=acct3`.
+Also add `g4 r4 sync-settings-4` to the `.PHONY` line that lists `g1 g2 g3 r1 r2 r3`.
+Check the result with `make -n r4`: the `WINEPREFIX=` in the launch line must
+name the acct4 prefix, and the last line must carry `WINGMAN_ACCOUNT=acct4`.
 
 ## Why not copy the main prefix
 
