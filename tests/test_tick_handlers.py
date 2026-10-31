@@ -318,16 +318,44 @@ class _AmmoCtrlStub:
         return False
 
     def deploy_flares(self, **kw):
-        pass
+        self.flares_deployed = getattr(self, "flares_deployed", 0) + 1
+
+    # FR-011: the event each alert edge hands the flare roll; tests may set it to raise.
+    flare_roll_error = None
+
+    def flare_roll(self, flares_done):
+        self.flare_rolls = getattr(self, "flare_rolls", []) + [flares_done]
+        if self.flare_roll_error is not None:
+            raise self.flare_roll_error
+        return True
+
+    # ADR 163: the controller's answer on an alert edge; tests set it.
+    pursuit_evade_result = (None, False)
+
+    def pursuit_evade_on_alert(self, ts):
+        self.pursuit_evade_alerts = getattr(self, "pursuit_evade_alerts", []) + [ts]
+        if isinstance(self.pursuit_evade_result, Exception):
+            raise self.pursuit_evade_result
+        return self.pursuit_evade_result
+
+    # ADR 165: the round starts the flare handler passes on; tests may set it to raise.
+    new_rounds = 0
+    new_round_error = None
+
+    def pursuit_evade_new_round(self):
+        self.new_rounds += 1
+        if self.new_round_error is not None:
+            raise self.new_round_error
 
 
-def _ammo(analyzer=None, ctrl=None, bt_owns_eject=False, **cfg):
+def _ammo(analyzer=None, ctrl=None, bt_owns_eject=False, stats=None, **cfg):
     from wingman.tick_handlers import AmmoEventsHandler
     base = {"no_missiles_abort_grace_s": 0.0, "no_missiles_consecutive_required": 2}
     base.update(cfg)
     a = analyzer or _AmmoAnalyzerStub()
     c = ctrl or _AmmoCtrlStub()
-    return AmmoEventsHandler(a, c, base, bt_owns_eject=bt_owns_eject), a, c
+    return (AmmoEventsHandler(a, c, base, bt_owns_eject=bt_owns_eject, stats_tracker=stats),
+            a, c)
 
 
 class TestNoMissiles:
@@ -471,9 +499,73 @@ class TestFlares:
 
     def test_incoming_suppressed_after_respawn(self):
         a = _AmmoAnalyzerStub(incoming=True, incoming_ts=100.0)
-        h, _, _ = _ammo(a)
+        h, _, c = _ammo(a)
         h.suppress_after_respawn(60.0)
         assert h.deploy_flares_on_new_incoming() is False
+        assert not getattr(c, "pursuit_evade_alerts", []), "a suppressed alert is no engagement"
+
+    def test_the_alert_edge_asks_the_controller_and_counts_the_arm(self):
+        """ADR 163: the summary's engagement opens first, then the arm and the
+        evade attach to it, all at the one alert time."""
+        stats = _StatsStub()
+        a = _AmmoAnalyzerStub(incoming=True, incoming_ts=100.0)
+        h, _, c = _ammo(a, stats=stats)
+        c.pursuit_evade_result = ("evade", True)
+        assert h.deploy_flares_on_new_incoming() is True
+        assert stats.events == ["flare_burst_deployed", "evade_trial_evade", "missile_evade"]
+        assert len(c.pursuit_evade_alerts) == 1
+
+    def test_a_control_engagement_counts_its_arm_and_no_evade(self):
+        stats = _StatsStub()
+        a = _AmmoAnalyzerStub(incoming=True, incoming_ts=100.0)
+        h, _, c = _ammo(a, stats=stats)
+        c.pursuit_evade_result = ("control", False)
+        h.deploy_flares_on_new_incoming()
+        assert stats.events == ["flare_burst_deployed", "evade_trial_control"]
+
+    def test_an_alert_outside_the_trial_adds_nothing(self):
+        stats = _StatsStub()
+        a = _AmmoAnalyzerStub(incoming=True, incoming_ts=100.0)
+        h, _, _ = _ammo(a, stats=stats)
+        h.deploy_flares_on_new_incoming()
+        assert stats.events == ["flare_burst_deployed"]
+
+    def test_a_failing_trial_costs_neither_the_flares_nor_the_engagement(self):
+        stats = _StatsStub()
+        a = _AmmoAnalyzerStub(incoming=True, incoming_ts=100.0)
+        h, _, c = _ammo(a, stats=stats)
+        c.pursuit_evade_result = RuntimeError("boom")
+        assert h.deploy_flares_on_new_incoming() is True
+        assert stats.events == ["flare_burst_deployed"]
+
+    def test_every_alert_edge_rolls_until_the_last_flare_is_out(self):
+        """FR-011: the roll gets the event the burst sets after its last flare,
+        not before, and the flares do not wait for the roll."""
+        a = _AmmoAnalyzerStub(incoming=True, incoming_ts=100.0)
+        h, _, c = _ammo(a)
+        assert h.deploy_flares_on_new_incoming() is True
+        assert len(c.flare_rolls) == 1
+        flares_done = c.flare_rolls[0]
+        assert flares_done.wait(timeout=3.0), "the burst never reported its last flare"
+        assert c.flares_deployed == 3
+
+    def test_a_suppressed_alert_rolls_nothing(self):
+        a = _AmmoAnalyzerStub(incoming=True, incoming_ts=100.0)
+        h, _, c = _ammo(a)
+        h.suppress_after_respawn(60.0)
+        h.deploy_flares_on_new_incoming()
+        assert not getattr(c, "flare_rolls", [])
+
+    def test_a_failing_roll_costs_neither_the_flares_nor_the_trial(self):
+        stats = _StatsStub()
+        a = _AmmoAnalyzerStub(incoming=True, incoming_ts=100.0)
+        h, _, c = _ammo(a, stats=stats)
+        c.flare_roll_error = RuntimeError("boom")
+        c.pursuit_evade_result = ("control", False)
+        assert h.deploy_flares_on_new_incoming() is True
+        assert stats.events == ["flare_burst_deployed", "evade_trial_control"]
+        assert c.flare_rolls[0].wait(timeout=3.0)
+        assert c.flares_deployed == 3
 
     def test_tick_events_only_fires_set_events(self):
         a = _AmmoAnalyzerStub()
@@ -483,6 +575,44 @@ class TestFlares:
         a.low_flares_event.set()
         h.tick_events()
         assert c.reloads == 1
+
+
+class TestEvadeTrialRounds:
+    """ADR 165: the flare handler tells the trial where a round starts, by the
+    session summary's own rule: entering a battle state from outside one."""
+
+    def test_a_battle_entry_from_outside_a_battle_starts_a_round(self):
+        h, _, c = _ammo()
+        h.on_state_change(GameState.GAME_WAITING, GameState.GAME_LOBBY)
+        h.on_state_change(GameState.GAME_STARTING, GameState.GAME_WAITING)
+        assert c.new_rounds == 0
+        h.on_state_change(GameState.GAME_BATTLE, GameState.GAME_STARTING)
+        assert c.new_rounds == 1
+
+    def test_moves_between_battle_states_stay_in_the_round(self):
+        h, _, c = _ammo()
+        h.on_state_change(GameState.GAME_BATTLE, GameState.GAME_STARTING)
+        h.on_state_change(GameState.GAME_BATTLE_EJECT, GameState.GAME_BATTLE)
+        h.on_state_change(GameState.GAME_BATTLE_MANUAL, GameState.GAME_BATTLE_EJECT)
+        h.on_state_change(GameState.GAME_BATTLE, GameState.GAME_BATTLE_MANUAL)
+        assert c.new_rounds == 1
+        h.on_state_change(GameState.GAME_END_B, GameState.GAME_BATTLE)
+        h.on_state_change(GameState.GAME_LOBBY, GameState.GAME_END_B)
+        h.on_state_change(GameState.GAME_BATTLE, GameState.GAME_STARTING)
+        assert c.new_rounds == 2
+
+    def test_a_start_mid_battle_is_a_round(self):
+        """Wingman started on a battle: GAME_UNKNOWN to GAME_BATTLE opens one."""
+        h, _, c = _ammo()
+        h.on_state_change(GameState.GAME_BATTLE, GameState.GAME_UNKNOWN)
+        assert c.new_rounds == 1
+
+    def test_a_failing_round_start_costs_the_state_change_nothing(self):
+        h, _, c = _ammo()
+        c.new_round_error = RuntimeError("boom")
+        h.on_state_change(GameState.GAME_BATTLE, GameState.GAME_STARTING)
+        assert c.new_rounds == 1
+        assert h.battle_started_ts > 0.0
 
 
 class _RespawnAnalyzerStub:
@@ -513,7 +643,8 @@ class _RespawnAnalyzerStub:
 
 class _RespawnCtrlStub:
     def __init__(self, *, mission_running=False, teardown=False, auto_restart=True,
-                 ejecting=False, secondary_weapon_active=False):
+                 ejecting=False, secondary_weapon_active=False, manual_held=False):
+        self._manual_held = manual_held
         self._running = mission_running
         self._teardown = teardown
         self._auto = auto_restart
@@ -527,6 +658,9 @@ class _RespawnCtrlStub:
 
     def is_ejecting(self):
         return self._ejecting
+
+    def manual_held_for_round(self):
+        return self._manual_held
 
     def is_secondary_weapon_active(self):
         return self._secondary_weapon_active
@@ -732,6 +866,17 @@ class TestRespawnDetection:
         h._manual_persists_through_respawn = True
         h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE_MANUAL)
         assert "respawn_reset" not in a.triggers
+
+    def test_an_enter_hold_survives_death_whatever_the_config(self):
+        """SAF-001.4 (operator, 2026-10-30): a takeover by Enter holds until the
+        round ends. The respawn keeps GAME_BATTLE_MANUAL and promises no restart:
+        the operator flies the new life."""
+        h, a, c = _respawn(_RespawnAnalyzerStub(state=GameState.GAME_BATTLE_MANUAL),
+                           _RespawnCtrlStub(manual_held=True, auto_restart=False))
+        assert h._manual_persists_through_respawn is False
+        h.tick_detect(object(), self._gs(True), GameState.GAME_BATTLE_MANUAL)
+        assert "respawn_reset" not in a.triggers
+        assert c._auto is False
 
     def test_latch_dedupes_while_screen_persists(self):
         h, a, c = _respawn()

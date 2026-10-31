@@ -120,7 +120,7 @@ def test_an_unreadable_window_tree_returns_empty_rather_than_raising():
 # --- start is idempotent, and refuses the one env that cannot work ------------
 
 def test_start_leaves_an_idle_running_display_alone():
-    """Safe as a Makefile prerequisite: a second `make rd` must not spawn a
+    """Safe as a Makefile prerequisite: a second `make r` must not spawn a
     second server on the same display when nothing is using the existing one.
 
     ADR 119 moved the seam from `display_is_up` to `probe_display`, which
@@ -317,7 +317,7 @@ def test_config_drives_the_lane(tmp_path):
 
 
 def test_override_forces_the_lane_off():
-    """`make rd NESTED=0` must escape a global config flag — otherwise two
+    """`make r NESTED=0` must escape a global config flag — otherwise two
     simultaneous accounts are forced into the same lane."""
     with mock.patch.object(nd, "load_nested_config", nd.load_nested_config):
         with mock.patch("builtins.open", mock.mock_open(
@@ -455,10 +455,10 @@ def test_the_capture_lane_launches_the_game_on_the_real_display():
 
 
 def test_the_nested_lane_is_still_the_default_for_ordinary_runs():
-    """Only the real-screen lane opts out. `make r` / `make rd` keep the ADR 099
-    default, which is what lets the operator use the machine."""
+    """Only the real-screen lane opts out. `make r` keeps the ADR 099 default,
+    which is what lets the operator use the machine."""
     mk = _makefile()
-    for target in ("r:", "rd:", "g:"):
+    for target in ("r:", "g:"):
         line = next(ln for ln in mk.splitlines() if ln.startswith(target))
         assert "GAME_LAUNCH_DEPS" in line
-    assert "r: NESTED" not in mk and "rd: NESTED" not in mk
+    assert "r: NESTED" not in mk

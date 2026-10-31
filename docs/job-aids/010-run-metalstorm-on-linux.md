@@ -222,8 +222,7 @@ require `input` group membership; that design was replaced.
 From the repository root:
 
 ```bash
-make r      # INFO console
-make rd     # DEBUG log to wingman.log
+make r      # DEBUG log to wingman.log
 ```
 
 By default the game is launched onto a **nested X display** (`nested.enabled: true`
@@ -235,7 +234,7 @@ a session runs.
 ```bash
 make nested-status   # up? which window holds focus?
 make nested-stop     # tear it down
-make rd NESTED=0     # run on your own screen instead, for one run
+make r NESTED=0      # run on your own screen instead, for one run
 ```
 
 Stopping with `z` closes the game and the nested display together. Backspace is
@@ -285,7 +284,7 @@ values win over the defaults):
 | `PROTON_ROOT` | Whenever Heroic didn't install `GE-Proton-latest` — check with the `ls` in Step 4 |
 | `PROTON_USE_XALIA=0` | If the game crashes immediately with `Xalia ... SDL_Init: No displays available` — see troubleshooting |
 | `GAME_ARGS` | Last-resort override to force a specific Unity graphics backend, e.g. `GAME_ARGS=-force-d3d11`. Root-cause DXVK/adapter issues (missing i386 multiarch, see Prerequisites) first — this is a fallback knob, not the primary fix |
-| `UMU_RUNTIME_UPDATE=1` | To let umu-launcher update the Steam runtime during a launch. The Makefile passes `0`, because the 195 MB download does not fit in the 20 s the launch allows the game window, and `make rd` then fails with `game window never appeared` |
+| `UMU_RUNTIME_UPDATE=1` | To let umu-launcher update the Steam runtime during a launch. The Makefile passes `0`, because the 195 MB download does not fit in the 20 s the launch allows the game window, and `make r` then fails with `game window never appeared` |
 
 ---
 

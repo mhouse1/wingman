@@ -16,7 +16,7 @@ make p1            # step 1 — refresh the reference screenshots
 make recalibrate   # step 2 — walk through every crop and click new corners
 ```
 
-**Step 1 — `make p1`** launches MetalStorm (auto-launched on Linux, same as `make rd`) and
+**Step 1 — `make p1`** launches MetalStorm (auto-launched on Linux, same as `make r`) and
 replays capture path PATH1, overwriting the gate-corpus screenshots in
 `test_screenshots/integration_test/` (`P1_000_LOBBY_PLAY.png` … `P1_080_LOBBY_AFTER_MISSION.png`).
 A capture summary is written to `tests/test-output/capture_summary_PATH1.json`. The default

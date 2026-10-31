@@ -20,7 +20,7 @@ copy the main prefix. Do not copy it; see [Why not copy the main prefix](#why-no
 
 | Targets                 | Prefix under `~/Games/Heroic/Prefixes/` | Run tag |
 |-------------------------|------------------------------------------|---------|
-| `make g`, `r`, `rd`     | `Metalstorm` (the main prefix)           | none    |
+| `make g`, `make r`      | `Metalstorm` (the main prefix)           | none    |
 | `make g1`, `make r1`    | `Metalstorm-acct1`                       | `acct1` |
 | `make g2`, `make r2`    | `Metalstorm-acct2`                       | `acct2` |
 | `make g3`, `make r3`    | `Metalstorm-acct3`                       | `acct3` |

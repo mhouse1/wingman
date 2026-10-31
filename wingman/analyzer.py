@@ -783,7 +783,7 @@ _STATE_CROPS: "dict[GameState, set[str]]" = {
         "HEALTH", "AMMO_FLARES", "AMMO_MISSILE", "ENEMY_CLOSE_BY",
     },
     GameState.GAME_END_B: {
-        "click_to", "FINAL_CONTINUE",
+        "click_to", "FINAL_CONTINUE", "PERF_SCORE", "PERF_KDA",
     },
     GameState.GAME_LOBBY: {
         "PLAY", "READY", "UNREADY", "CANCEL",
@@ -1239,6 +1239,13 @@ class GameStateAnalyzer:
         # declined to click would still leave the FSM in GAME_WAITING, stranding
         # the operator's exit until a whole further round completed.
         self._suppress_round_start = None
+        # ADR 166: a navigation of wingman's own away from the lobby (the squadron
+        # leaderboard). `active` holds the quick-scan's whole lobby cycle while it
+        # runs; `pending` holds the PLAY click while one is due to start.
+        self._lobby_errand_active = None
+        self._lobby_errand_pending = None
+        self._lobby_errand_log_ts = 0.0
+        self._play_seen_ts = 0.0           # the quick-scan's last PLAY read
         # ADR 102: consecutive PLAY reads while the FSM believes the match is
         # starting. Reset on leaving GAME_STARTING so a streak cannot span two
         # separate stalls.
@@ -3361,6 +3368,30 @@ class GameStateAnalyzer:
         """
         self._suppress_round_start = predicate
 
+    def set_lobby_errand(self, active, pending) -> None:
+        """Install ADR 166's predicates: `active()` is true while wingman is away
+        from the lobby on a navigation of its own, `pending()` while one is due.
+        A failing predicate counts as false, as the round-start suppressor's."""
+        self._lobby_errand_active = active
+        self._lobby_errand_pending = pending
+
+    @staticmethod
+    def _ask(predicate, name: str) -> bool:
+        if predicate is None:
+            return False
+        try:
+            return bool(predicate())
+        except Exception:
+            logger.exception("Analyzer: %s predicate raised — treated as false", name)
+            return False
+
+    def lobby_errand_active(self) -> bool:
+        return self._ask(self._lobby_errand_active, "lobby errand")
+
+    def play_seen_within(self, seconds: float) -> bool:
+        """True when the lobby quick-scan read PLAY within the last `seconds`."""
+        return time.time() - self._play_seen_ts <= seconds
+
     def _round_start_suppressed(self) -> bool:
         """True when an automatic PLAY/READY click must not fire."""
         if self._suppress_round_start is None:
@@ -3557,6 +3588,7 @@ class GameStateAnalyzer:
         """
         if verdict == "PLAY":
             self._squad_lobby_since = 0.0
+            self._play_seen_ts = time.time()
         elif self._squad_lobby_since == 0.0:
             self._squad_lobby_since = time.time()
 
@@ -3656,6 +3688,12 @@ class GameStateAnalyzer:
             # detection in GAME_UNKNOWN, and clicking PLAY/CANCEL from an
             # unclassified state would be wrong.
             if state not in POPUP_DISMISS_STATES and state not in LOBBY_RECHECK_STATES:
+                continue
+            if state == GameState.GAME_LOBBY and self.lobby_errand_active():
+                # ADR 166: wingman is on a menu page of its own. Nothing here
+                # may click, dismiss or count a stall until it is back.
+                lobby_stall_since = 0.0
+                self._lobby_blackout_since = 0.0
                 continue
 
             executor = self.ocr_executor
@@ -3850,6 +3888,18 @@ class GameStateAnalyzer:
                                 "\033[93m🏁 FINISH ROUND: %s visible but exit is pending — "
                                 "not starting another round\033[0m", crop,
                             )
+                            handled = True
+                        elif self.lobby_errand_active():
+                            # ADR 166: a navigation began after this cycle's
+                            # hold check; its clicks own the screen now.
+                            handled = True
+                        elif crop == "PLAY" and self._ask(self._lobby_errand_pending,
+                                                          "lobby errand pending"):
+                            # ADR 166: the squadron leaderboard is read first.
+                            if time.time() - self._lobby_errand_log_ts >= 10.0:
+                                self._lobby_errand_log_ts = time.time()
+                                logger.info("Lobby quick-scan: PLAY visible — the squadron "
+                                            "ranking is read first (ADR 166)")
                             handled = True
                         elif crop == "READY" and self.squad_leave_pending():
                             # Staying in GAME_LOBBY with the lobby undimmed is

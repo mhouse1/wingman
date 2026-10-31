@@ -17,7 +17,9 @@ import wingman.controller as controller
 from wingman.actuator import Actuator
 from wingman.controller import Controller
 from wingman.hold_tactic import HoldTactic
-from wingman.keybindings import AFTERBURNER_KEY, NOSE_DOWN_KEY, NOSE_UP_KEY, ROLL_RIGHT_KEY
+from wingman.keybindings import (
+    AFTERBURNER_KEY, NOSE_DOWN_KEY, NOSE_UP_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY,
+)
 
 _RAW_KEY_CALLS = {"press", "release", "press_and_release", "send", "write"}
 
@@ -194,6 +196,7 @@ def test_takeover_names_what_wingman_was_holding(fresh_actuator, caplog):
                  "_sg_stop", "_disengage_stop", "_ab_evade_stop"):
         setattr(c, name, threading.Event())
     c._ab_evade = HoldTactic("afterburner evade", stop=c._ab_evade_stop)
+    c._flare_roll = HoldTactic("flare roll")
     c._eject_stop_reason = None
     c.cancel_mission = lambda: None
     c.release_tracking_holds = lambda why=None: None
@@ -264,8 +267,11 @@ def test_unleased_keys_keep_phase_one_semantics():
     kb.release.assert_called_once_with(ROLL_RIGHT_KEY)
 
 
-def test_production_leases_the_throttle_and_the_pitch_keys():
-    assert controller._actuator._leased == {AFTERBURNER_KEY, NOSE_UP_KEY, NOSE_DOWN_KEY}
+def test_production_leases_the_throttle_the_pitch_and_the_roll_keys():
+    """The roll keys since ADR 163: the missile evade holds roll-right through a
+    pursuit whose yield releases its own tracking roll."""
+    assert controller._actuator._leased == {AFTERBURNER_KEY, NOSE_UP_KEY, NOSE_DOWN_KEY,
+                                            ROLL_LEFT_KEY, ROLL_RIGHT_KEY}
 
 
 @pytest.fixture

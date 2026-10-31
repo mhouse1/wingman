@@ -129,6 +129,90 @@ def test_what_is_not_a_color_frame_has_no_priority_target():
     assert find_priority_ring_icons(object()) == []
 
 
+# ---------------------------------------------------------------------------
+# Behind terrain (operator, 2026-10-30): "in this case the priority target was
+# behind a mountain". The pursuit flew at a crown drawn behind terrain on
+# Crucible and into the mountain. In view the disc is its own dark olive fill;
+# behind terrain the ground shows through it, and dark rock passed the old
+# "darker than 110" test.
+#
+# That crown survives only in a half-size black-box frame
+# (priority_marker_behind_terrain_halfsize.png, 03:45:43), too soft for the
+# finder to find whole. What showed through its disc is carried into a crown in
+# view, so the test meets what the finder met live: an inside as dark as the
+# fill and not the fill. A full-size capture of a crown behind terrain replaces
+# it when one is taken.
+# ---------------------------------------------------------------------------
+
+_YELLOW = (np.array([22, 140, 190], dtype=np.uint8), np.array([32, 255, 255], dtype=np.uint8))
+
+
+def _disc_inside(frame, centre, half):
+    """The square around a disc, and its inside as the finder reads it: within
+    0.70 of the radius and not yellow."""
+    x, y = centre
+    box = frame[y - half:y + half, x - half:x + half]
+    rows, cols = np.mgrid[0:2 * half, 0:2 * half]
+    radius = np.hypot((cols - (2 * half - 1) / 2) / half, (rows - (2 * half - 1) / 2) / half)
+    yellow = cv2.inRange(cv2.cvtColor(box, cv2.COLOR_BGR2HSV), *_YELLOW) > 0
+    return box, ~yellow & (radius < 0.70)
+
+
+def _crown_drawn_behind_terrain():
+    """priority_marker_near.png with its disc at (380, 280) and the inside of
+    the crown behind the mountain in place of its fill."""
+    seen = cv2.imread(str(FIXTURES / "priority_marker_behind_terrain_halfsize.png"))
+    seen_box, seen_inside = _disc_inside(seen, (20, 20), 9)
+    frame = _live_crop_frame("priority_marker_near.png", (300, 200))
+    box, inside = _disc_inside(frame, (380, 280), 19)
+    box[inside] = np.resize(seen_box[seen_inside], (int(inside.sum()), 3))
+    return frame
+
+
+@pytest.mark.parametrize("name, origin", [
+    ("priority_marker_over_airframe.png", (920, 616)),
+    ("priority_marker_broken_outline.png", (856, 1045)),
+    ("priority_marker_far.png", (870, 418)),
+    ("priority_marker_mid.png", (752, 578)),
+    ("priority_marker_near.png", (1056, 579)),
+    ("resupply_neg_crown_icon.png", (277, 780)),
+])
+def test_a_crown_in_view_is_its_dark_fill_inside(name, origin):
+    marker = find_priority_marker(_live_crop_frame(name, origin), region_pct=ACQUISITION)
+    assert marker.fill >= 0.8
+
+
+def test_a_crown_behind_terrain_is_not_returned():
+    behind = []
+    assert find_priority_marker(_crown_drawn_behind_terrain(), region_pct=ACQUISITION,
+                                occluded=behind) is None
+    # It met every other test, the old darkness one too: only its fill refuses it.
+    assert len(behind) == 1 and behind[0].fill < 0.5
+    assert (behind[0].x, behind[0].y) == (pytest.approx(380, abs=3), pytest.approx(280, abs=3))
+
+
+def test_a_crown_in_view_wins_over_one_behind_terrain():
+    frame = _crown_drawn_behind_terrain()
+    in_view = cv2.imread(str(FIXTURES / "priority_marker_mid.png"))
+    frame[578:578 + in_view.shape[0], 1200:1200 + in_view.shape[1]] = in_view
+    behind = []
+    marker = find_priority_marker(frame, region_pct=ACQUISITION, occluded=behind)
+    assert marker is not None and marker.x == pytest.approx(1240, abs=3)
+    assert len(behind) == 1
+
+
+def test_the_pursuit_logs_a_crown_behind_terrain_and_flies_on(monkeypatch, caplog):
+    from test_pursuit_mode import _make_ctrl
+    ctrl = _make_ctrl(monkeypatch, priority_target={"enabled": True, "actuate": True})
+    frame = _crown_drawn_behind_terrain()
+    with caplog.at_level("INFO", logger="wingman.controller"):
+        kind, marker, pins = ctrl._scan_marked_objective(frame)
+        ctrl._scan_marked_objective(frame)            # rate-limited: one line
+    assert (kind, marker, pins) == (None, None, [])
+    lines = [r.getMessage() for r in caplog.records if "behind terrain" in r.getMessage()]
+    assert len(lines) == 1 and lines[0].startswith("PRIORITY: priority target at (380,280)")
+
+
 # The crown pin on the indicator ring. Against a bright cloud its pointer falls
 # out of the color band and the outline is 53 px; beside the resupply pin the
 # two outlines are the same shape, 24 px apart.

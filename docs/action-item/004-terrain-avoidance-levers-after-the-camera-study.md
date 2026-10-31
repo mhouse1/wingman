@@ -170,4 +170,7 @@ still aboard. Terrain work addresses about one death in five.
 
 **Change.** Not designed here: a separate review of the missile alerts, the evade's trigger and the flares.
 
-**Status.** Open, for the operator to prioritise against AI-004-1 to AI-004-4.
+**Status.** Open, for the operator to prioritise against AI-004-1 to AI-004-4. Reviewed 2026-10-26 in
+[Research 019](../research/019-shoot-downs-and-the-missile-defence.md): the alerts are seen and answered with
+flares and the afterburner, but the missile evade is locked out of the pursuit, where nearly every shoot-down
+happens.

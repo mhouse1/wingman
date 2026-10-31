@@ -244,7 +244,11 @@ Runs as a daemon thread on confirmed missiles-empty (the FSM enters `GAME_BATTLE
 
 **Missile evade** (`missile_evade_mode`, ADR 070):
 
-Started by the behavior tree's MissileEvade leaf on an incoming-missile detection. Holds AFTERBURNER + ROLL_RIGHT + YAW_LEFT until the detection has been clear for `clear_seconds` (measured on fresh perception samples — a stalled OCR cache cannot end the hold), with a tactical limit at `max_manoeuvre_s` (~6 s: beyond that the manoeuvre only bleeds energy) and an outer detector-fault backstop at `max_hold_s`. Yields the airframe to an eject within one 0.1 s poll (d11). Live evidence: 90% vs 68% ten-second engagement survival with the evade on (n=122).
+Started by the behavior tree's MissileEvade leaf on an incoming-missile detection; inside a pursuit, by the pursuit on an alert, for the trial's evade arm (ADR 163), drawn once a round (ADR 165). Holds AFTERBURNER + ROLL_RIGHT + YAW_LEFT until the detection has been clear for `clear_seconds` (measured on fresh perception samples — a stalled OCR cache cannot end the hold), with a tactical limit at `max_manoeuvre_s` (~6 s: beyond that the manoeuvre only bleeds energy) and an outer detector-fault backstop at `max_hold_s`. Yields the airframe to an eject within one 0.1 s poll (d11). A hard-emergency climb ends it and starts once its keys are up, and no evade starts while that climb flies (ADR 163 D5). Live evidence: 90% vs 68% ten-second engagement survival with the evade on (n=122).
+
+**Flare roll** (`flare_roll`, [FR-011](requirements/002-functional.md), [ADR 164](adr/164-roll-right-through-the-flares.md)):
+
+Started by the flare handler on every alert edge, after the flares. Holds ROLL_RIGHT, a continuous barrel roll that leaves the flight path alone, until `flare_roll_after_s` (2 s) after the burst's last flare; each burst during the hold extends it, so it lasts until the alerts stop. Runs whether or not the missile evade flies (the roll keys are leased, so the two share roll-right). Inside a pursuit the chase yields pitch and roll while it is held. Ends on takeover, exit, an eject or a hard-emergency climb, and at the `flare_roll_max_s` fault cap.
 
 **Game-starting loop** (`_start_game_starting_loop`):
 
@@ -465,8 +469,8 @@ and stall prevention still re-press every tick, which now only renews their leas
 | `stall_prevention` | per-tick reflex | manual takeover | everything, including the emergency airbrake | re-press every tick | operator directive, Phase 1 |
 | `cruise` | per-tick reflex | manual takeover, the emergency climb's airbrake, the approach brake (paused, not ended: it re-presses on the first tick after the brake lets go) | climb, missile evade, eject | re-press every tick | ADR 134 D9, ADR 159, Code Review 019 cycle 9 |
 | `evade` (afterburner evade) | per-tick reflex | manual takeover, the emergency climb's airbrake | climb | re-press every 1 s | ADR 128 D7, D8, ADR 159 |
-| `climb` | tactic hold | stops on its stop event; an emergency in a steep dive swaps it for the airbrake | nothing | presses at start, emergency or not | ADR 073, ADR 159 |
-| `missile_evade` | tactic hold | eject (ADR 070 d11) | nothing | presses at start | ADR 070, ADR 075 |
+| `climb` | tactic hold | stops on its stop event; an emergency in a steep dive swaps it for the airbrake | nothing | presses at start, emergency or not; a hard emergency first ends a flying missile evade and waits for its release | ADR 073, ADR 159, ADR 163 D5 |
+| `missile_evade` | tactic hold; inside a pursuit started by the pursuit on an alert, for the trial's evade arm; does not start while a hard-emergency climb flies | eject (ADR 070 d11), a hard-emergency climb (ADR 163 D5) | nothing | presses at start | ADR 070, ADR 075, ADR 163 |
 | `eject_and_dive` | eject sequence | nothing | nothing; its descent control cuts the burner | presses at phase start | ADR 056, ADR 134 D9 |
 | `rearm_climb` | pursuit hold, `pursuit_mode.resupply_priority.rearm_climb_s` after a rearm | manual takeover, the emergency climb's airbrake | nothing; it adds its lease to whoever else holds | presses at the first count that shows the rearm, re-presses every steering tick | operator, 2026-10-13 |
 
@@ -483,21 +487,22 @@ and stall prevention still re-press every tick, which now only renews their leas
 | Owner | Kind | Yields to | Source |
 |---|---|---|---|
 | `eject_and_dive` | eject sequence | nothing; every tactic below refuses to start during an eject | ADR 056, ADR 070 d11 |
-| `missile_evade` | tactic hold (the pitch_down variant) | eject | ADR 070 d13 |
+| `missile_evade` | tactic hold (the pitch_down variant) | eject, a hard-emergency climb | ADR 070 d13, ADR 163 D5 |
 | `boundary` | tactic hold | eject, missile evade, the turn guard (ADR 132) | ADR 107 |
-| `climb` | tactic hold | eject, missile evade, a running pursuit unless `pursuit_mode.dive_safety`; a hard emergency inside a pursuit flies through and the pursuit yields (`pursuit_mode.crash_recovery`), until a fresh flight path is level or climbing, capped by `recovery_max_s` | ADR 073, ADR 148 |
+| `climb` | tactic hold | eject, missile evade unless a hard emergency, which ends the evade once nothing else refuses the climb; a running pursuit unless `pursuit_mode.dive_safety`; a hard emergency inside a pursuit flies through and the pursuit yields (`pursuit_mode.crash_recovery`), until a fresh flight path is level or climbing, capped by `recovery_max_s` | ADR 073, ADR 148, ADR 163 D5 |
 | `spawn_guard` | tactic hold from death to hand-off | a running climb hold, which owns the pitch key | ADR 076 |
-| `tracking_pitch` | pursuit tracking hold | stopped with the mission on cancel | HLDD 005 |
+| `tracking_pitch` | pursuit tracking hold | stopped with the mission on cancel; released while the dive recovery, the missile evade or the flare roll flies the pursuit | HLDD 005, ADR 148, ADR 163, ADR 164 |
 | mission steps (`nose_up`, `nose_down` verbs) | mission scripts | refused in manual; a mission cancel | ADR 144 |
 
 **Roll, `ROLL_LEFT_KEY` and `ROLL_RIGHT_KEY`.**
 
 | Owner | Kind | Yields to | Source |
 |---|---|---|---|
-| `missile_evade` | tactic hold | eject | ADR 070 |
+| `missile_evade` | tactic hold; inside a pursuit started by the pursuit on an alert | eject, a hard-emergency climb | ADR 070, ADR 163 |
+| `flare_roll` | roll-right from every alert edge (the flare handler) until `missile_evade.flare_roll_after_s` after the burst's last flare, extended by each burst, capped by `flare_roll_max_s`; in GAME_BATTLE and GAME_BATTLE_EJECT, whether or not the missile evade flies | manual takeover, an eject, a hard-emergency climb, takeover and shutdown | FR-011, ADR 164 |
 | `boundary` | tactic hold | eject, missile evade, the turn guard | ADR 107, ADR 132 |
 | `disengage_roll` | tactic hold | takeover and shutdown only (not a mission cancel), the turn guard | SAF-001 2026-09-09 |
-| `tracking_roll` | pursuit tracking hold | stopped with the mission on cancel | HLDD 005 |
+| `tracking_roll` | pursuit tracking hold | stopped with the mission on cancel; released while the dive recovery, the missile evade or the flare roll flies the pursuit | HLDD 005, ADR 148, ADR 163, ADR 164 |
 | mission steps (roll verbs) | mission scripts | refused in manual; the turn guard; a mission cancel | ADR 132 |
 
 **Yaw, `YAW_LEFT`.** `missile_evade` only.
@@ -508,8 +513,10 @@ It is not flight input, but it is held with the tracking holds and goes up with 
 on a cancel, a takeover and loop exit.
 
 This table records the code. The throttle's rows are the Actuator's priority data
-(ADR 151); pitch and roll become data the same way, one key at a time, each with a
-live check. Until then those keys go up on any holder's release.
+(ADR 151). The pitch keys (2026-10-24) and the roll keys (ADR 163) are leased too, with
+no yields: a release lifts the key only when no other owner still holds it, and their
+owners give the axis up by releasing. The yaw key is not leased; the missile evade is
+its only writer.
 
 ### ACS — Autonomy Core System (Design 011, partly built)
 
@@ -866,7 +873,7 @@ All tunable values live in `wingman/config.yaml`. Key bindings are module-level 
 | `behavior_tree` | Selector mode (off / shadow / active), disengage/evade holds, `missile_evade` block (ADR 024/070) |
 | `j20_mission` / `minimap` | Ring-engage geometry, orbit cadence, blob band (Design 003) |
 | `telemetry` | Plausibility bounds, smoothing, `eject_closed_loop` thresholds (ADR 038/067/069) |
-| `nested` | Nested display lane: `enabled`, `display`, `size` (ADR 099). Override one run with `make rd NESTED=0` |
+| `nested` | Nested display lane: `enabled`, `display`, `size` (ADR 099). Override one run with `make r NESTED=0` |
 | `minimap` | Ring mask and EMA, plus `regroup_enabled` and `friendly_hsv` (ADR 028 rev 4) and the Design 010 boundary instrumentation (`boundary_hsv`, `boundary_near_frac`, `boundary_trace_ticks`) |
 | `jet_profile` | ACS (Design 011): the active airframe profile and its `has_padlock`, meaning whether the jet uses the padlock to fire. Read at startup; nothing branches on it yet |
 | `tracking` | ACS target tracker (Design 005): acquisition region, HUD exclusion zones, nameplate cluster gates, roll and pitch gains. `actuate: false` keeps it sensing only in normal battle. `battle_priority_shadow` logs `BATTLEPRI:` |

@@ -401,6 +401,14 @@ SCHEMA = Section(
                 "max_manoeuvre_s": SECONDS,
                 "max_hold_s": SECONDS,
                 "pitch_down": BOOL,
+                # ADR 163 / ADR 165: the share of rounds whose engagements inside a
+                # pursuit the evade may fly, drawn per round. 0 is no evade inside a
+                # pursuit.
+                "pursuit_share": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.0),
+                # FR-011 / ADR 164: roll-right through each flare burst, held this
+                # long after its last flare, and at most flare_roll_max_s.
+                "flare_roll_after_s": Leaf(types=NUMBER, minimum=0, default=2.0),
+                "flare_roll_max_s": Leaf(types=NUMBER, minimum=0, default=15.0),
             }),
             # ADR 134: hold the afterburner whenever fuel is above the floor
             # and nothing higher-priority (eject/evade/climb) needs the key.
@@ -680,6 +688,24 @@ SCHEMA = Section(
         # steers on it.
         # Code Review 019 cycle 19: the death's cause from the game's kill card.
         "kill_card": Section(children={
+            "enabled": Leaf(types=(bool,), default=False),
+        }),
+        # Action Item 005 (AI-005-1): keep the frames the PERFORMANCE panel
+        # reader looked at, in test_screenshots/round_performance/.
+        "round_performance": Section(children={
+            "capture": Leaf(types=(bool,), default=False),
+        }),
+        # Design 018 Phase 3, ADR 166: the squadron leaderboard, read in the lobby.
+        "squadron_ranking": Section(children={
+            "enabled": Leaf(types=(bool,), default=False),
+            "every_min": Leaf(types=(int, float), default=60, minimum=0),
+            "step_timeout_s": Leaf(types=(int, float), default=8.0, minimum=0.5),
+            "squadron": Leaf(types=(str,), default="Mobius Squadron"),
+            "capture": Leaf(types=(bool,), default=False),
+        }),
+        # Design 018: the score dashboard (Grafana and Postgres, `make grafana`).
+        # Off unless the operator turns it on in config.local.yaml.
+        "score_dashboard": Section(children={
             "enabled": Leaf(types=(bool,), default=False),
         }),
         "depth_view": Section(children={

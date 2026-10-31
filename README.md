@@ -141,8 +141,7 @@ No `sudo`, no `input` group membership, no root access required.
 ### Run
 
 ```bash
-make r     # run Wingman (INFO console only)
-make rd    # run with DEBUG logs written to wingman.log
+make r     # run Wingman, with DEBUG logs written to wingman.log
 ```
 
 On Linux, `make r` automatically launches MetalStorm via `umu-run` if it is not already running, waits for the lobby to appear, then starts Wingman. No manual game launch step is needed.
@@ -165,8 +164,8 @@ or at an X11 window of your own. (Native-Wayland windows such as VS Code cannot
 be observed by any X11 listener — a pre-existing limitation.)
 
 ```bash
-make rd              # honours nested.enabled
-make rd NESTED=0     # force the on-screen lane for one run
+make r               # honours nested.enabled
+make r NESTED=0      # force the on-screen lane for one run
 make nested-status   # is the lane up, and what holds focus
 make nested-stop     # tear the nested server down
 ```

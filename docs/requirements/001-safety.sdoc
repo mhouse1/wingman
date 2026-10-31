@@ -24,9 +24,15 @@ commanding flight — a mission thread holds the mission lock, an eject
 sequence is active, or a tactic hold (climb, missile evade) is active —
 wingman shall cease all commanded flight input, including the tactic hold
 threads, within 2.0 s and transition to GAME_BATTLE_MANUAL, and shall not
-re-command flight until health evidence indicates a death and respawn.
+re-command flight until health evidence indicates a death and respawn, or,
+for a takeover by MANUAL_TAKEOVER_KEY, until the round ends (SAF-001.4).
 <<<
 RATIONALE: >>>
+**Amended 2026-10-30 — a takeover by Enter holds until the round ends
+(SAF-001.4).** The operator asked for Enter to take the aircraft and keep it
+through respawns until the round exits. The other takeover keys keep the
+respawn return below.
+
 **Amended 2026-08-30 — the takeover keys the operator must use depend on where
 they press them.** On the ADR 099 nested display lane wingman injects into the
 same X display it observes, so its own i/j/k/l presses and the operator's are
@@ -122,6 +128,34 @@ for the whole session, from the start, with no error logged, and an ENTER
 typed into the game window did not reach the takeover path. Wingman's own
 injected presses on that display give the liveness signal. Design 009,
 "A deaf hotkey listener on the nested display".
+<<<
+RELATIONS:
+- TYPE: Parent
+  VALUE: SAF-001
+
+[REQUIREMENT]
+UID: SAF-001.4
+STATUS: Draft
+TITLE: A takeover by MANUAL_TAKEOVER_KEY holds until the round ends
+STATEMENT: >>>
+When the operator presses MANUAL_TAKEOVER_KEY (Enter) in GAME_BATTLE,
+GAME_BATTLE_EJECT or GAME_BATTLE_MANUAL, outside the entry grace window of
+SAF-001.2, wingman shall be in GAME_BATTLE_MANUAL whether or not it was
+commanding flight, and shall stay there through every respawn, without
+re-commanding flight, until the game state leaves the battle states or the
+operator presses the handback key (MISSION_J20_KEY, 'u').
+<<<
+RATIONALE: >>>
+Operator, 2026-10-30: "when pressed it should enter manual and stay in manual
+mode until the round exits, respawn should not kick it out of manual". Enter is
+the deliberate "I fly this round" key; i/j/k/l and the arrow keys keep SAF-001's
+return on respawn, so a reflexive grab still hands the aircraft back after a
+death and an unattended session does not need attending (the 2026-08-30
+experiment). Outside the battle states Enter is ordinary input (lobby chat),
+and the entry grace still applies, so an Enter queued from the lobby cannot hold
+a fresh round. The handback key stays the operator's way out. Rounds flown this
+way carry manual_takeover_count above 0, and Design 018 charts them apart from
+wingman's own.
 <<<
 RELATIONS:
 - TYPE: Parent

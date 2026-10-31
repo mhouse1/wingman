@@ -26,9 +26,8 @@ Use `uv` for dependency management (`uv sync --all-groups`). Always prefer `make
 
 **Run the app:**
 ```bash
-make r          # INFO console only
-make rd         # DEBUG log to wingman.log
-make rd NESTED=0  # force the on-screen lane for one run
+make r          # DEBUG log to wingman.log
+make r NESTED=0 # force the on-screen lane for one run
 ```
 
 By default the game runs on a nested X display (`nested.enabled` in

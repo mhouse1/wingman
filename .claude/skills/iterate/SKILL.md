@@ -272,7 +272,8 @@ exists to run (an unattended run is the normal case, not a special one).
                                  # nested-setup in it: it closes a running game
    ```
 
-   `make r` writes no log file, so it is no use here. Read a target's recipe
+   `make r` writes the same log but runs on the main prefix with no account
+   tag, so use `rN` here. Read a target's recipe
    before running one you have not used; `make tp`, `tp-full`, `wrelease` and
    `rr-live-path1-gate` are operator-run and are not launched by this skill.
 
@@ -369,7 +370,7 @@ until ! pgrep -f "[w]ingman.main" >/dev/null; do sleep 2; done
 half an hour. Never report "stopped" or "running" without a check in the same
 turn.
 
-**Bracket the pattern.** `pgrep -f "wingman.main"` and `pkill -f "make rd"` also
+**Bracket the pattern.** `pgrep -f "wingman.main"` and `pkill -f "make r1"` also
 match the shell command line that contains them, so an unbracketed `pkill`
 kills the calling shell. Three tool calls died that way in one session, each
 reported only as an exit code. Write `[w]ingman.main`, or use `pgrep -x`.

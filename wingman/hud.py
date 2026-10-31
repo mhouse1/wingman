@@ -68,10 +68,16 @@ _TEXT_REF_WIDTH = 1920
 _ROW0_PX = 32
 _ROW_PX = 36
 # The clear-path layer (Code Review 019 step 3a): brightness left outside the
-# analysed view, tint strength on the free air inside it, and the colours of
-# outlines by time to contact.
+# analysed view, which is drawn grey, and the two fills inside it, free air
+# blue and objects orange, with their strengths. Research 018 (2026-10-26):
+# one green tint on the free air left objects untinted and looked like the
+# islands' vegetation; blue and orange also stay apart for a colour-blind
+# reviewer. The outlines keep their colours by time to contact.
 _PATH_OUTSIDE_DIM = 0.6
-_PATH_TINT_ALPHA = 0.22
+_PATH_FREE = (255, 140, 30)
+_PATH_FREE_ALPHA = 0.35
+_PATH_OBJECT = (0, 140, 255)
+_PATH_OBJECT_ALPHA = 0.45
 _PATH_CLOSE_S = 4.0
 _AMBER = (0, 170, 255)
 # An outline bigger than this share of the analysed view gets no figure of its
@@ -524,9 +530,10 @@ class HudRenderer:
 
     def _draw_path_view(self, canvas: np.ndarray, view) -> None:
         """What the pursuit's perception saw on this very picture (Code Review
-        019 step 3a): free air tinted inside the analysed view, everything
-        outside it dimmed, each outline coloured by its time to contact, the
-        point the picture expands from, and one status line.
+        019 step 3a): inside the analysed view free air tinted blue and objects
+        orange, everything outside it grey and dimmed, each outline coloured by
+        its time to contact, the point the picture expands from, and one status
+        line.
 
         `view` is a `clear_path.PathView` taken on the frame being drawn, so
         unlike the main tick's overlays nothing here can be from another
@@ -540,16 +547,18 @@ class HudRenderer:
             th, tw = shape.texture.shape[:2]
             vw = max(1, min(int(round(tw / s)), w - ox))
             vh = max(1, min(int(round(th / s)), h - oy))
-            inside = np.zeros((h, w), bool)
-            inside[oy:oy + vh, ox:ox + vw] = True
-            canvas[~inside] = (canvas[~inside] * _PATH_OUTSIDE_DIM).astype(np.uint8)
-            textured = cv2.resize(shape.texture, (vw, vh), interpolation=cv2.INTER_NEAREST)
-            roi = canvas[oy:oy + vh, ox:ox + vw]
-            free = textured == 0
-            tint = np.empty_like(roi)
-            tint[:] = _GREEN
-            blended = cv2.addWeighted(roi, 1.0 - _PATH_TINT_ALPHA, tint, _PATH_TINT_ALPHA, 0.0)
-            roi[free] = blended[free]
+            roi = canvas[oy:oy + vh, ox:ox + vw].copy()
+            grey = cv2.cvtColor(canvas, cv2.COLOR_BGR2GRAY)
+            canvas[:] = cv2.cvtColor(cv2.convertScaleAbs(grey, alpha=_PATH_OUTSIDE_DIM),
+                                     cv2.COLOR_GRAY2BGR)
+            textured = cv2.resize(shape.texture, (vw, vh), interpolation=cv2.INTER_NEAREST) > 0
+            fills = []
+            for colour, alpha in ((_PATH_FREE, _PATH_FREE_ALPHA),
+                                  (_PATH_OBJECT, _PATH_OBJECT_ALPHA)):
+                tint = np.empty_like(roi)
+                tint[:] = colour
+                fills.append(cv2.addWeighted(roi, 1.0 - alpha, tint, alpha, 0.0))
+            canvas[oy:oy + vh, ox:ox + vw] = np.where(textured[..., None], fills[1], fills[0])
             cv2.rectangle(canvas, (ox, oy), (ox + vw - 1, oy + vh - 1), _GREY, 1)
         warn_s = float(getattr(view, "tau_warn_s", 8.0))
         view_area = None

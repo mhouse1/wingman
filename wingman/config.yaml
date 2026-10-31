@@ -7,7 +7,7 @@
 # stays on the operator's DISPLAY, so backspace / end / i-j-k-l keep working
 # from wherever they are actually typed.
 #
-# Override per run without editing this file: make rd NESTED=0
+# Override per run without editing this file: make r NESTED=0
 nested:
   enabled: true
   display: ":3"
@@ -107,6 +107,61 @@ crops:
     - [0.8257, 0.9156]
     - [0.9243, 0.9444]
     text: [CONTINUE]
+  # The end-of-round PERFORMANCE panel's SCORE and KDA columns
+  # (wingman/round_performance.py). Tall bands: the panel's height follows the
+  # medals earned, so its figures sit anywhere from about y 0.27 (five medals)
+  # to 0.51 (none); the reader finds the KDA in its band by the label under it
+  # and reads the score on that row (Action Item 005, AI-005-2).
+  # The squadron leaderboard (wingman/squadron_ranking.py, ADR 166): the lobby's
+  # menu button, LEADERBOARDS in the open menu, the leaderboard's title, back
+  # arrow, SQUADRONS tab and list header, and our squadron's row pinned at the
+  # bottom (rank, name, trophies). Measured 2026-10-31 on the operator's four
+  # screenshots (tests/test-output/screenshot_20261031_0144*.png, 1920x1200).
+  # SQ_MENU is the house icon on the leaderboard page: clicked from the lobby only.
+  SQ_MENU:
+    coords:
+    - [0.9714, 0.008]
+    - [0.9922, 0.046]
+  SQ_MENU_LEADERBOARDS:
+    coords:
+    - [0.75, 0.255]
+    - [0.905, 0.305]
+  SQ_BOARD_TITLE:
+    coords:
+    - [0.04, 0.005]
+    - [0.15, 0.045]
+  SQ_BACK:
+    coords:
+    - [0.02, 0.008]
+    - [0.042, 0.045]
+  SQ_TAB_SQUADRONS:
+    coords:
+    - [0.745, 0.05]
+    - [0.845, 0.09]
+  SQ_BOARD_HEADER:
+    coords:
+    - [0.62, 0.355]
+    - [0.92, 0.385]
+  SQ_OWN_RANK:
+    coords:
+    - [0.6115, 0.925]
+    - [0.6604, 0.98]
+  SQ_OWN_NAME:
+    coords:
+    - [0.685, 0.925]
+    - [0.84, 0.98]
+  SQ_OWN_TROPHIES:
+    coords:
+    - [0.937, 0.925]
+    - [0.995, 0.98]
+  PERF_SCORE:
+    coords:
+    - [0.5208, 0.06]
+    - [0.7135, 0.62]
+  PERF_KDA:
+    coords:
+    - [0.75, 0.06]
+    - [0.9557, 0.62]
   HEALTH:
     coords:
     - [0.5833, 0.9333]
@@ -380,7 +435,7 @@ liveness_guard:
   enabled: true
   stall_limit_s: 300.0        # log loudly, let recovery escalate
   hard_limit_s: 900.0         # end the session at the next safe point
-# Anomaly 003: diagnostic-only, only checked when --record-session (make rd v)
+# Anomaly 003: diagnostic-only, only checked when --record-session (make r v)
 # is active. 40s is a first estimate from one incident, not a calibrated
 # default — see docs/anomaly/003-eject-no-telemetry-false-death-leaves-
 # aircraft-unflown.md before trusting it beyond that one case.
@@ -475,6 +530,8 @@ incoming_detection:
 # once it is over there is nothing left to hold, and requiring a keypress after
 # every death makes an unattended session need attending. Set true to keep the
 # takeover across deaths — then 'u' is the only way back to auto.
+# SAF-001.4 (operator, 2026-10-30): a takeover by Enter holds until the round
+# ends whatever this says; this setting governs the other takeover keys.
 mission: {manual_takeover: {persist_through_respawn: false},
   weapon_loop_interval: 1.0, no_missiles_consecutive_required: 2, no_missiles_abort_grace_s: 6.0,
   starting_stalled_reclassify_after_s: 3.0, respawn_clear_stability_s: 1.5, starting_max_wait_s: 150.0,
@@ -626,9 +683,21 @@ behavior_tree:
   # ADR 128 / FR-008: hold the afterburner while a missile is inbound, until
   # incoming has not been seen for afterburner_clear_s. Flares change what the
   # missile is tracking; speed changes whether it can still reach the aircraft.
+  # ADR 163: pursuit_share is the part of the engagements inside a pursuit that
+  # get the ADR 070 evade, the pursuit yielding to it. Drawn per engagement, with
+  # ADR 164's flare roll in both arms, the evade arm survived 61% against the
+  # control arm's 85% (V3, 2026-10-27), and the share went to 0. ADR 165: the
+  # arm is now drawn once per ROUND, so the session summary can set each arm's
+  # score and K/D/A per round beside its engagement survival ("pursuit trial");
+  # after share 0, assists per round fell on both accounts measured. 0.5 runs
+  # that trial; 0 is no evade inside a pursuit.
+  # FR-011 / ADR 164: every alert also holds roll-right, a barrel roll that leaves
+  # the flight path alone, until flare_roll_after_s after the burst's last flare
+  # (the operator's 2 s); a fault cap at flare_roll_max_s. Independent of enabled.
   missile_evade: {afterburner_clear_s: 4.0, afterburner_max_s: 20.0,
     enabled: true, clear_seconds: 3.0, min_clear_samples: 2, max_manoeuvre_s: 6.0,
-    max_hold_s: 15.0, pitch_down: false}
+    max_hold_s: 15.0, pitch_down: false, pursuit_share: 0.5,
+    flare_roll_after_s: 2.0, flare_roll_max_s: 15.0}
   # ADR 134 D8: a real hysteresis band, not one shared threshold. Burn from
   # wherever fuel is down to min_fuel_pct, then let it recharge (ADR 075) up
   # to rearm_fuel_pct before holding again — the operator's explicit design
@@ -1045,8 +1114,8 @@ terrain_avoidance:
 # Code Review 019 step 3a: the same outlines measured on the pursuit's own
 # frames (about 0.17 s apart) instead of the main tick's, logged as PATHVIEW
 # lines and drawn on live_hud.png under the picture they came from: free air
-# tinted, outlines coloured by time to contact, the point the picture expands
-# from. Shadow only. Uses terrain_avoidance.loom's settings with its own
+# tinted blue and objects orange, outlines coloured by time to contact, the
+# point the picture expands from. Shadow only. Uses terrain_avoidance.loom's settings with its own
 # detector instances; the main tick's readings above carry on unchanged.
 clear_path:
   enabled: true
@@ -1077,6 +1146,34 @@ clear_path:
 # and a DEATH CARDS summary at the end; read on the analyzer's OCR pool. Live only.
 kill_card:
   enabled: true
+
+# Action Item 005 (AI-005-1): keep the frames the end-of-round PERFORMANCE panel
+# reader looked at, in test_screenshots/round_performance/, as a corpus to
+# measure the reader against: the frame a read round was read on, every frame of an
+# unread one, and in an unread round each later page. JPEG, within the capture
+# budget. Live runs only. Turn off once the corpus is gathered.
+round_performance:
+  capture: true
+
+# Design 018 Phase 3, ADR 166: the squadron's rank and trophies, read off the
+# game's squadron leaderboard in the lobby between rounds. Off here; the operator
+# switches it on per machine in config.local.yaml. A reading is due at the first
+# lobby and every_min after the last attempt; each step of the navigation waits
+# step_timeout_s for its screen. `squadron` is the name in our row. `capture`
+# keeps the frame of each reading, and the last frame of a navigation that gave
+# up, in test_screenshots/squadron_ranking/.
+squadron_ranking:
+  enabled: false
+  every_min: 60
+  step_timeout_s: 8.0
+  squadron: Mobius Squadron
+  capture: true
+
+# Design 018: the score dashboard, a Grafana and Postgres stack on VEDA fed from
+# the session stats files (`make grafana`). Off here, so a clone runs none of
+# it; the operator switches it on per machine in config.local.yaml.
+score_dashboard:
+  enabled: false
 
 # Code Review 019 cycle 11 (operator, 2026-10-15: "shadow first"): relative
 # terrain depth from one picture (Depth Anything V2 Small), in a worker process
@@ -1924,7 +2021,7 @@ hud:
   black_box: {enabled: true, dir: test_screenshots/path_blackbox, seconds: 18.0, rate_hz: 3.0,
               alarm_max: 60, alarm_gap_s: 30.0, alarm_seconds: 4.0, raw: true}
 # Design 012: opt-in via --record-session (the Makefile's 'v' argument, e.g.
-# "make rd v"), never the default — a multi-hour session's file size and CPU
+# "make r v"), never the default — a multi-hour session's file size and CPU
 # cost scale with fps. Low by design: this is reviewed at tactic-selection
 # cadence (seconds), not watched as smooth video.
 session_recording: {fps: 2.0, scale: 0.5}
@@ -1944,7 +2041,7 @@ capture_budget:
     test_screenshots/path_blackbox/raw: {max_files: 20000, max_mb: 3072}
   # logs/wingman_*.log, deleted oldest-first at startup
   rotated_logs: {max_files: 200, max_mb: 2048}
-  # logs/session_*.mp4 (make rd v), deleted oldest-first before recording
+  # logs/session_*.mp4 (make r v), deleted oldest-first before recording
   session_video: {max_files: 8, max_mb: 6144}
 telemetry:
   # ADR 123: NOSE_DIRECTION deadband. Level flight jitters around zero altitude

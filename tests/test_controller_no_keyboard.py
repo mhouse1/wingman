@@ -1009,3 +1009,78 @@ def test_release_grace_scales_with_release_latency(monkeypatch):
     ctrl._arm_release_grace("k", span_s=0.005)
     window = ctrl._prog_release_grace_until["k"] - now
     assert abs(window - ctrl._prog_release_grace_s) < 0.05
+
+
+# -- SAF-001.4: Enter holds manual for the rest of the round (operator, 2026-10-30) ---
+
+def _held_ctrl(monkeypatch, state):
+    monkeypatch.setattr(controller_module, "keyboard_module", None)
+    cfg = _load_config()
+    analyzer = _AnalyzerStub(state)
+    return Controller((0, 0, cfg["region"]["width"], cfg["region"]["height"]),
+                      analyzer=analyzer), analyzer
+
+
+def test_enter_in_battle_takes_over_for_the_round_with_no_commanded_flight(monkeypatch):
+    """Enter takes the aircraft whether or not wingman is flying this instant, so
+    wingman does not take it back later in the round."""
+    from wingman.keybindings import MANUAL_TAKEOVER_KEY
+    ctrl, analyzer = _held_ctrl(monkeypatch, GameState.GAME_BATTLE)
+    assert not ctrl.is_mission_running()
+    assert ctrl._handle_maneuver_key_press(MANUAL_TAKEOVER_KEY) is True
+    assert analyzer.trigger_calls == ["manual_takeover"]
+    assert ctrl.manual_held_for_round()
+    assert ctrl._auto_respawn_restart is False
+
+
+def test_enter_outside_battle_takes_nothing(monkeypatch):
+    """In the lobby Enter is chat: no takeover, no hold, auto restart untouched."""
+    from wingman.keybindings import MANUAL_TAKEOVER_KEY
+    ctrl, analyzer = _held_ctrl(monkeypatch, GameState.GAME_LOBBY)
+    assert ctrl._handle_maneuver_key_press(MANUAL_TAKEOVER_KEY) is False
+    assert analyzer.trigger_calls == []
+    assert not ctrl.manual_held_for_round()
+    assert ctrl._auto_respawn_restart is True
+
+
+def test_enter_within_the_entry_grace_is_ignored(monkeypatch):
+    """SAF-001.2 still applies: an Enter queued from lobby chat must not take a
+    fresh round for its whole length."""
+    from wingman.keybindings import MANUAL_TAKEOVER_KEY
+    ctrl, analyzer = _held_ctrl(monkeypatch, GameState.GAME_BATTLE)
+    ctrl._game_battle_since = time.time()
+    assert ctrl._handle_maneuver_key_press(MANUAL_TAKEOVER_KEY) is False
+    assert not ctrl.manual_held_for_round()
+
+
+def test_a_flight_key_takeover_does_not_hold_the_round(monkeypatch):
+    ctrl, analyzer = _held_ctrl(monkeypatch, GameState.GAME_BATTLE)
+    ctrl._mission_lock.acquire(blocking=False)
+    try:
+        assert ctrl._handle_maneuver_key_press("j", is_injected=False) is True
+        assert analyzer.trigger_calls == ["manual_takeover"]
+        assert not ctrl.manual_held_for_round()
+    finally:
+        if ctrl._mission_lock.locked():
+            ctrl._mission_lock.release()
+
+
+def test_enter_in_manual_turns_a_takeover_into_a_round_hold(monkeypatch):
+    from wingman.keybindings import MANUAL_TAKEOVER_KEY
+    ctrl, analyzer = _held_ctrl(monkeypatch, GameState.GAME_BATTLE_MANUAL)
+    assert ctrl._handle_maneuver_key_press(MANUAL_TAKEOVER_KEY) is True
+    assert analyzer.trigger_calls == [], "already in manual: no second transition"
+    assert ctrl.manual_held_for_round()
+
+
+def test_the_handback_and_the_end_of_the_round_release_the_hold(monkeypatch):
+    from wingman.keybindings import MANUAL_TAKEOVER_KEY
+    ctrl, analyzer = _held_ctrl(monkeypatch, GameState.GAME_BATTLE)
+    ctrl._handle_maneuver_key_press(MANUAL_TAKEOVER_KEY)
+    analyzer.game_state = GameState.GAME_BATTLE_MANUAL
+    assert ctrl._release_manual_if_active() is True
+    assert not ctrl.manual_held_for_round()
+    ctrl._handle_maneuver_key_press(MANUAL_TAKEOVER_KEY)
+    assert ctrl.manual_held_for_round()
+    ctrl.end_manual_round_hold("the round left battle (GAME_END_B)")
+    assert not ctrl.manual_held_for_round()

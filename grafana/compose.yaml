@@ -1,0 +1,54 @@
+# Design 018: the score dashboard. Postgres holds one row per round
+# (scripts/round-scores.py loads it); Grafana charts it. Started by
+# `make grafana`, stopped by `make grafana-down`; no restart policy, so nothing
+# runs unless someone asks for it. The passwords come from grafana/.env, made
+# from grafana/.env.example (Compose reads the .env beside this file).
+name: wingman-scores
+
+services:
+  postgres:
+    image: postgres:16.14
+    environment:
+      POSTGRES_DB: wingman
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:-}
+    volumes:
+      - scores:/var/lib/postgresql/data
+      # Runs once, on the first start of an empty volume: the read-only role.
+      - ./postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d wingman"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    # No published port: the ingest runs psql inside this container.
+
+  grafana:
+    image: grafana/grafana:12.2.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-}
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:-}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/score-per-round.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+    volumes:
+      - ./provisioning:/etc/grafana/provisioning:ro
+      - ./dashboards:/var/lib/grafana/dashboards:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:3000/api/health || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+    # Grafana keeps no volume: its dashboard is the JSON file, its change markers
+    # come from Postgres.
+
+volumes:
+  scores:

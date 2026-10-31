@@ -56,9 +56,9 @@ CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 def load_nested_config(override=None) -> dict:
     """The `nested:` section of config.yaml, with an optional override.
 
-    config.yaml is the source of truth so that `make r` / `make rd` and wingman
-    itself agree on the lane without a second switch to keep in sync. `override`
-    is the per-run escape hatch (`make rd NESTED=0`) - needed because a single
+    config.yaml is the source of truth so that `make r` and wingman itself
+    agree on the lane without a second switch to keep in sync. `override`
+    is the per-run escape hatch (`make r NESTED=0`) - needed because a single
     global flag would otherwise force two simultaneous accounts into one lane.
     """
     cfg = {}
@@ -275,7 +275,7 @@ def start(display: str, size: str) -> int:
     alone — see the "up" branch below. That used to be unconditional, and it
     was wrong: STANDBY (ADR 099) or a Ctrl-C that deliberately "leaves
     everything up" can leave both MetalStorm and its Xwayland running when a
-    fresh `make rd` starts. launch-game kills and relaunches the game
+    fresh `make r` starts. launch-game kills and relaunches the game
     unconditionally regardless — but reusing the SAME Xwayland underneath
     that kill-and-relaunch left hotkey observation dead for an entire
     session (2026-09-13 05:54-06:01, wingman.log): matchmaking stalled with
