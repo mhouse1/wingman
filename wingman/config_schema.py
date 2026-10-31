@@ -401,6 +401,14 @@ SCHEMA = Section(
                 "max_manoeuvre_s": SECONDS,
                 "max_hold_s": SECONDS,
                 "pitch_down": BOOL,
+                # ADR 163 / ADR 165: the share of rounds whose engagements inside a
+                # pursuit the evade may fly, drawn per round. 0 is no evade inside a
+                # pursuit.
+                "pursuit_share": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.0),
+                # FR-011 / ADR 164: roll-right through each flare burst, held this
+                # long after its last flare, and at most flare_roll_max_s.
+                "flare_roll_after_s": Leaf(types=NUMBER, minimum=0, default=2.0),
+                "flare_roll_max_s": Leaf(types=NUMBER, minimum=0, default=15.0),
             }),
             # ADR 134: hold the afterburner whenever fuel is above the floor
             # and nothing higher-priority (eject/evade/climb) needs the key.
@@ -493,6 +501,19 @@ SCHEMA = Section(
                     "shadow": Leaf(types=(bool,), default=True),
                     "window_s": Leaf(types=NUMBER, minimum=0, maximum=10, default=1.0),
                     "hold_s": Leaf(types=NUMBER, minimum=0, maximum=30, default=3.0),
+                }),
+                # Code Review 019 cycle 32 (HLDD 001 part 2): the emergency climb
+                # starts when a pull-out started reaction_s from now would bottom
+                # out under floor_m (wingman/pullout.py).
+                "pullout": Section(children={
+                    "enabled": Leaf(types=(bool,), default=False),
+                    "shadow": Leaf(types=(bool,), default=True),
+                    "floor_m": Leaf(types=NUMBER, minimum=0, maximum=5000, default=600.0),
+                    "reaction_s": Leaf(types=NUMBER, minimum=0, maximum=10, default=2.0),
+                    # Cycle 36: a live alarm predicting a lowest point under this
+                    # breaks the objective hold-off. null: never.
+                    "bypass_holdoff_below_m": Leaf(types=NUMBER, minimum=-5000, maximum=5000,
+                                                   allow_none=True, default=None),
                 }),
             }),
             # HLDD 013 Phase 1: TACTIC_ATTACK_SUPPORT's fallback roll — own
@@ -669,6 +690,28 @@ SCHEMA = Section(
         "kill_card": Section(children={
             "enabled": Leaf(types=(bool,), default=False),
         }),
+        # Action Item 005 (AI-005-1): keep the frames the PERFORMANCE panel
+        # reader looked at, in test_screenshots/round_performance/.
+        "round_performance": Section(children={
+            "capture": Leaf(types=(bool,), default=False),
+        }),
+        # Design 018 Phase 3, ADR 166: the squadron leaderboard, read in the lobby.
+        "squadron_ranking": Section(children={
+            "enabled": Leaf(types=(bool,), default=False),
+            "queue_at": Leaf(types=(str,), default="09:38:30"),
+            "step_timeout_s": Leaf(types=(int, float), default=8.0, minimum=0.5),
+            "squadron": Leaf(types=(str,), default="Mobius Squadron"),
+            "capture": Leaf(types=(bool,), default=False),
+        }),
+        # ADR 167: each round's jet, read off the lobby.
+        "jet_name": Section(children={
+            "capture": Leaf(types=(bool,), default=False),
+        }),
+        # Design 018: the score dashboard (Grafana and Postgres, `make grafana`).
+        # Off unless the operator turns it on in config.local.yaml.
+        "score_dashboard": Section(children={
+            "enabled": Leaf(types=(bool,), default=False),
+        }),
         "depth_view": Section(children={
             "enabled": Leaf(types=(bool,), default=False),
             # A Hugging Face model id or a local directory.
@@ -694,6 +737,10 @@ SCHEMA = Section(
             "cap_kph": Leaf(types=NUMBER, minimum=300, maximum=3000, default=850.0),
             # The speed a dose aims at.
             "target_kph": Leaf(types=NUMBER, minimum=300, maximum=3000, default=800.0),
+            # The cap and target on the resupply approach only; the defaults are
+            # the ones above.
+            "resupply_cap_kph": Leaf(types=NUMBER, minimum=300, maximum=3000, default=850.0),
+            "resupply_target_kph": Leaf(types=NUMBER, minimum=300, maximum=3000, default=800.0),
             # The airbrake's deceleration the dose is worked out with.
             "decel_kph_s": Leaf(types=NUMBER, minimum=10, maximum=1000, default=150.0),
             # The longest dose one reading can start.
@@ -927,6 +974,11 @@ SCHEMA = Section(
             # have been out of view this long. 0 or null: no wait.
             "crash_recovery_clear_view_s": Leaf(
                 types=NUMBER, minimum=0, allow_none=True, default=1.0),
+            # How long a control point's or the crown's marker is still flown at
+            # after the scan stops finding it (2026-10-20: the scan misses it for
+            # 0.6 s or more while it is in view, and the 0.5 s of the resupply's
+            # memory handed A to the resupply mid-approach).
+            "objective_marker_hold_s": Leaf(types=NUMBER, minimum=0, maximum=5, default=1.5),
             # HLDD 015 Icon-Directed Search, shadow stage (2026-09-26).
             "icon_steering": Section(children={
                 "enabled": BOOL,
@@ -958,6 +1010,11 @@ SCHEMA = Section(
                 # next reading arrives. Named guess.
                 "push_floor_lookahead_s": Leaf(types=NUMBER, minimum=0, default=3.0),
                 "blind_search_after_s": SECONDS,
+                # Code Review 019 cycle 39: an icon within this many degrees of the
+                # horizon (or above it) gets no push, whatever the pitch score
+                # still says. null: the score alone decides.
+                "level_band_deg": Leaf(types=NUMBER, minimum=0, maximum=45,
+                                       allow_none=True, default=None),
             }),
         }),
 
@@ -999,6 +1056,9 @@ SCHEMA = Section(
                 "alarm_max": Leaf(types=(int,), minimum=0, maximum=1000, default=0),
                 "alarm_gap_s": Leaf(types=NUMBER, minimum=0, maximum=600, default=30.0),
                 "alarm_seconds": Leaf(types=NUMBER, minimum=0.5, maximum=18, default=4.0),
+                # Research 017 step 3: the game's own picture beside each
+                # annotated frame, written to <dir>/raw under the same names.
+                "raw": Leaf(types=(bool,), default=False),
             }),
         }),
 
@@ -1029,6 +1089,7 @@ SCHEMA = Section(
             # copied, not swapped, and it keeps drawing while its window on the
             # desktop is not shown. Off until a covered-window flight confirms it.
             "block_page_flips": Leaf(types=(bool,), default=False),
+            "restore_size": Leaf(types=(bool,), default=True),   # ADR 162
         }),
 
         # ADR 098: focus guard for key injection
@@ -1066,6 +1127,9 @@ SCHEMA = Section(
             "steep_dive_min_sin": Leaf(types=NUMBER, minimum=0.0, maximum=1.0, default=0.8),
             "level_max_sin": FRACTION,
             "ocr_every_n_ticks": _int(1),
+            # Code Review 019 cycle 38: how far into a live battle tick the tree
+            # waits for that tick's reading. 0 decides on the last tick's.
+            "bt_wait_s": Leaf(types=NUMBER, minimum=0.0, maximum=1.5, default=0.0),
             "eject_closed_loop": Section(children={
                 "enabled": BOOL,
                 "check_interval_s": SECONDS,

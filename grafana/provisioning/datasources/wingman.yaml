@@ -1,0 +1,19 @@
+# Design 018: the dashboard's data source, the rounds in Postgres, queried as
+# the read-only role (grafana/postgres/01-grafana-reader.sh).
+apiVersion: 1
+
+datasources:
+  - name: Wingman
+    uid: wingman-pg
+    type: grafana-postgresql-datasource
+    url: postgres:5432
+    user: grafana_reader
+    isDefault: true
+    editable: false
+    jsonData:
+      database: wingman
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: false
+    secureJsonData:
+      password: ${GRAFANA_DB_PASSWORD}

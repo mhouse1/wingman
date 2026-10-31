@@ -22,7 +22,7 @@ from wingman.analyzer import (
     _scan_minimap_red,
 )
 from wingman.engage_nav import RING_LONG, RING_MID, RING_SHORT, bin_rings
-from constants import CONFIG_PATH
+from constants import CONFIG_PATH, MINIMAP_CORPUS_DIR
 
 MASK_RADIUS_FRAC = 0.93
 MIN_BLOB_PX = 4
@@ -340,8 +340,7 @@ def test_components_method_empty_on_black_frame(analyzer):
 
 # --- ADR 108: the post-2026-09-02 minimap -------------------------------------
 
-RTB_FRAMES = sorted((ROOT / "test_screenshots" / "unknown_anomalies").glob("rtb_*.png")) \
-    if (ROOT / "test_screenshots" / "unknown_anomalies").exists() else []
+RTB_FRAMES = sorted(MINIMAP_CORPUS_DIR.glob("rtb_*.png"))
 
 
 @pytest.mark.skipif(len(RTB_FRAMES) < 5, reason="crossing corpus not present")
@@ -401,7 +400,7 @@ _DESERT_NAMES = (
     "approach_20260903_164235_20.png",
 )
 DESERT_FRAMES = [p for p in
-                 (ROOT / "test_screenshots" / "unknown_anomalies" / n
+                 (MINIMAP_CORPUS_DIR / n
                   for n in _DESERT_NAMES) if p.exists()]
 
 
@@ -416,7 +415,7 @@ def test_desert_terrain_is_not_read_as_a_NEAR_boundary(analyzer):
     real line IS somewhere on the minimap); reading it AT the aircraft is the
     regression.
 
-    Kept in the gitignored anomalies folder rather than committed: four full
+    Kept in the gitignored minimap corpus rather than committed: four full
     frames are 8 MB, and ADR 100 exists because this repository grew on exactly
     that kind of artifact. The test skips when they are absent."""
     for f in DESERT_FRAMES:

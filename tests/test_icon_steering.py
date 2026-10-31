@@ -363,6 +363,76 @@ def test_above_the_horizon_a_side_icon_still_turns():
 
 
 # ---------------------------------------------------------------------------
+# Code Review 019 cycle 39 (2026-10-19 04:17): the ammo pin moved from below-left
+# (116 deg) to level on the right (-1 to +5 deg); the pitch score it had left
+# kept the push on for 3 s, into a -50 deg dive. With level_band_deg the icon's
+# own position decides "below the horizon" too.
+# ---------------------------------------------------------------------------
+
+LEVEL_CFG = IconSteeringConfig(enabled=True, level_band_deg=5.0)
+
+
+def _the_resupply_case(cfg):
+    """The pin's angles as logged, 0.33 s apart (ICONPTS, 04:17:00 to 04:17:06)."""
+    clock = _Clock()
+    p = IconPoints(cfg, clock=clock)
+    _run(p, clock, [_icon(116.0)], 4, dt=0.33)
+    intents = []
+    for angle in (-1, -1, -1, -1, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5):
+        clock.t += 0.33
+        p.scan([_icon(float(angle))])
+        intents.append(p.intent()[0])
+    return p, intents
+
+
+def test_a_level_icon_gets_no_push_from_the_score_a_low_icon_left():
+    p, intents = _the_resupply_case(LEVEL_CFG)
+    assert "down" not in intents
+    assert p.intent() == ("turn", (ROLL_RIGHT, NOSE_UP))
+
+
+def test_without_the_band_the_leftover_score_pushes():
+    """What flew at 04:17."""
+    _, intents = _the_resupply_case(CFG)
+    assert intents[:4] == ["down"] * 4
+
+
+@pytest.mark.parametrize("angle", [110.0, 145.0, 172.0, 30.0, 8.0])
+def test_with_the_band_below_the_horizon_is_still_a_push(angle):
+    """The operator's 2026-09-26 rule stands outside the band."""
+    clock = _Clock()
+    p = IconPoints(LEVEL_CFG, clock=clock)
+    _run(p, clock, [_icon(angle)], 8)
+    assert p.intent() == ("down", (NOSE_DOWN,))
+
+
+def test_the_level_band_reads_both_sides_and_above():
+    p = IconPoints(LEVEL_CFG, clock=_Clock())
+    for angle, level in ((-1.0, True), (5.0, True), (175.0, True), (-120.0, True),
+                         (8.0, False), (116.0, False), (172.0, False)):
+        p.last_icon_angle_deg = angle
+        assert p.icon_level_or_above() is level, angle
+
+
+def test_a_reset_forgets_the_icon_angle():
+    clock = _Clock()
+    p = IconPoints(LEVEL_CFG, clock=clock)
+    _run(p, clock, [_icon(0.0)], 2)
+    assert p.icon_level_or_above()
+    p.reset()
+    assert p.last_icon_angle_deg is None and not p.icon_level_or_above()
+
+
+def test_the_shipped_config_sets_the_level_band():
+    import yaml
+    shipped = yaml.safe_load((Path(__file__).resolve().parents[1]
+                              / "wingman" / "config.yaml").read_text())
+    band = shipped["pursuit_mode"]["icon_steering"]["level_band_deg"]
+    assert IconSteeringConfig.from_dict(
+        shipped["pursuit_mode"]["icon_steering"]).level_band_deg == band == 5.0
+
+
+# ---------------------------------------------------------------------------
 # A refused push turns toward the icon (2026-09-27 18:51:51). Below the horizon
 # the law pushes with the wings level; below push_floor_m the push is refused,
 # and before this the jet then flew straight with the enemy off to one side:

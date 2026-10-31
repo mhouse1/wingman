@@ -8,6 +8,11 @@ The game marks the crown objective two ways, as it does the resupply point:
 
 - In view: a dark disc with a yellow outline and a yellow crown inside,
   ringed by four arcs with arrowheads. `find_priority_marker` finds the disc.
+- Behind terrain: the outline and the crown only, with no dark disc (the
+  ground shows through it) and no arcs. Operator, 2026-10-30, on a crown the
+  pursuit flew into a mountain at: "in this case the priority target was
+  behind a mountain". Not returned, as the control points and the resupply
+  point behind terrain are not (Code Review 019 cycles 15 and 16).
 - Off screen: a small yellow pin on the ring the red aircraft icons use, the
   same pin as the resupply point's with a crown in it. Its place on the ring
   is the direction. `find_priority_ring_icons` finds it.
@@ -36,6 +41,20 @@ class PriorityMarker:
     height: int
     area: int
     angle_deg: float
+    fill: float = 1.0       # share of the disc's inside that is its dark fill
+
+
+# In view the disc is filled in one dark olive whatever lies behind it, the
+# resupply point's own (Code Review 019 cycle 16): hue 26, saturation 255, value
+# 54 inside all seven crowns archived in view, 84% to 97% of the inside. Behind
+# terrain the ground shows through, and dark rock passes the darkness test
+# below: inside the crown flown into a mountain on Crucible on 2026-10-30 at
+# 03:45:42 to 03:45:44, 11% to 19% of that fill, saturation 133 to 175 (three
+# half-size black-box frames). A disc whose inside is less of that fill than
+# _MIN_FILL is not returned.
+_FILL_LO = np.array([22, 200, 35], dtype=np.uint8)
+_FILL_HI = np.array([31, 255, 95], dtype=np.uint8)
+_MIN_FILL = 0.5
 
 
 # Where a marker counts when the caller names no region: [x1, y1, x2, y2] in
@@ -52,8 +71,12 @@ PRIORITY_PIN_MAX_CORNER_SHARE = 0.25
 _PIN_MIN_AREA_PX = 45.0
 
 
-def find_priority_marker(frame, region_pct=None) -> "PriorityMarker | None":
+def find_priority_marker(frame, region_pct=None,
+                         occluded: "list | None" = None) -> "PriorityMarker | None":
     """Find the crown objective's disc in a color capture.
+
+    A disc without its dark fill is behind terrain and is not returned; when
+    `occluded` is a list, each such disc is appended to it.
 
     Measured on six markers, 15 to 39 px across (2026-10-09 and the crown
     icon of 2026-10-02): the outline is a bare circle that fills 12% to 19% of
@@ -145,8 +168,16 @@ def find_priority_marker(frame, region_pct=None) -> "PriorityMarker | None":
         dark = hsv[top:top + height, left:left + width, 2][~box_yellow & (radius < 0.62)]
         if dark.size == 0 or float(np.median(dark)) > 110:
             continue
+        # And that dark is its own fill, not ground showing through.
+        inside = hsv[top:top + height, left:left + width][~box_yellow & (radius < 0.70)]
+        fill = float((cv2.inRange(inside.reshape(-1, 1, 3), _FILL_LO, _FILL_HI) > 0).mean())
         angle = math.degrees(math.atan2(y - frame_height / 2, x - frame_width / 2))
-        candidates.append(PriorityMarker(x, y, width, height, area, angle))
+        marker = PriorityMarker(x, y, width, height, area, angle, fill)
+        if fill < _MIN_FILL:
+            if occluded is not None:
+                occluded.append(marker)
+            continue
+        candidates.append(marker)
 
     return max(candidates, key=lambda marker: marker.area, default=None)
 

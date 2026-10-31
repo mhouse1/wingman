@@ -20,8 +20,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.9.2"
-WINGMAN_VERSION_DETAILS = "ACS: optimization"
+WINGMAN_VERSION = "1.9.3"
+WINGMAN_VERSION_DETAILS = "ACS: terrain avoidance"
 
 from . import capture_budget
 from .capture import Capture
@@ -44,8 +44,16 @@ from .kill_card import KillCardReader, read_card
 from .warning_agreement import WarningAgreement
 from .terrain_loom import TerrainLoom
 from .mission_stats import MissionStatsTracker
+from .round_performance import (CAPTURE_DIR as ROUND_PERFORMANCE_DIR, KDA_CROP, SCORE_CROP,
+                                describe_read, frame_tag, read_panel, read_round,
+                                save_frame as save_round_frame, unread_reason)
+from . import jet_name
+from .jet_name import read_jet
+from . import squadron_ranking
+from .squadron_ranking import Navigation as SquadronNavigation, SquadronRanking
 from .performance import PerformanceTracker
 from .resource_monitor import ResourceSampler, read_loadavg
+from .game_stats import GameStatsWatcher
 from .heap_census import HeapCensus
 from .eject_stuck_detector import EjectStuckDetector
 from .liveness_guard import LivenessGuard
@@ -125,8 +133,139 @@ GAME_END_MAX_CLICKS = 7
 GAME_END_CLICK_INTERVAL_S = 0.5
 
 
+def _note_round_performance(read_performance, grab_frame, sleep_fn, on_performance, logger,
+                            save_frame=None, stamp=""):
+    """Read the PERFORMANCE panel the first click brings up, log the round's
+    figures and hand them to `on_performance` (None when they were not read).
+    Returns them.
+
+    AI-005-1: an unread round's line says why, with what OCR returned on each
+    frame. With `save_frame`, a read round keeps the first frame that read its
+    figures (the corpus's check on accuracy) and an unread one every frame read."""
+    try:
+        reading, reads = read_round(read_performance, grab_frame, sleep_fn)
+    except Exception:
+        logger.exception("ROUND PERFORMANCE: read failed")
+        reading, reads = None, []
+    if reading is None:
+        logger.info("ROUND PERFORMANCE: not read — %s",
+                    unread_reason([panel for _frame, panel in reads]))
+    else:
+        logger.info("\033[93m📋 ROUND PERFORMANCE: score %d, K/D/A %d/%d/%d\033[0m",
+                    reading.score, reading.kills, reading.deaths, reading.assists)
+    if save_frame is not None:
+        # A read round keeps the first frame that read its figures: frame 1 was
+        # still the podium page in 5 of the first 10 rounds of 2026-10-29 04:39.
+        keep = range(len(reads)) if reading is None else [next(
+            (k for k, (_frame, panel) in enumerate(reads)
+             if panel is not None and panel.reading == reading), 0)]
+        for k in keep:
+            frame, panel = reads[k]
+            save_frame(frame, f"{stamp}_p1_f{k + 1}_{frame_tag(panel)}")
+    if on_performance is not None:
+        try:
+            on_performance(reading)
+        except Exception:
+            logger.exception("_click_through_game_end: on_performance failed")
+    return reading
+
+
+def _look_for_the_panel(read_performance, frame, page, save_frame, stamp, logger):
+    """AI-005-1, shadow: after a first click whose panel was not read, look for
+    the KDA on the page each later click brought up. Logged and saved, never
+    booked: the round's reading stays the first click's."""
+    try:
+        panel = read_performance(frame)
+    except Exception:
+        logger.debug("ROUND PERFORMANCE: page %d not looked at", page, exc_info=True)
+        return
+    if panel is not None and panel.score_text is not None:
+        logger.info("ROUND PERFORMANCE: shadow — page %d shows a KDA: %s",
+                    page, describe_read(panel))
+    else:
+        logger.debug("ROUND PERFORMANCE: shadow — page %d: %s", page, describe_read(panel))
+    if save_frame is not None:
+        save_frame(frame, f"{stamp}_p{page}_{frame_tag(panel)}")
+
+
+# ADR 166: the navigation starts only while the quick-scan's PLAY read is this
+# fresh; the quick-scan reads every second.
+SQUADRON_PLAY_SEEN_S = 3.0
+
+
+def _squadron_ranking(cfg, analyzer, live: bool, logger) -> SquadronRanking:
+    """ADR 166's schedule: on when the config says so, in a live run, with every
+    crop the navigation uses calibrated; otherwise one that is never due."""
+    section = cfg.get("squadron_ranking") or {}
+    enabled = bool(section.get("enabled", schema_default("squadron_ranking.enabled")))
+    missing = [c for c in squadron_ranking.CROPS if c not in analyzer.crops]
+    if enabled and missing:
+        logger.warning("SQUADRON RANKING: off — crops not calibrated: %s", ", ".join(missing))
+    schedule = SquadronRanking(enabled and live and not missing, str(section.get(
+        "queue_at", schema_default("squadron_ranking.queue_at"))))
+    if schedule.enabled:
+        logger.info("SQUADRON RANKING: next reading queues at %s (ADR 166)", schedule.next_queue)
+    return schedule
+
+
+def _save_jet_frame(frame, name: str) -> bool:
+    return save_round_frame(jet_name.CAPTURE_DIR, frame, name)
+
+
+def _note_jet(read, frame, logger, record, save_frame, stamp=None) -> None:
+    """Log and book the jet read off the lobby (ADR 167), and keep what it was
+    read from: the label, or the whole frame when no name came of it."""
+    stamp = stamp or time.strftime("%Y%m%d_%H%M%S")
+    name = None if read is None else read.name
+    if name is not None:
+        logger.info("\033[93m✈️ JET NAME: %s\033[0m", name)
+        record(name)
+    else:
+        logger.warning("JET NAME: not read — %s", "no OCR" if read is None else (
+            f"OCR read {read.text!r}" if read.text else "no trophy icon on the label"))
+    if not save_frame:
+        return
+    if name is not None:
+        save_frame(read.band, f"{stamp}_{jet_name.file_stem(name)}")
+    else:
+        save_frame(frame, f"{stamp}_unread")
+
+
+def _save_squadron_frame(frame, name: str) -> bool:
+    return save_round_frame(squadron_ranking.CAPTURE_DIR, frame, name)
+
+
+def _note_squadron_ranking(reading, why: str, navigation, logger, record, save_frame,
+                           stamp=None) -> None:
+    """Log and book one navigation's answer (ADR 166), and keep its frame: the
+    one read, or the last one seen when it gave up."""
+    stamp = stamp or time.strftime("%Y%m%d_%H%M%S")
+    if reading is not None:
+        logger.info("\033[93m🏆 SQUADRON RANKING: rank %d, trophies %s\033[0m",
+                    reading.rank, f"{reading.trophies:,}")
+        record(reading, time.time())
+    else:
+        logger.warning("SQUADRON RANKING: not read — %s%s", why, "".join(
+            f"; {squadron_ranking.describe(row)}" for _frame, row in navigation.reads[-2:]))
+    if "NOT back in the lobby" in why:
+        logger.warning("SQUADRON RANKING: not back in the lobby after the leaderboard — "
+                       "the lobby's own recovery takes over (ADR 166)")
+    if not save_frame:
+        return
+    if reading is not None:
+        frame = navigation.reads[-1][0]
+        name = f"{stamp}_read-{reading.rank}-{reading.trophies}"
+    else:
+        frame = navigation.last_frame
+        name = f"{stamp}_unread"
+    if frame is not None:
+        save_frame(frame, name)
+
+
 def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8,
-                            sleep_fn=time.sleep, on_complete=None, grab_frame=None):
+                            sleep_fn=time.sleep, on_complete=None, grab_frame=None,
+                            read_performance=None, on_performance=None, save_frame=None,
+                            round_awaits=None):
     """Click through GAME_END prompt and force transition to GAME_LOBBY.
 
     Clicks the center prompt one click at a time. Before every click after the
@@ -142,11 +281,24 @@ def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8,
     `on_complete` fires once the last click of the sequence has gone out, so a
     caller waiting to exit at the lobby can time its settle from a click rather
     than from the state change.
+
+    The first click brings up the PERFORMANCE panel. With `read_performance`
+    (`read_panel` for one frame), the round's score and K/D/A are read off it
+    before the second click and handed to `on_performance` (operator,
+    2026-10-26). When they were not read, each later page is looked at for the
+    KDA too, in shadow (AI-005-1). `save_frame(frame, name)` keeps the frames.
+    `round_awaits()` says whether a round waits for its reading; when it says
+    no (a second click-through of the same end screens), nothing is read
+    (AI-005-3).
     """
     clicks = 0
+    unread = False
+    stamp = time.strftime("%Y%m%d_%H%M%S")
     while clicks < GAME_END_MAX_CLICKS:
         if clicks:
             frame = grab_frame() if grab_frame is not None else None
+            if frame is not None and unread and clicks >= 2:
+                _look_for_the_panel(read_performance, frame, clicks, save_frame, stamp, logger)
             if frame is None or not analyzer.scan_region_for_click_to(frame):
                 break
         ctrl.click_crop(
@@ -157,6 +309,15 @@ def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8,
         )
         clicks += 1
         sleep_fn(GAME_END_CLICK_INTERVAL_S)
+        if clicks == 1 and read_performance is not None and grab_frame is not None:
+            if round_awaits is not None and not round_awaits():
+                logger.info("End-of-round click-through: no round waits for its PERFORMANCE "
+                            "panel, so none is read (a second click-through of the same end "
+                            "screens; AI-005-3)")
+            else:
+                unread = _note_round_performance(read_performance, grab_frame, sleep_fn,
+                                                 on_performance, logger,
+                                                 save_frame=save_frame, stamp=stamp) is None
     sleep_fn(settle_seconds)
     frame = grab_frame() if grab_frame is not None else None
     if frame is not None and analyzer.scan_region_for_final_continue(frame):
@@ -173,6 +334,14 @@ def _click_through_game_end(ctrl, analyzer, logger, settle_seconds: float = 0.8,
         except Exception:
             logger.exception("_click_through_game_end: on_complete failed")
     logger.info("\033[93m📋 Final continue click complete → GAME_LOBBY\033[0m")
+
+
+# Popups whose detection crop is not the button to click: the crop the click goes
+# to instead. PARTY_ENDED (2026-10-19): the message is read, OK below it is clicked.
+_POPUP_CLICK_TARGETS = {
+    "event_refresh": "event_refresh_dismiss",
+    "PARTY_ENDED": "PARTY_ENDED_OK",
+}
 
 
 def _invite_click_target(accept_invite: bool, crops) -> "str | None":
@@ -192,11 +361,71 @@ def _invite_click_target(accept_invite: bool, crops) -> "str | None":
     return target if target in crops else None
 
 
+# An accepted invite puts the aircraft in someone else's squad. The lobby frame
+# grabbed after ACCEPT shows that squad, so the operator can see who it was.
+INVITE_CAPTURE_DIR = "test_screenshots/invite"
+
+
+def _save_invite_screenshot(frame, logger, directory=INVITE_CAPTURE_DIR) -> "Path | None":
+    """Save the lobby frame after an accepted invite, within the capture budget.
+
+    Returns the path written, or None when nothing was. Never raises: it runs on
+    the thread that readies up, and a failed screenshot must not stop that click.
+    """
+    try:
+        import cv2
+        out_dir = Path(directory)
+        if not capture_budget.admit(out_dir, "Invite capture"):
+            return None
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"invite_{time.strftime('%Y%m%d_%H%M%S')}.png"
+        if not cv2.imwrite(str(path), frame):
+            logger.warning("Invite capture: write failed: %s", path)
+            return None
+        logger.info("📋 INVITED accepted — squad screenshot saved to %s", path)
+        return path
+    except Exception as e:
+        logger.warning("Invite capture: failed to save frame: %s: %s", type(e).__name__, e)
+        return None
+
+
 # Seconds between choosing a reward card and pressing SELECT ONE: the button
 # is inert until the card is chosen. Named guess, not measured.
 CHOOSE_REWARDS_ACCEPT_DELAY_S = 1.5
 _CHOOSE_REWARDS_STATES = (GameState.GAME_LOBBY, GameState.GAME_UNKNOWN,
                           GameState.GAME_STARTING_STALLED)
+
+
+def _wait_for_tick_telemetry(analyzer, ammo_events, since_ts: float, wait_s: float,
+                             clock=time.time, start_grace_s: float = 0.25) -> bool:
+    """Wait for the telemetry reading of this tick's frame (Code Review 019 cycle 38).
+
+    The tree used to decide about 0.1 s into the tick, on the reading of the
+    tick before: every climb trigger acted on a frame 1.54 s old. This tick's
+    reading lands about 0.45 s in. Returns True once it is in the filter, and
+    False at ``since_ts + wait_s``, or once no reading of a frame grabbed since
+    ``since_ts`` is on its way ``start_grace_s`` into the tick. The grace is the
+    background pass's own start: live, the tree got here 1 to 2 ms after the
+    pass was scheduled, before it had submitted the reading (04:31, cycle 38).
+    A new missile alert still deploys flares while it waits.
+    """
+    deadline = since_ts + wait_s
+    while not analyzer.telemetry_landed_since(since_ts):
+        now = clock()
+        in_flight = analyzer.telemetry_in_flight_since(since_ts)
+        if not in_flight and now - since_ts >= start_grace_s:
+            # It may have landed between the two checks.
+            return analyzer.telemetry_landed_since(since_ts)
+        remaining = deadline - now
+        if remaining <= 0:
+            return False
+        # Nothing wakes the wait when the pass submits, only when it lands.
+        analyzer.telemetry_event.wait(timeout=min(remaining, 0.05 if in_flight else 0.02))
+        analyzer.telemetry_event.clear()
+        if analyzer.incoming_event.is_set():
+            analyzer.incoming_event.clear()
+            ammo_events.deploy_flares_on_new_incoming()
+    return True
 
 
 def _choose_middle_reward(ctrl, analyzer, logger,
@@ -483,7 +712,7 @@ def main():
                         help="Design 012: record a video of this session (logs/session_<run_id>.mp4) "
                              "paired with a JSONL behavior-tree trace (logs/bt_trace_<run_id>.jsonl), "
                              "both keyed to PerformanceTracker.run_id. Opt-in — set via the "
-                             "Makefile's 'v' argument (make rd v), not the default.")
+                             "Makefile's 'v' argument (make r v), not the default.")
     args = parser.parse_args()
 
     console_level = getattr(logging, args.log_level.upper(), logging.INFO)
@@ -625,6 +854,7 @@ def main():
     # ADR 157: the guard that releases modifiers left held on the nested display.
     stuck_modifier_guard = None
     present_copy_guard = None
+    nested_size_guard = None
     if _nested_on and sys.platform != "win32":
         nested_display = str(_nested.get("display") or ":3").strip()
         from .input_linux import (set_injection_display, set_injected_keys,
@@ -695,6 +925,13 @@ def main():
             from .present_copy_guard import PresentCopyGuard
             present_copy_guard = PresentCopyGuard(nested_display)
             present_copy_guard.start()
+        # ADR 162 / Anomaly 015: resizing the nested window resizes the nested
+        # screen, and a screen smaller than the capture region fails every grab.
+        if bool(_nested.get("restore_size", schema_default("nested.restore_size"))):
+            from .nested_size_guard import NestedSizeGuard
+            nested_size_guard = NestedSizeGuard(nested_display,
+                                                str(_nested.get("size") or "1920x1200"))
+            nested_size_guard.start()
 
     # ADR 098: gate injection on the game having focus. Installed process-wide
     # because the injection sites are module-level in controller.
@@ -873,6 +1110,7 @@ def main():
         _files, _bytes = capture_budget.section_budget(
             cfg, "session_video", (8, 6144 * 1024 ** 2))
         capture_budget.prune("logs", "session_*.mp4", _files, _bytes, reserve=1)
+        capture_budget.prune("logs", "session_*.frames.csv", _files, _bytes, reserve=1)
         video_recorder = VideoRecorder(
             region, monitor_index, game_window_offset, nested_display,
             out_path=f"logs/session_{tracker.run_id}.mp4",
@@ -882,8 +1120,9 @@ def main():
         video_recorder.start()
         bt_trace_writer = BtTraceWriter(f"logs/bt_trace_{tracker.run_id}.jsonl")
         logger.info("Design 012: recording session video to logs/session_%s.mp4 "
+                    "(each frame's time in logs/session_%s.frames.csv) "
                     "and behavior-tree trace to logs/bt_trace_%s.jsonl",
-                    tracker.run_id, tracker.run_id)
+                    tracker.run_id, tracker.run_id, tracker.run_id)
 
     # Party invites are DECLINED by default: accepting drops the aircraft into
     # someone else's squad mid-session, which silently changes what an unattended
@@ -1047,7 +1286,7 @@ def main():
             # ESC dismisses it. Cooldown above still rate-limits the presses.
             ctrl.press_escape(hold_seconds=0.05, block=False)
             return
-        click_target = "event_refresh_dismiss" if popup == "event_refresh" else popup
+        click_target = _POPUP_CLICK_TARGETS.get(popup, popup)
         if popup == "INVITED":
             click_target = _invite_click_target(accept_invite, analyzer.crops)
             if click_target is None:
@@ -1080,6 +1319,7 @@ def main():
                 if new_frame is None:
                     logger.warning("INVITED: frame capture returned None")
                     return
+                _save_invite_screenshot(new_frame, logger)
                 ready = analyzer.scan_region_for_play_button(new_frame)
                 if ready and ctrl.finish_round_requested():
                     logger.info("🏁 FINISH ROUND: INVITED accepted but exit is "
@@ -1315,8 +1555,77 @@ def main():
 
     analyzer.subscribe(GameEvent.FSM_TRANSITION, _stats_fsm_cb, name="mission_stats")
 
+    # ADR 167: each round's jet, off the frame PLAY or READY was clicked on. Live
+    # only, as the round's score. The read leaves the quick-scan's thread at once,
+    # so the click does not wait for it.
+    if not replay_mode and not capture_mode and jet_name.CROP in analyzer.crops:
+        jet_capture = bool((cfg.get("jet_name") or {}).get(
+            "capture", schema_default("jet_name.capture")))
+
+        def _read_jet(frame):
+            _note_jet(analyzer.run_ocr(read_jet, frame, analyzer.crops[jet_name.CROP]), frame,
+                      logger, stats_tracker.record_jet, jet_capture and _save_jet_frame)
+
+        def _on_play_click_read_jet(_crop, frame):
+            stats_tracker.record_jet(None)
+            threading.Thread(target=_read_jet, args=(frame,), daemon=True,
+                             name="jet-name").start()
+        analyzer.subscribe(GameEvent.LOBBY_PLAY_CLICK, _on_play_click_read_jet, name="jet_name")
+
+    # Operator, 2026-10-26: each round's score and K/D/A, read off the
+    # PERFORMANCE panel during the end-of-round click-through and totalled in
+    # the session summary. Live only, as the kill card: a replay's end screens
+    # are archived screenshots, and the reads would hold up the gate's clicks.
+    read_round_performance = None
+    if (not replay_mode and not capture_mode
+            and SCORE_CROP in analyzer.crops and KDA_CROP in analyzer.crops):
+        def read_round_performance(frame):
+            return analyzer.run_ocr(read_panel, frame, analyzer.crops[SCORE_CROP],
+                                    analyzer.crops[KDA_CROP])
+    # AI-005-1: keep the frames the reader looked at, as a corpus to measure it.
+    save_performance_frame = None
+    if read_round_performance is not None and bool((cfg.get("round_performance") or {}).get(
+            "capture", schema_default("round_performance.capture"))):
+        def save_performance_frame(frame, name):
+            return save_round_frame(ROUND_PERFORMANCE_DIR, frame, name)
+
+    # Design 018 Phase 3, ADR 166: the squadron's rank and trophies, read off the
+    # game's squadron leaderboard in the lobby between rounds. Live only: a
+    # replay's lobby is archived screenshots with no menu behind them.
+    squadron = _squadron_ranking(cfg, analyzer, not replay_mode and not capture_mode, logger)
+    analyzer.set_lobby_errand(
+        active=squadron.active,
+        pending=lambda: (squadron.holds_play() and not ctrl.finish_round_requested()
+                         and not ctrl.operator_stop_requested()))
+    squadron_capture = bool((cfg.get("squadron_ranking") or {}).get(
+        "capture", schema_default("squadron_ranking.capture")))
+
+    def _squadron_navigation():
+        return SquadronNavigation(
+            analyzer.crops, cap.grab_from_thread,
+            lambda fn, *a: analyzer.run_ocr(fn, *a),
+            lambda name: ctrl.click_crop(analyzer.crops[name], block=True, count=1,
+                                         region_name=name),
+            lambda: (exit_requested.is_set() or ctrl.operator_stop_requested()
+                     or ctrl.finish_round_requested()),
+            str((cfg.get("squadron_ranking") or {}).get(
+                "squadron", schema_default("squadron_ranking.squadron"))),
+            step_timeout_s=float((cfg.get("squadron_ranking") or {}).get(
+                "step_timeout_s", schema_default("squadron_ranking.step_timeout_s"))))
+
+    def _on_squadron_done(reading, why, navigation):
+        _note_squadron_ranking(reading, why, navigation, logger,
+                               stats_tracker.record_squadron_ranking,
+                               squadron_capture and _save_squadron_frame)
+
     # Load loop interval from config
     loop_interval_sec = cfg.get("loop_interval_sec", 0.5)
+    # Code Review 019 cycle 38: live runs only, so replay and capture keep their
+    # timing.
+    telemetry_bt_wait_s = float((cfg.get("telemetry") or {}).get(
+        "bt_wait_s", schema_default("telemetry.bt_wait_s")))
+    if replay_mode or live_capture is not None:
+        telemetry_bt_wait_s = 0.0
 
     # Mission restart state machine
     last_click_to_alert_ts = 0.0
@@ -1426,6 +1735,8 @@ def main():
     resource_sampler = ResourceSampler(
         cfg.get("resource_monitor", {}), perf_tracker=tracker)
     resource_sampler.set_pool_depth_source(analyzer.ocr_queue_depth)
+    # Research 017: the game's own frame rate for each match, from its prefix.
+    game_stats = GameStatsWatcher.from_env()
     # ADR 095: record the conditions this session ran under, so it can be
     # compared against the archive rather than assumed equivalent to it.
     try:
@@ -1487,6 +1798,7 @@ def main():
             # resource trail — capture stalls are a symptom of the very
             # starvation this samples (Performance 008).
             resource_sampler.maybe_sample()
+            game_stats.maybe_poll()
             heap_census.maybe_census(mi_use_mb=resource_sampler.last_mi_use_mb)
             # ADR 093 liveness: OCR happening at all is progress. Own offsets —
             # snapshot_since does not drain, so this cannot starve the sampler.
@@ -1505,7 +1817,8 @@ def main():
             # mission running: stopping there costs nothing, while stopping
             # mid-mission abandons an aircraft in flight.
             _safe = (analyzer.game_state == GameState.GAME_LOBBY
-                     and not ctrl.is_mission_running())
+                     and not ctrl.is_mission_running()
+                     and not squadron.active())
             # ADR 094: the operator's deferred stop. Deliberately BROADER than
             # the guards' safe point above. The guards mean "restart wingman at
             # a clean moment" and should wait for a real lobby; 'z' means "stop
@@ -1531,8 +1844,10 @@ def main():
             _ending_round = analyzer.game_state == GameState.GAME_END_B
             _settling = (final_continue_ts[0] > 0.0
                          and time.time() - final_continue_ts[0] < FINISH_ROUND_SETTLE_S)
+            # ADR 166: nor while the squadron leaderboard is up; the navigation
+            # sees the pending stop and comes straight back.
             if ctrl.finish_round_requested() and not (_in_round or _ending_round
-                                                      or _settling):
+                                                      or _settling or squadron.active()):
                 logger.warning(
                     "\033[93m🏁 FINISH ROUND: stopping in %s — no round in progress "
                     "(ADR 094)\033[0m", analyzer.game_state.name)
@@ -1543,7 +1858,11 @@ def main():
             # nested lane the leftover is a black window with nothing behind
             # it. Unlike the guards this needs no safe point: there is no
             # aircraft in flight to abandon when there is no game.
-            if game_watch.game_has_gone():
+            # Not in replay or capture runs: the watch scans every process on
+            # the box, so an operator's game quitting mid-run ended a replay of
+            # recorded screenshots (2026-10-25, PATH1 stopped at 45 s of 94).
+            if (not replay_mode and not capture_mode
+                    and game_watch.game_has_gone()):
                 logger.warning(
                     "\033[93m🎮 GAME GONE: MetalStorm is no longer running — "
                     "ending the session (ADR 105)\033[0m")
@@ -1665,6 +1984,10 @@ def main():
                             new_game_state.name)
                 if new_game_state != GameState.GAME_UNKNOWN:
                     startup_classification_complete = True
+                if new_game_state not in BATTLE_STATES:
+                    # SAF-001.4: the round has left battle, so an Enter hold
+                    # ends here and the next round starts under wingman.
+                    ctrl.end_manual_round_hold(f"the round left battle ({new_game_state.name})")
                 if new_game_state == GameState.GAME_END_B:
                     game_end_b_since = time.time()
                     # GAME_END_B is not a respawn flow; clear the respawn latch
@@ -1705,6 +2028,9 @@ def main():
                         while not _stop.wait(timeout=45.0):
                             if analyzer.game_state != GameState.GAME_LOBBY:
                                 return
+                            if squadron.active():
+                                # ADR 166: wingman is on the leaderboard by choice.
+                                continue
                             if (analyzer.blackout_esc_suppressed()
                                     or analyzer.exit_dialog_visible()):
                                 # ADR 087: ESC opens the Exit-to-Desktop modal,
@@ -1776,6 +2102,16 @@ def main():
             missiles_snapshot = analyzer.get_ammo_missiles()
             ammo_events.tick_missile_count(missiles_snapshot, current_game_state)
 
+            # ADR 166: the squadron leaderboard, once the quick-scan has read PLAY
+            # in this lobby (a solo lobby, with nothing over it). The quick-scan
+            # holds the PLAY click meanwhile.
+            if (current_game_state == GameState.GAME_LOBBY and squadron.due()
+                    and analyzer.play_seen_within(SQUADRON_PLAY_SEEN_S)
+                    and not ctrl.finish_round_requested()
+                    and not ctrl.operator_stop_requested()):
+                logger.info("SQUADRON RANKING: opening the squadron leaderboard (ADR 166)")
+                squadron.start(_squadron_navigation(), _on_squadron_done)
+
 
             # GAME_WAITING: scan for CANCEL every 3s to confirm matchmaking.
             # CANCEL visible → matchmaking active → advance to GAME_STARTING.
@@ -1822,6 +2158,14 @@ def main():
             # semantics. Still ticks in off/shadow modes.
             if not behavior_tree.active:
                 enemy_presence.tick(frame, current_game_state)
+
+            # Code Review 019 cycle 38: decide on this tick's telemetry, not the
+            # last tick's (see _wait_for_tick_telemetry).
+            if (telemetry_bt_wait_s > 0 and current_game_state in BATTLE_STATES
+                    and not _wait_for_tick_telemetry(analyzer, ammo_events, loop_start,
+                                                     telemetry_bt_wait_s)):
+                logger.debug("Tick: the tree decides without this tick's telemetry "
+                             "(%.2fs in)", time.time() - loop_start)
 
             # ADR 024 behavior tree: tactic selection every tick; in active
             # mode the Engage selection also drives ring-engage geometry
@@ -1883,7 +2227,11 @@ def main():
                     target=_click_through_game_end,
                     args=(ctrl, analyzer, logger),
                     kwargs={"on_complete": _note_final_continue,
-                            "grab_frame": cap.grab_from_thread},
+                            "grab_frame": cap.grab_from_thread,
+                            "read_performance": read_round_performance,
+                            "on_performance": stats_tracker.record_round_performance,
+                            "save_frame": save_performance_frame,
+                            "round_awaits": stats_tracker.round_awaits_reading},
                     daemon=True,
                 ).start()
 
@@ -2027,6 +2375,13 @@ def main():
             stuck_modifier_guard.stop()
         if present_copy_guard is not None:
             present_copy_guard.stop()
+        if nested_size_guard is not None:
+            nested_size_guard.stop()
+        # Anomaly 014: the GAME_LOBBY escape loop stops only on a state change,
+        # and none comes once the loop above has exited. STANDBY keeps the
+        # process alive, so it pressed ESC into the operator's game every 45 s
+        # (2026-10-21, and 33 times on 2026-10-25).
+        _stop_lobby_escape_loop()
         ctrl.cleanup(keep_hotkeys=standby_armed)
         # ADR 156: make sure the operator's mouse is attached. A click normally
         # reattaches it itself; this covers one that was cut short by the exit.

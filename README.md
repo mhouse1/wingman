@@ -141,8 +141,7 @@ No `sudo`, no `input` group membership, no root access required.
 ### Run
 
 ```bash
-make r     # run Wingman (INFO console only)
-make rd    # run with DEBUG logs written to wingman.log
+make r     # run Wingman, with DEBUG logs written to wingman.log
 ```
 
 On Linux, `make r` automatically launches MetalStorm via `umu-run` if it is not already running, waits for the lobby to appear, then starts Wingman. No manual game launch step is needed.
@@ -165,8 +164,8 @@ or at an X11 window of your own. (Native-Wayland windows such as VS Code cannot
 be observed by any X11 listener — a pre-existing limitation.)
 
 ```bash
-make rd              # honours nested.enabled
-make rd NESTED=0     # force the on-screen lane for one run
+make r               # honours nested.enabled
+make r NESTED=0      # force the on-screen lane for one run
 make nested-status   # is the lane up, and what holds focus
 make nested-stop     # tear the nested server down
 ```
@@ -277,6 +276,7 @@ green run.
 make calibrate
 make calibrate-crop CROP=respawn
 make add-crops
+make screenshot                  # snipping tool: drag a region anywhere on screen; Enter captures, Backspace exits
 ```
 
 Calibration references come from the same gate-corpus screenshots the test
@@ -471,7 +471,7 @@ Roadmap: [`docs/PROJECT_AI_ROADMAP.md`](docs/PROJECT_AI_ROADMAP.md) · Architect
 | [`docs/job-aids/008-performance-regression-workflow.md`](docs/job-aids/008-performance-regression-workflow.md) | Performance workflow |
 | [`docs/job-aids/010-run-metalstorm-on-linux.md`](docs/job-aids/010-run-metalstorm-on-linux.md) | Linux setup: Heroic, umu-run, PipeWire grant |
 | [`docs/job-aids/011-wingman-keybindings.md`](docs/job-aids/011-wingman-keybindings.md) | In-game keybinding configuration (Linux) |
-| [`docs/job-aids/013-join-mobius-squadron.md`](docs/job-aids/013-join-mobius-squadron.md) | Mobius Squadron: where the name comes from, and how to join |
+| [`docs/job-aids/013-join-mobius-squadron.md`](docs/job-aids/013-join-mobius-squadron.md) | Mobius Squadron: where the name comes from, how to join, and pasting a call sign into the game (`make clip`) |
 | [`docs/job-aids/014-add-an-account-and-keep-bindings-in-sync.md`](docs/job-aids/014-add-an-account-and-keep-bindings-in-sync.md) | Add another game account (`make r2`), and keep bindings and settings the same across accounts |
 | [`docs/adr/049-linux-migration-game-and-automation-layer.md`](docs/adr/049-linux-migration-game-and-automation-layer.md) | Linux migration decisions and implementation summary |
 | [`docs/adr/050-wayland-screen-capture.md`](docs/adr/050-wayland-screen-capture.md) | PipeWire screen capture on GNOME Wayland |

@@ -222,3 +222,39 @@ already exited. Implemented by close_nested_display
 (wingman/game_shutdown.py); the signal routing and the interrupt/close-request
 race are in wingman/main.py (the SIGTERM/SIGHUP handlers near the top of
 main(), and the standby KeyboardInterrupt handler).
+
+## Roll-right held through the flares on an incoming-missile alert
+
+**UID**: FR-011
+
+**Statement**: When a new incoming-missile detection triggers a flare burst during
+GAME_BATTLE or GAME_BATTLE_EJECT, wingman shall hold roll-right from the
+detection until behavior_tree.missile_evade.flare_roll_after_s after the
+burst's last flare has been deployed. A detection that triggers another
+burst while the roll is held shall extend the hold to the same interval
+after that burst's last flare, rather than start a second hold. The roll
+shall be held whether or not the missile-evade tactic (FR-006) is enabled
+or flying. While it is held, the pursuit's steering shall write neither
+pitch nor roll, so the roll leaves the flight path unchanged. The hold
+shall end on manual takeover, on program exit, when an eject begins, and
+when a hard-emergency climb takes the airframe, and in any case no later
+than behavior_tree.missile_evade.flare_roll_max_s after it began.
+
+**Rationale**: Operator, 2026-10-27; ADR 164. The roll is a continuous barrel roll about
+the aircraft's own axis: it does not change the trajectory, it keeps the
+aircraft turning about that axis, which makes it harder for a missile to
+hit. The flight path stays unchanged only if nothing else steers while it
+rolls, hence the pursuit's yield. flare_roll_after_s ships at the
+operator's 2 s. The behaviour existed before and was lost twice: the
+March 2026 mission_j20 script rolled right while it dropped flares, and
+went with the scripted missions; ADR 070's evade held roll-right on every
+alert in GAME_BATTLE, but once the pursuit took over the fights the tree no
+longer acts there, and the evade ran in 4 of 434 alerted missile kills
+(Research 019). This requirement exists so that it is not lost a third
+time. Its ends are the ones every held flight key has: SAF-001's takeover,
+SAF-007's exit, ADR 070 d11's eject, and ADR 163 D5's hard emergency,
+whose pull-up a roll would turn sideways. The cap is a fault backstop for
+a burst that never reports its last flare. Implemented by
+Controller.flare_roll (wingman/controller.py), started from
+AmmoEventsHandler.deploy_flares_on_new_incoming (wingman/tick_handlers.py);
+pinned by tests/test_flare_roll.py.

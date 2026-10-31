@@ -1,0 +1,776 @@
+{
+  "uid": "wingman-scores",
+  "title": "Wingman — score and squadron ranking",
+  "description": "Design 018: the score of every round from the end-of-round PERFORMANCE panel, by period, with a marker for each change that can affect play.",
+  "tags": [
+    "wingman"
+  ],
+  "timezone": "America/New_York",
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "refresh": "",
+  "editable": false,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "version": 1,
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      },
+      {
+        "name": "Changes",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "wingman-pg"
+        },
+        "enable": true,
+        "iconColor": "orange",
+        "target": {
+          "refId": "Anno",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wingman-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "SELECT at AS time, label AS text, ref AS tags\nFROM changes\nWHERE $__timeFilter(at)\nORDER BY at"
+        }
+      }
+    ]
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "granularity",
+        "label": "Granularity",
+        "type": "custom",
+        "query": "hour,day,week,month,quarter,year",
+        "current": {
+          "text": "day",
+          "value": "day"
+        },
+        "options": [],
+        "multi": false,
+        "includeAll": false,
+        "description": "The period each bar and table row covers (week: ISO, from Monday)."
+      },
+      {
+        "name": "aggregate",
+        "label": "Aggregate",
+        "type": "custom",
+        "query": "sum : sum(x),mean : avg(x),median : percentile_cont(0.5) WITHIN GROUP (ORDER BY x),count : count(x),min : min(x),max : max(x)",
+        "current": {
+          "text": "sum",
+          "value": "sum(x)"
+        },
+        "options": [],
+        "multi": false,
+        "includeAll": false,
+        "description": "What each period shows of the metric over its read rounds."
+      },
+      {
+        "name": "metric",
+        "label": "Metric",
+        "type": "custom",
+        "query": "score,kills,deaths,assists",
+        "current": {
+          "text": "score",
+          "value": "score"
+        },
+        "options": [],
+        "multi": false,
+        "includeAll": false,
+        "description": "The figure from the PERFORMANCE panel."
+      },
+      {
+        "name": "window",
+        "label": "Moving average",
+        "type": "custom",
+        "query": "10,20,50",
+        "current": {
+          "text": "20",
+          "value": "20"
+        },
+        "options": [],
+        "multi": false,
+        "includeAll": false,
+        "description": "Read rounds in the moving average."
+      },
+      {
+        "name": "tags",
+        "label": "Tags",
+        "type": "textbox",
+        "query": "{}",
+        "current": {
+          "text": "{}",
+          "value": "{}"
+        },
+        "options": [],
+        "description": "A JSON object of tags to match; {} matches every round."
+      },
+      {
+        "name": "tz",
+        "type": "constant",
+        "query": "America/New_York",
+        "hide": 2,
+        "current": {
+          "text": "America/New_York",
+          "value": "America/New_York"
+        },
+        "options": []
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Totals in range",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "wingman-pg"
+      },
+      "description": "Wingman's own rounds over the time range: flown, read, and the score of the read ones. Rounds with a manual takeover are counted apart and left out of the rest. Compare means only where nearly every round was read.",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 16,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wingman-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "SELECT count(*) FILTER (WHERE manual_takeovers = 0) AS \"rounds flown\",\n       count(score) FILTER (WHERE manual_takeovers = 0) AS \"rounds read\",\n       coalesce(sum(score) FILTER (WHERE manual_takeovers = 0), 0) AS \"total score\",\n       round((avg(score) FILTER (WHERE manual_takeovers = 0))::numeric, 1) AS \"mean per read round\",\n       percentile_cont(0.5) WITHIN GROUP (ORDER BY score) FILTER (WHERE manual_takeovers = 0)\n           AS \"median per read round\",\n       count(*) FILTER (WHERE NOT manual_takeovers = 0) AS \"rounds taken over\"\nFROM rounds\nWHERE $__timeFilter(ended_at)\n  AND tags @> ${tags:sqlstring}::jsonb"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 8,
+      "title": "Squadron now",
+      "type": "stat",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "wingman-pg"
+      },
+      "description": "Mobius Squadron's latest reading in the time range: its rank on the game's squadron leaderboard (lower is better), its trophies, and how long ago wingman read them in the lobby (ADR 166). The two squadron charts below draw every reading.",
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 8,
+        "h": 4
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wingman-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "WITH latest AS (\n  SELECT read_at, rank, trophies\n  FROM squadron_rankings\n  WHERE $__timeFilter(read_at)\n  ORDER BY read_at DESC\n  LIMIT 1)\nSELECT rank AS \"rank\", trophies AS \"trophies\", read_at AS \"read\"\nFROM latest"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "read"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeFromNow"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/"
+        },
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none",
+        "orientation": "horizontal"
+      }
+    },
+    {
+      "id": 2,
+      "title": "Score per round: wingman and manual takeover",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "wingman-pg"
+      },
+      "description": "Every read round at the time it ended. Wingman's own rounds are dots, one colour per account (no account, a round rebuilt from a log that names none), with the mean of their last $window read rounds over all accounts (blue line); rounds with a manual takeover are orange, with their own moving average. The operator expects the takeover rounds to score higher, and the two lines to close as wingman improves (2026-10-29).",
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wingman-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT ended_at AS time,\n       coalesce(tags->>'account', 'no account') AS metric,\n       score AS value\nFROM rounds\nWHERE score IS NOT NULL AND manual_takeovers = 0 AND $__timeFilter(ended_at)\n  AND tags @> ${tags:sqlstring}::jsonb\nORDER BY 1"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wingman-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT ended_at AS time,\n       avg(score) OVER (ORDER BY ended_at ROWS BETWEEN ${window:raw} - 1 PRECEDING AND CURRENT ROW) AS \"wingman, moving average\"\nFROM rounds\nWHERE score IS NOT NULL AND manual_takeovers = 0 AND $__timeFilter(ended_at)\n  AND tags @> ${tags:sqlstring}::jsonb\nORDER BY 1"
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wingman-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT ended_at AS time,\n       score AS \"manual takeover\",\n       avg(score) OVER (ORDER BY ended_at ROWS BETWEEN ${window:raw} - 1 PRECEDING AND CURRENT ROW) AS \"manual takeover, moving average\"\nFROM rounds\nWHERE score IS NOT NULL AND NOT manual_takeovers = 0 AND $__timeFilter(ended_at)\n  AND tags @> ${tags:sqlstring}::jsonb\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "points",
+            "pointSize": 5,
+            "showPoints": "always"
+          },
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "mobius1"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "mobius0"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "mobius2"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "mobius3"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "no account"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8e8e8e"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "wingman, moving average"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "line"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.spanNulls",
+                "value": true
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "manual takeover"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "manual takeover, moving average"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "line"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "always"
+              },
+              {
+                "id": "custom.spanNulls",
+                "value": true
+              }
+            ]
+          }
+        ]
+      },
+      "options": {}
+    },
+    {
+      "id": 7,
+      "title": "Squadron rank per reading (lower is better)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "wingman-pg"
+      },
+      "description": "Mobius Squadron's place on the game's squadron leaderboard at each reading. Wingman reads it in the lobby between rounds (ADR 166). A lower number is a better place. It is the squadron's own figure, so it does not depend on the account that read it, and the tags box does not apply.",
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wingman-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT read_at AS time, rank AS \"rank\"\nFROM squadron_rankings\nWHERE rank IS NOT NULL AND $__timeFilter(read_at)\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "always",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          },
+          "unit": "none",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 9,
+      "title": "Squadron trophies per reading",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "wingman-pg"
+      },
+      "description": "Mobius Squadron's trophy count at each reading: the whole squadron's, every member included, not wingman's alone. It does not depend on the account that read it, and the tags box does not apply (ADR 166).",
+      "gridPos": {
+        "x": 12,
+        "y": 13,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wingman-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT read_at AS time, trophies AS \"trophies\"\nFROM squadron_rankings\nWHERE trophies IS NOT NULL AND $__timeFilter(read_at)\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "showPoints": "always",
+            "spanNulls": true
+          },
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          },
+          "unit": "locale",
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 10,
+      "title": "Wingman by jet",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "wingman-pg"
+      },
+      "description": "Wingman's own rounds by the jet on the lobby as PLAY was clicked (ADR 167), the best mean score first. Kills, deaths and assists are per round. ± 95% is the margin on the mean: trust a gap between two jets only when their ranges do not overlap. A jet with under 10 read rounds comes after the rest, because so few prove little. A jet can fly on several accounts; narrow to one with the tags box. Rounds flown before 2026-10-31 have no jet recorded.",
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wingman-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "SELECT coalesce(tags->>'jet', 'not recorded') AS \"Jet\",\n       count(*) AS \"Rounds flown\",\n       count(score) AS \"Rounds read\",\n       round(avg(score)) AS \"Mean score\",\n       round(1.96 * stddev_samp(score) / sqrt(count(score))) AS \"± 95%\",\n       percentile_cont(0.5) WITHIN GROUP (ORDER BY score) AS \"Median score\",\n       round(avg(kills), 1) AS \"Kills\",\n       round(avg(deaths), 1) AS \"Deaths\",\n       round(avg(assists), 1) AS \"Assists\"\nFROM rounds\nWHERE $__timeFilter(ended_at) AND manual_takeovers = 0\n  AND tags @> ${tags:sqlstring}::jsonb\nGROUP BY tags->>'jet'\nORDER BY tags->>'jet' IS NULL, count(score) < 10, \"Mean score\" DESC NULLS LAST"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Mean score"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "gauge",
+                  "mode": "basic",
+                  "valueDisplayMode": "text"
+                }
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              },
+              {
+                "id": "min",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "options": {}
+    },
+    {
+      "id": 3,
+      "title": "${aggregate:text} of $metric per $granularity",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "wingman-pg"
+      },
+      "description": "The chosen aggregate over every read round that ended in each period (America/New_York). An unread round adds nothing; Rounds per period counts it.",
+      "gridPos": {
+        "x": 0,
+        "y": 30,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wingman-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('$granularity', ended_at, '$tz') AS time,\n       ${aggregate:raw} AS \"${aggregate:text} of $metric\"\nFROM (SELECT ended_at, ${metric:raw} AS x\n      FROM rounds\n      WHERE $__timeFilter(ended_at) AND manual_takeovers = 0\n        AND tags @> ${tags:sqlstring}::jsonb) AS r\nWHERE x IS NOT NULL\nGROUP BY 1\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "barAlignment": -1,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 4,
+      "title": "Rounds per $granularity",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "wingman-pg"
+      },
+      "description": "Rounds read and not read in each period; together, the rounds flown.",
+      "gridPos": {
+        "x": 12,
+        "y": 30,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wingman-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT date_trunc('$granularity', ended_at, '$tz') AS time,\n       count(score) AS \"rounds read\",\n       count(*) - count(score) AS \"rounds not read\"\nFROM rounds\nWHERE $__timeFilter(ended_at) AND manual_takeovers = 0\n  AND tags @> ${tags:sqlstring}::jsonb\nGROUP BY 1\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "barAlignment": -1,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 5,
+      "title": "Periods",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "wingman-pg"
+      },
+      "description": "One row per $granularity: rounds flown and read, and the sum, mean, median, minimum and maximum of $metric over the read rounds.",
+      "gridPos": {
+        "x": 0,
+        "y": 39,
+        "w": 16,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wingman-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "SELECT date_trunc('$granularity', ended_at, '$tz') AS period,\n       count(*) AS \"rounds flown\",\n       count(score) AS \"rounds read\",\n       sum(${metric:raw}) AS sum,\n       round(avg(${metric:raw})::numeric, 1) AS mean,\n       percentile_cont(0.5) WITHIN GROUP (ORDER BY ${metric:raw}) AS median,\n       min(${metric:raw}) AS min,\n       max(${metric:raw}) AS max\nFROM rounds\nWHERE $__timeFilter(ended_at) AND manual_takeovers = 0\n  AND tags @> ${tags:sqlstring}::jsonb\nGROUP BY 1\nORDER BY 1 DESC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 6,
+      "title": "Tags",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "wingman-pg"
+      },
+      "description": "Each tag key and value among the rounds in range, with its count of rounds. Filter with the tags box, for example {\"account\": \"mobius0\"}.",
+      "gridPos": {
+        "x": 16,
+        "y": 39,
+        "w": 8,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wingman-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "SELECT t.key AS tag, t.value, count(*) AS rounds\nFROM rounds, jsonb_each_text(rounds.tags) AS t(key, value)\nWHERE $__timeFilter(ended_at) AND manual_takeovers = 0\n  AND tags @> ${tags:sqlstring}::jsonb\nGROUP BY 1, 2\nORDER BY 1, 2"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {}
+    }
+  ]
+}

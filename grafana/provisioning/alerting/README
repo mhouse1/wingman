@@ -1,0 +1,2 @@
+# Design 018: empty on purpose. Mounting grafana/provisioning/ replaces the
+# image's own, and Grafana logs an error at start when this folder is missing.

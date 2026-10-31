@@ -31,6 +31,7 @@ import py_trees
 logger = logging.getLogger(__name__)
 
 from .config_schema import schema_default
+from .pullout import lowest_point_m
 from .state import GameState
 
 SNAPSHOT_KEY = "snapshot"
@@ -110,6 +111,13 @@ class AnalyzerSnapshot:
     # Code Review 019 cycle 25: two terrain warnings agreed within the hold
     # (wingman/warning_agreement.py). The trigger lives in ClimbCondition.
     terrain_warnings_agree: bool = False
+    # Code Review 019 cycle 32 (HLDD 001 part 2): the latest raw HUD altitude
+    # and speed and the flight-path angle, each None unless fresh, for the
+    # pull-out trigger in ClimbCondition. `altitude` above is the stable value,
+    # the mean of the last reads, which trails a fast dive by hundreds of metres.
+    altitude_now: "float | None" = None
+    speed_kph: "float | None" = None
+    path_deg: "float | None" = None
 
     @property
     def contacts(self) -> int:
@@ -293,6 +301,15 @@ def make_disengage_condition(absent_after_s: float):
 # trigger is trusted again (ADR 086 d2). Sessions start already settled — only
 # an observed respawn imposes the wait.
 _SETTLED = 2
+
+# Code Review 019 cycle 33: a flight path this steep says the altitude fell
+# faster than the aircraft flies, which only a misread does (the path clamps at
+# 90 deg when the rate outruns the speed). Live 2026-10-18 20:13:20 the HUD read
+# 2,791, 2,143 and 2,675 m 1.5 s apart and the pull-out trigger fired on the
+# middle one at -90 deg. Over 401 missions such readings neither firing nor
+# clearing it cut its alarms 10% and lifted its precision from 16.5% to 18.5%,
+# for 1.8 points of the crashes it warns 2 s ahead.
+_PULLOUT_CLAMPED_PATH_DEG = 85.0
 
 
 class BoundaryCondition:
@@ -548,8 +565,20 @@ class ClimbCondition:
                 alt_floor_m: "float | None" = None,
                 alt_floor_override_fn: "Callable[[], float | None] | None" = None,
                 agreement_enabled: bool = False,
-                agreement_shadow: bool = True):
+                agreement_shadow: bool = True,
+                pullout_enabled: bool = False,
+                pullout_shadow: bool = True,
+                pullout_floor_m: float = 600.0,
+                pullout_reaction_s: float = 2.0):
         self._enter_below_alt = enter_below_alt
+        # Code Review 019 cycle 32 (HLDD 001 part 2): a pull-out that would not
+        # clear the floor is a hard emergency, unless in shadow.
+        self._pullout_enabled = pullout_enabled
+        self._pullout_shadow = pullout_shadow
+        self._pullout_floor_m = float(pullout_floor_m)
+        self._pullout_reaction_s = float(pullout_reaction_s)
+        self._pullout_active = False
+        self._last_pullout_lowest: "float | None" = None
         # Code Review 019 cycle 25: two terrain warnings agreeing is a hard
         # emergency (ttg's and terrain-ahead's footing), unless in shadow.
         self._agreement_enabled = agreement_enabled
@@ -634,6 +663,23 @@ class ClimbCondition:
     @property
     def alt_floor_active(self) -> bool:
         return self._alt_floor_active
+
+    @property
+    def pullout_active(self) -> bool:
+        """HLDD 001 part 2: the last verdict, shadow or not."""
+        return self._pullout_active
+
+    @property
+    def last_pullout_lowest(self) -> "float | None":
+        return self._last_pullout_lowest
+
+    @property
+    def live_pullout_lowest(self) -> "float | None":
+        """Cycle 36: the predicted lowest point while the pull-out alarm is
+        live (enabled, not in shadow, firing), else None."""
+        if self._pullout_enabled and not self._pullout_shadow and self._pullout_active:
+            return self._last_pullout_lowest
+        return None
 
     @property
     def hard_emergency_active(self) -> bool:
@@ -793,6 +839,36 @@ class ClimbCondition:
             if not self._agreement_shadow:
                 emergency = emergency or agree
 
+        # Code Review 019 cycle 32 (HLDD 001 part 2): the lowest point of a
+        # pull-out started now (wingman/pullout.py), from the raw altitude, speed
+        # and path, against one floor for every map. Over 373 missions of
+        # 2026-10-17/18, a 600 m floor with 2 s of reaction would have fired 2 s
+        # or more before 55% of the kill-card crashes, where the emergency climbs
+        # that did fire managed 43%, at the same 4.7 alarms a mission and 17%
+        # precision. Missing inputs freeze the verdict, as for the other triggers.
+        if self._pullout_enabled:
+            alt_now = getattr(snapshot, "altitude_now", None)
+            spd = getattr(snapshot, "speed_kph", None)
+            path = getattr(snapshot, "path_deg", None)
+            if snapshot.is_respawning:
+                self._pullout_active = False
+            elif (settled and alt_now is not None and spd is not None and path is not None
+                    and abs(path) < _PULLOUT_CLAMPED_PATH_DEG):
+                lowest = lowest_point_m(alt_now, spd, path, self._pullout_reaction_s)
+                self._last_pullout_lowest = lowest
+                fires = lowest < self._pullout_floor_m
+                if fires and not self._pullout_active:
+                    logger.warning(
+                        "BT: PULL-OUT WOULD NOT CLEAR — lowest point %.0fm under the %.0fm "
+                        "floor (alt=%.0fm %.0fKPH path %+.0fdeg ttg=%s) — climb forced "
+                        "(HLDD 001 part 2)%s",
+                        lowest, self._pullout_floor_m, alt_now, spd, path,
+                        "n/a" if ttg is None else f"{ttg:.0f}s",
+                        " [SHADOW - not actuating]" if self._pullout_shadow else "")
+                self._pullout_active = fires
+            if not self._pullout_shadow:
+                emergency = emergency or self._pullout_active
+
         # ttg or terrain only, captured BEFORE the altitude floor below is
         # folded in — see hard_emergency_active's docstring.
         self._hard_emergency_active = bool(emergency)
@@ -900,6 +976,10 @@ def make_climb_condition(enter_below_alt: "float | None",
                          alt_floor_override_fn: "Callable[[], float | None] | None" = None,
                          agreement_enabled: bool = False,
                          agreement_shadow: bool = True,
+                         pullout_enabled: bool = False,
+                         pullout_shadow: bool = True,
+                         pullout_floor_m: float = 600.0,
+                         pullout_reaction_s: float = 2.0,
                          ) -> ClimbCondition:
     """ADR 139 D3: thin factory kept so every existing call site — production
     and test — is unchanged. See ``ClimbCondition`` for the logic."""
@@ -916,7 +996,11 @@ def make_climb_condition(enter_below_alt: "float | None",
                           alt_floor_m=alt_floor_m,
                           alt_floor_override_fn=alt_floor_override_fn,
                           agreement_enabled=agreement_enabled,
-                          agreement_shadow=agreement_shadow)
+                          agreement_shadow=agreement_shadow,
+                          pullout_enabled=pullout_enabled,
+                          pullout_shadow=pullout_shadow,
+                          pullout_floor_m=pullout_floor_m,
+                          pullout_reaction_s=pullout_reaction_s)
 
 
 def make_sustain_climb_condition(enter_below_alt: "float | None",
@@ -1020,6 +1104,9 @@ class _BuildContext:
     # just this instant (a death detected a tick or two after the dive
     # itself would otherwise always read False here).
     climb_last_hard_emergency_ts_fn: "Callable[[], float] | None" = None
+    # Code Review 019 cycle 36: the live pull-out alarm's predicted lowest point
+    # (None while it is not firing), for the controller's objective hold-off.
+    climb_pullout_lowest_fn: "Callable[[], float | None] | None" = None
     # ADR 147: the mission in play's own altitude doctrine, read by the Climb
     # slot. Both default to None — the tree's configured floor and sustain band
     # apply unchanged — so every mission but mission_acs is untouched.
@@ -1152,6 +1239,7 @@ def _build_climb_slot(ctx: "_BuildContext"):
     # config near the condition it feeds).
     _terrain_cfg = climb_cfg.get("terrain_avoidance", {}) or {}
     _agree_cfg = climb_cfg.get("warning_agreement", {}) or {}
+    _pullout_cfg = climb_cfg.get("pullout", {}) or {}
     emergency = make_climb_condition(
         climb_cfg.get("enter_below_alt"),
         climb_cfg.get("exit_above_alt"),
@@ -1171,7 +1259,15 @@ def _build_climb_slot(ctx: "_BuildContext"):
         agreement_enabled=bool(_agree_cfg.get(
             "enabled", schema_default("behavior_tree.climb.warning_agreement.enabled"))),
         agreement_shadow=bool(_agree_cfg.get(
-            "shadow", schema_default("behavior_tree.climb.warning_agreement.shadow"))))
+            "shadow", schema_default("behavior_tree.climb.warning_agreement.shadow"))),
+        pullout_enabled=bool(_pullout_cfg.get(
+            "enabled", schema_default("behavior_tree.climb.pullout.enabled"))),
+        pullout_shadow=bool(_pullout_cfg.get(
+            "shadow", schema_default("behavior_tree.climb.pullout.shadow"))),
+        pullout_floor_m=float(_pullout_cfg.get(
+            "floor_m", schema_default("behavior_tree.climb.pullout.floor_m"))),
+        pullout_reaction_s=float(_pullout_cfg.get(
+            "reaction_s", schema_default("behavior_tree.climb.pullout.reaction_s"))))
     # ADR 075: the armed altitude-sustain band shares the leaf with the
     # emergency band. Both closures are evaluated EVERY tick (no
     # short-circuit) so neither hysteresis state machine goes stale while
@@ -1216,6 +1312,11 @@ def _build_climb_slot(ctx: "_BuildContext"):
     def _climb_emergency_update_fn(snapshot, now=None, _e=emergency):
         return _e.update_emergency(snapshot, now)
     ctx.climb_emergency_update_fn = _climb_emergency_update_fn
+
+    # Code Review 019 cycle 36: read, not re-derived, like the ones above.
+    def _climb_pullout_lowest_fn(_e=emergency):
+        return getattr(_e, "live_pullout_lowest", None)
+    ctx.climb_pullout_lowest_fn = _climb_pullout_lowest_fn
 
     # HLDD 001 Phase 1: exposed so BehaviorTreeHandler can capture evidence
     # on the FALSE→TRUE edge — same "read a named property, don't re-derive
@@ -1373,6 +1474,7 @@ def build_tree(bt_cfg: dict, clock=time.time,
     # not it is enabled/shadowed — the same reasoning as climb_emergency_fn
     # above, one property read instead of a new actuator-contract parameter.
     tree.climb_terrain_ahead_fn = ctx.climb_terrain_ahead_fn
+    tree.climb_pullout_lowest_fn = ctx.climb_pullout_lowest_fn
     return tree
 
 

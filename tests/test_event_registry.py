@@ -115,30 +115,6 @@ class TestEmit:
         assert analyzer.unsubscribe(GameEvent.LOBBY_STALL, name="t") is False
 
 
-class TestLegacyShims:
-    """ADR 039 setters keep single-slot replace semantics during migration."""
-
-    def test_setter_registers_and_fires(self, analyzer):
-        seen = []
-        analyzer.set_on_lobby_popup_click(seen.append)
-        analyzer.emit(GameEvent.LOBBY_POPUP_CLICK, "SILVER")
-        assert seen == ["SILVER"]
-
-    def test_setter_called_twice_replaces_not_duplicates(self, analyzer):
-        calls = []
-        analyzer.set_on_lobby_stall(lambda: calls.append("a"))
-        analyzer.set_on_lobby_stall(lambda: calls.append("b"))
-        analyzer.emit(GameEvent.LOBBY_STALL)
-        assert calls == ["b"]
-
-    def test_setter_and_named_subscriber_coexist(self, analyzer):
-        calls = []
-        analyzer.set_on_lobby_stall(lambda: calls.append("legacy"))
-        analyzer.subscribe(GameEvent.LOBBY_STALL, lambda: calls.append("new"), name="new")
-        analyzer.emit(GameEvent.LOBBY_STALL)
-        assert sorted(calls) == ["legacy", "new"]
-
-
 class TestFsmIntegration:
     def test_transition_emits_fsm_event(self, analyzer):
         seen = []

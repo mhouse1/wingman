@@ -68,10 +68,16 @@ _TEXT_REF_WIDTH = 1920
 _ROW0_PX = 32
 _ROW_PX = 36
 # The clear-path layer (Code Review 019 step 3a): brightness left outside the
-# analysed view, tint strength on the free air inside it, and the colours of
-# outlines by time to contact.
+# analysed view, which is drawn grey, and the two fills inside it, free air
+# blue and objects orange, with their strengths. Research 018 (2026-10-26):
+# one green tint on the free air left objects untinted and looked like the
+# islands' vegetation; blue and orange also stay apart for a colour-blind
+# reviewer. The outlines keep their colours by time to contact.
 _PATH_OUTSIDE_DIM = 0.6
-_PATH_TINT_ALPHA = 0.22
+_PATH_FREE = (255, 140, 30)
+_PATH_FREE_ALPHA = 0.35
+_PATH_OBJECT = (0, 140, 255)
+_PATH_OBJECT_ALPHA = 0.45
 _PATH_CLOSE_S = 4.0
 _AMBER = (0, 170, 255)
 # An outline bigger than this share of the analysed view gets no figure of its
@@ -115,7 +121,8 @@ class HudRenderer:
                  black_box_rate_hz: float = 3.0,
                  black_box_alarm_max: int = 0,
                  black_box_alarm_gap_s: float = 30.0,
-                 black_box_alarm_seconds: float = 4.0) -> None:
+                 black_box_alarm_seconds: float = 4.0,
+                 black_box_raw: bool = False) -> None:
         self._output = Path(output_path)
         self._interval = float(interval_sec)
         self._last_ts: float = 0.0
@@ -182,6 +189,12 @@ class HudRenderer:
         self._bb_interval = 1.0 / max(0.2, float(black_box_rate_hz))
         self._bb_last_ts = 0.0
         self._bb_frames: "collections.deque[tuple[float, bytes]]" = collections.deque()
+        # Research 017 step 3: the game's own picture beside each annotated
+        # frame, at the same size and moment, written to <dir>/raw under the
+        # same names. The annotated frames carry the planner's overlay across
+        # the analysed box, so they cannot be used to study the picture itself.
+        self._bb_raw_enabled = bool(black_box_raw)
+        self._bb_raw: "collections.deque[tuple[float, bytes]]" = collections.deque()
         self._bb_lock = threading.Lock()
         # The planner's alarms (Code Review 019, cycle 5): a short clip round
         # each, in a folder of its own so it cannot use up the deaths' budget.
@@ -517,9 +530,10 @@ class HudRenderer:
 
     def _draw_path_view(self, canvas: np.ndarray, view) -> None:
         """What the pursuit's perception saw on this very picture (Code Review
-        019 step 3a): free air tinted inside the analysed view, everything
-        outside it dimmed, each outline coloured by its time to contact, the
-        point the picture expands from, and one status line.
+        019 step 3a): inside the analysed view free air tinted blue and objects
+        orange, everything outside it grey and dimmed, each outline coloured by
+        its time to contact, the point the picture expands from, and one status
+        line.
 
         `view` is a `clear_path.PathView` taken on the frame being drawn, so
         unlike the main tick's overlays nothing here can be from another
@@ -533,16 +547,18 @@ class HudRenderer:
             th, tw = shape.texture.shape[:2]
             vw = max(1, min(int(round(tw / s)), w - ox))
             vh = max(1, min(int(round(th / s)), h - oy))
-            inside = np.zeros((h, w), bool)
-            inside[oy:oy + vh, ox:ox + vw] = True
-            canvas[~inside] = (canvas[~inside] * _PATH_OUTSIDE_DIM).astype(np.uint8)
-            textured = cv2.resize(shape.texture, (vw, vh), interpolation=cv2.INTER_NEAREST)
-            roi = canvas[oy:oy + vh, ox:ox + vw]
-            free = textured == 0
-            tint = np.empty_like(roi)
-            tint[:] = _GREEN
-            blended = cv2.addWeighted(roi, 1.0 - _PATH_TINT_ALPHA, tint, _PATH_TINT_ALPHA, 0.0)
-            roi[free] = blended[free]
+            roi = canvas[oy:oy + vh, ox:ox + vw].copy()
+            grey = cv2.cvtColor(canvas, cv2.COLOR_BGR2GRAY)
+            canvas[:] = cv2.cvtColor(cv2.convertScaleAbs(grey, alpha=_PATH_OUTSIDE_DIM),
+                                     cv2.COLOR_GRAY2BGR)
+            textured = cv2.resize(shape.texture, (vw, vh), interpolation=cv2.INTER_NEAREST) > 0
+            fills = []
+            for colour, alpha in ((_PATH_FREE, _PATH_FREE_ALPHA),
+                                  (_PATH_OBJECT, _PATH_OBJECT_ALPHA)):
+                tint = np.empty_like(roi)
+                tint[:] = colour
+                fills.append(cv2.addWeighted(roi, 1.0 - alpha, tint, alpha, 0.0))
+            canvas[oy:oy + vh, ox:ox + vw] = np.where(textured[..., None], fills[1], fills[0])
             cv2.rectangle(canvas, (ox, oy), (ox + vw - 1, oy + vh - 1), _GREY, 1)
         warn_s = float(getattr(view, "tau_warn_s", 8.0))
         view_area = None
@@ -694,6 +710,7 @@ class HudRenderer:
                 box_cfg.get("alarm_gap_s", schema_default("hud.black_box.alarm_gap_s"))),
             black_box_alarm_seconds=float(
                 box_cfg.get("alarm_seconds", schema_default("hud.black_box.alarm_seconds"))),
+            black_box_raw=bool(box_cfg.get("raw", schema_default("hud.black_box.raw"))),
         )
 
     def maybe_render(
@@ -922,6 +939,11 @@ class HudRenderer:
         self._flush_text(canvas, 0.5, w)
         if to_black_box:
             self._keep_for_black_box(canvas, ts)
+            if self._bb_raw_enabled:
+                # `frame` is still the raw capture: every overlay went on `canvas`.
+                self._keep_for_black_box(
+                    cv2.resize(frame, (w // 2, h // 2), interpolation=cv2.INTER_AREA),
+                    ts, raw=True)
         if not write_live:
             return
         self._output.parent.mkdir(parents=True, exist_ok=True)
@@ -930,15 +952,17 @@ class HudRenderer:
         os.replace(str(tmp), str(self._output))
         logger.debug("HudRenderer: wrote %s", self._output)
 
-    def _keep_for_black_box(self, image: np.ndarray, ts: float) -> None:
-        """Hold one annotated frame, as JPEG, and drop those older than the box's span."""
+    def _keep_for_black_box(self, image: np.ndarray, ts: float, raw: bool = False) -> None:
+        """Hold one frame, as JPEG, and drop those older than the box's span:
+        an annotated frame, or with `raw` the game's own picture."""
         ok, buf = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 80])
         if not ok:
             return
+        held = self._bb_raw if raw else self._bb_frames
         with self._bb_lock:
-            self._bb_frames.append((ts, buf.tobytes()))
-            while self._bb_frames and ts - self._bb_frames[0][0] > self._bb_seconds:
-                self._bb_frames.popleft()
+            held.append((ts, buf.tobytes()))
+            while held and ts - held[0][0] > self._bb_seconds:
+                held.popleft()
 
     def dump_black_box(self, reason: str, last_s: "float | None" = None,
                        clear: bool = True, directory: "Path | None" = None
@@ -956,15 +980,18 @@ class HudRenderer:
             return None
         with self._bb_lock:
             frames = list(self._bb_frames)
+            raw = list(self._bb_raw)
             if clear:
                 self._bb_frames.clear()
+                self._bb_raw.clear()
         if last_s is not None and frames:
             frames = [f for f in frames if frames[-1][0] - f[0] <= last_s]
+            raw = [f for f in raw if frames and f[0] >= frames[0][0]]
         if not frames:
             return None
         stamp = time.strftime("%Y%m%d_%H%M%S")
         thread = threading.Thread(target=self._write_black_box,
-                                  args=(frames, stamp, reason, directory or self._bb_dir),
+                                  args=(frames, stamp, reason, directory or self._bb_dir, raw),
                                   daemon=True, name="HudRenderer-blackbox")
         thread.start()
         return thread
@@ -992,7 +1019,18 @@ class HudRenderer:
         return timer
 
     def _write_black_box(self, frames: "list[tuple[float, bytes]]", stamp: str,
-                         reason: str, directory: Path) -> None:
+                         reason: str, directory: Path,
+                         raw: "list[tuple[float, bytes]] | None" = None) -> None:
+        written = self._write_frames(frames, stamp, reason, directory)
+        raw_written = self._write_frames(raw, stamp, reason, directory / "raw") if raw else 0
+        logger.info("BLACK BOX: %d frame(s) covering %.1f s before the %s, written to %s/%s_%s_*.jpg%s",
+                    written, frames[-1][0] - frames[0][0], reason, directory, stamp, reason,
+                    f" (and {raw_written} raw to {directory / 'raw'})" if raw else "")
+
+    @staticmethod
+    def _write_frames(frames: "list[tuple[float, bytes]]", stamp: str, reason: str,
+                      directory: Path) -> int:
+        """Write frames oldest first, named for their moment; the count written."""
         written = 0
         try:
             directory.mkdir(parents=True, exist_ok=True)
@@ -1004,8 +1042,7 @@ class HudRenderer:
                 written += 1
         except Exception as e:
             logger.warning("HUD black box: write failed: %s: %s", type(e).__name__, e)
-        logger.info("BLACK BOX: %d frame(s) covering %.1f s before the %s, written to %s/%s_%s_*.jpg",
-                    written, frames[-1][0] - frames[0][0], reason, directory, stamp, reason)
+        return written
 
     def _scanned_crop(self, frame: np.ndarray) -> "tuple[np.ndarray, int, int] | None":
         """The exact region the tracker scanned this tick, as (crop, ox, oy):

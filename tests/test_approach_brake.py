@@ -173,6 +173,51 @@ def test_control_points_and_crowns_are_braked_for_too(monkeypatch, clock, caplog
     assert any(f"cap on the {goal} approach" in r.getMessage() for r in caplog.records)
 
 
+_SLOW_RESUPPLY = dict(_CFG, resupply_cap_kph=700.0, resupply_target_kph=650.0)
+
+
+def test_the_resupply_approach_has_its_own_cap(monkeypatch, clock, caplog):
+    """2026-10-24 05:10:34 to :39 (Crimson Canyon): the resupply dive read 750 then
+    1,003 KPH and the 850 cap braked on neither before the pull-out trigger broke
+    the hold-off with the marker 55 px across. 750 is over a 700 cap."""
+    ctrl, _ = _ctrl(monkeypatch, speed=750, cfg=_SLOW_RESUPPLY)
+    with caplog.at_level("INFO", logger="wingman.controller"):
+        ctrl._approach_brake_tick("resupply")
+    assert _airbrake(ctrl) == [("key_press", "approach_brake")]
+    assert ctrl._approach_brake_until == pytest.approx(1000.0 + (750 - 650) / 150)
+    assert any(r.getMessage().startswith("SPEEDCAP: 750 KPH over the 700 KPH cap on the "
+                                         "resupply approach") for r in caplog.records)
+
+
+@pytest.mark.parametrize("goal", ["control point", "crown"])
+def test_other_objectives_keep_the_general_cap(monkeypatch, clock, goal):
+    ctrl, _ = _ctrl(monkeypatch, speed=750, cfg=_SLOW_RESUPPLY)
+    ctrl._approach_brake_tick(goal)
+    assert _airbrake(ctrl) == []
+
+
+def test_a_resupply_dose_ends_at_the_resupply_target(monkeypatch, clock):
+    ctrl, telemetry = _ctrl(monkeypatch, speed=800, cfg=_SLOW_RESUPPLY)
+    ctrl._approach_brake_tick("resupply")
+    assert ctrl._approach_brake_held
+    telemetry.set(660, ts=101.0)                        # over 650: the dose runs on
+    ctrl._approach_brake_tick("resupply")
+    assert ctrl._approach_brake_held
+    telemetry.set(640, ts=102.0)
+    ctrl._approach_brake_tick("resupply")
+    assert not ctrl._approach_brake_held
+
+
+def test_the_shipped_config_slows_the_resupply_approach():
+    import pathlib
+    import yaml
+    cfg = yaml.safe_load((pathlib.Path(__file__).resolve().parents[1] / "wingman" / "config.yaml")
+                         .read_text(encoding="utf-8"))
+    brake = cfg["approach_brake"]
+    assert (brake["resupply_cap_kph"], brake["resupply_target_kph"]) == (700, 650)
+    assert (brake["cap_kph"], brake["target_kph"]) == (850, 800)
+
+
 @pytest.mark.parametrize("goal, key", [("resupply", "resupply"),
                                        ("control point", "control_point"), ("crown", "crown")])
 def test_each_objective_has_its_own_switch(monkeypatch, clock, goal, key):

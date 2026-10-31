@@ -26,9 +26,8 @@ Use `uv` for dependency management (`uv sync --all-groups`). Always prefer `make
 
 **Run the app:**
 ```bash
-make r          # INFO console only
-make rd         # DEBUG log to wingman.log
-make rd NESTED=0  # force the on-screen lane for one run
+make r          # DEBUG log to wingman.log
+make r NESTED=0 # force the on-screen lane for one run
 ```
 
 By default the game runs on a nested X display (`nested.enabled` in
@@ -82,6 +81,7 @@ make p "msg"    # stage, commit, push
 make calibrate                   # recalibrate all crop regions interactively
 make calibrate-crop CROP=respawn # recalibrate one named region
 make add-crops                   # calibrate new images from test_screenshots/to_be_added/
+make screenshot                  # snipping tool: drag a region anywhere on screen; Enter captures, Backspace exits
 ```
 
 ## Architecture

@@ -16,7 +16,7 @@ make p1            # step 1 — refresh the reference screenshots
 make recalibrate   # step 2 — walk through every crop and click new corners
 ```
 
-**Step 1 — `make p1`** launches MetalStorm (auto-launched on Linux, same as `make rd`) and
+**Step 1 — `make p1`** launches MetalStorm (auto-launched on Linux, same as `make r`) and
 replays capture path PATH1, overwriting the gate-corpus screenshots in
 `test_screenshots/integration_test/` (`P1_000_LOBBY_PLAY.png` … `P1_080_LOBBY_AFTER_MISSION.png`).
 A capture summary is written to `tests/test-output/capture_summary_PATH1.json`. The default
@@ -55,6 +55,7 @@ click two corners (or press S to keep the existing value). Coordinates are writt
 | `make recalibrate` | Full loop — all crops in `calibration_map.yaml` order (alias of `make calibrate`) |
 | `make calibrate-crop CROP=<name>` | Single crop — after a misclick or minor UI shift |
 | `make add-crops` | Calibrate new crops from images in `test_screenshots/to_be_added/` |
+| `make screenshot` | Snipping tool: drag a region anywhere on screen, then Enter captures it to `tests/test-output/screenshot_*.png` from any window; Backspace exits |
 
 ### Crops config format (`config.yaml`)
 

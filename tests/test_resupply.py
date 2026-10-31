@@ -390,6 +390,58 @@ def test_a_count_above_the_confirmed_one_shows_a_rearm_only_while_seeking():
     assert not _observe(urgency, 4, resupply_seeking=True, count=1).rearm_seen
 
 
+def _fired_down_after_a_switch_away():
+    """2026-10-25 18:17:41-58, acct3: the rocket pod switched away on false zeros
+    (rack_emptied records its 0), then fired down one read per value on the
+    approach to a resupply it could see."""
+    urgency = MissileUrgency(confirm_reads=3)
+    _observe(urgency, 4, "primary", count=3)
+    _observe(urgency, 18, "secondary", count=1)
+    urgency.rack_emptied("secondary")
+    states = [urgency.observe(ammo, "secondary", resupply_seeking=True, read_id=read_id)
+              for read_id, ammo in enumerate((28, 25, 21, 17, 13, 9, 5), start=1)]
+    return urgency, states
+
+
+def test_a_rack_being_fired_down_is_not_a_rearm():
+    """18:17:58: the read of 5 after 9 started the climb-out with the marker 48 px
+    across, a second from the pad, and the aircraft flew off it with 0/38 and 0/4."""
+    _urgency, states = _fired_down_after_a_switch_away()
+    assert not any(s.rearm_seen or s.rearmed for s in states)
+
+
+def test_a_fired_down_count_that_holds_does_not_confirm_a_rearm():
+    urgency, _states = _fired_down_after_a_switch_away()
+    held = [urgency.observe(5, "secondary", resupply_seeking=True, read_id=read_id)
+            for read_id in (8, 9, 10)]
+    assert not any(s.rearm_seen or s.rearmed for s in held)
+
+
+def test_a_stray_zero_between_fired_counts_does_not_make_the_next_one_a_rearm():
+    urgency = MissileUrgency(confirm_reads=3)
+    _observe(urgency, 0, terminal_zero=True, count=3)
+    for read_id, ammo in enumerate((13, 9, 0, 5), start=1):
+        state = urgency.observe(ammo, "secondary", resupply_seeking=True, read_id=read_id)
+    assert not state.rearm_seen
+
+
+def test_a_misread_that_jumps_up_and_back_to_zero_does_not_hold_off_the_rearm():
+    """The empty-rack spikes of 2026-10-11 and 10-13 (9 to 47) went straight back to 0."""
+    urgency = _emptied()
+    _observe(urgency, 47, count=1)
+    _observe(urgency, 0, terminal_zero=True, count=3)
+    first = _observe(urgency, 4, count=1)
+    assert first.rearm_seen
+    assert _observe(urgency, 4, count=2).rearmed
+
+
+def test_an_unreadable_read_inside_a_rearm_does_not_hold_off_its_confirmation():
+    urgency = _emptied()
+    assert _observe(urgency, 4, count=1).rearm_seen
+    urgency.observe(None, "secondary")
+    assert _observe(urgency, 4, count=3).rearmed
+
+
 def test_an_unreadable_count_shows_nothing():
     urgency = _emptied()
     assert not urgency.observe(None, "secondary").rearm_seen

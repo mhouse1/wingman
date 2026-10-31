@@ -133,3 +133,72 @@ def test_a_none_frame_is_skipped_not_crashed_on(tmp_path):
     time.sleep(0.1)
     rec.stop(timeout=2.0)
     assert not rec._thread.is_alive()   # must not have died on the None frame
+
+
+# --- frame timing (Research 017 step 3, 2026-10-19) ---------------------------
+#
+# The 2026-10-04 videos ran about 5% slow: each frame waited a full period
+# after the last one was written, so every grab stretched the period, and a
+# death the trace put at 10,050.9 s showed 9,571 s into the video. Frames are
+# now on an absolute schedule and each one's time is written beside the video.
+
+def _times(out_path):
+    from wingman.session_recording import frames_path
+    lines = frames_path(out_path).read_text(encoding="utf-8").splitlines()
+    assert lines[0] == "frame,time"
+    rows = [line.split(",") for line in lines[1:]]
+    return [int(i) for i, _ in rows], [float(t) for _, t in rows]
+
+
+def test_the_schedule_is_absolute():
+    from wingman.session_recording import next_frame_due
+    assert next_frame_due(10.0, 10.02, 0.5) == 10.5      # a 20 ms grab costs nothing
+    assert next_frame_due(10.0, 10.6, 0.5) == pytest.approx(11.1)   # a period behind: restart
+
+
+def test_a_slow_grab_does_not_stretch_the_frame_period(tmp_path):
+    """The old loop waited 1/fps after each write: a grab of 40% of the period
+    made it 1.4 periods. On the absolute schedule the period stays."""
+    fake_cap = _FakeCapture()
+    slow = fake_cap.get_frame
+
+    def get_frame():
+        time.sleep(0.08)
+        return slow()
+
+    fake_cap.get_frame = get_frame
+    out = tmp_path / "session.mp4"
+    rec = VideoRecorder(region=(0, 0, 4, 4), monitor_index=1, game_window_offset=None,
+                        display=None, out_path=str(out), fps=5.0, scale=1.0,
+                        capture_factory=lambda: fake_cap)
+    rec.start()
+    time.sleep(1.7)
+    rec.stop(timeout=2.0)
+    _, stamps = _times(out)
+    gaps = sorted(b - a for a, b in zip(stamps[:-1], stamps[1:], strict=True))
+    assert len(gaps) >= 5
+    assert gaps[len(gaps) // 2] < 0.24, gaps     # the old loop: 0.28 s
+
+
+def test_each_written_frame_has_its_wall_clock_time(tmp_path):
+    served = {"n": 0}
+    fake_cap = _FakeCapture()
+    frame = np.zeros((4, 4, 3), dtype=np.uint8)
+
+    def get_frame():                              # every other grab fails
+        served["n"] += 1
+        return frame if served["n"] % 2 else None
+
+    fake_cap.get_frame = get_frame
+    out = tmp_path / "session.mp4"
+    before = time.time()
+    rec = _recorder(tmp_path, fake_cap, fps=50.0)
+    rec.start()
+    time.sleep(0.3)
+    rec.stop(timeout=2.0)
+    after = time.time()
+    index, stamps = _times(out)
+    assert index == list(range(len(index)))
+    assert len(index) == (served["n"] + 1) // 2  # only the frames written
+    assert all(b > a for a, b in zip(stamps[:-1], stamps[1:], strict=True))
+    assert before <= stamps[0] and stamps[-1] <= after

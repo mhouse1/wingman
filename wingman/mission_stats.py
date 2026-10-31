@@ -53,6 +53,9 @@ _OBJECTIVE_ROWS = (
     ("priority_target", "priority target"),
 )
 
+# ADR 163 / ADR 165: the evade trial's arms, in the order the summary prints them.
+_TRIAL_ARMS = ("evade", "control")
+
 
 def objectives_flown_lines(objectives: dict) -> "list[str]":
     """The objectives block: the total, then a row for each kind, at zero too.
@@ -62,6 +65,56 @@ def objectives_flown_lines(objectives: dict) -> "list[str]":
     return [f"Objectives flown  : {sum(count for _label, count in flown)}  "
             f"(flown through in pursuit; Design 015)"
             ] + [f"  {label:<15} : {count}" for label, count in flown]
+
+
+def round_performance_lines(perf: dict) -> "list[str]":
+    """The session's totals from the end-of-round PERFORMANCE panel, with the
+    rounds they cover; the per-round figures only once a round was read."""
+    read = int(perf.get("rounds_read", 0))
+    rounds = read + int(perf.get("rounds_unread", 0))
+    lines = [f"Round performance : {read} of {rounds} rounds read  "
+             f"(the end-of-round PERFORMANCE panel)"]
+    taken_over = int(perf.get("rounds_taken_over", 0))
+    if taken_over:
+        lines.append(f"  taken over      : {taken_over}  "
+                     f"(a manual takeover; left out of these figures)")
+    if read:
+        k, d, a = (int(perf.get(key, 0)) for key in ("kills", "deaths", "assists"))
+        score = int(perf.get("score", 0))
+        lines += [
+            f"  score           : {score}  ({score / read:.1f} per round read)",
+            f"  K / D / A       : {k} / {d} / {a}  "
+            f"({k / read:.1f} / {d / read:.1f} / {a / read:.1f} per round read)",
+        ]
+    return lines
+
+
+def squadron_ranking_lines(readings: list) -> "list[str]":
+    """ADR 166: the squadron's last reading of the session, and how many there
+    were; nothing when none was read."""
+    if not readings:
+        return []
+    last = readings[-1]
+    return [f"Squadron ranking  : rank {int(last['rank'])}, trophies "
+            f"{int(last['trophies']):,}  (last of {len(readings)} reading(s); ADR 166)"]
+
+
+def trial_round_lines(by_arm: dict) -> "list[str]":
+    """ADR 165: each arm's rounds in the evade trial, with their PERFORMANCE
+    readings per round read; nothing until a round has carried an arm."""
+    if not any(int((by_arm.get(arm) or {}).get("rounds", 0)) for arm in _TRIAL_ARMS):
+        return []
+    lines = []
+    for arm in _TRIAL_ARMS:
+        figures = by_arm.get(arm) or {}
+        rounds, read = int(figures.get("rounds", 0)), int(figures.get("rounds_read", 0))
+        line = f"  {arm + ' arm':<15} : {read} of {rounds} rounds read"
+        if read:
+            k, d, a = (int(figures.get(key, 0)) for key in ("kills", "deaths", "assists"))
+            line += (f": score {int(figures.get('score', 0)) / read:.1f}, K / D / A "
+                     f"{k / read:.1f} / {d / read:.1f} / {a / read:.1f} per round read")
+        lines.append(line + "  (ADR 165)")
+    return lines
 
 
 def _fmt_duration(seconds: float) -> str:
@@ -85,8 +138,11 @@ class MissionStatsTracker:
 
     Wiring:
       on_event()          — call for named events: respawn_detected, missiles_empty,
-                            click_to_detected, flare_burst_deployed, flare_reload
+                            click_to_detected, flare_burst_deployed, flare_reload,
+                            missile_evade, evade_trial_evade, evade_trial_control
       on_fsm_transition() — chain after existing replay/capture FSM callback
+      round_awaits_reading() / record_round_performance() — the end-of-round
+                            PERFORMANCE panel: whether a round waits for it, its reading
       finalize()          — call in finally block; writes JSON and returns session dict
       print_summary()     — call after finalize(); logs formatted console summary
     """
@@ -143,6 +199,24 @@ class MissionStatsTracker:
         # armed" shape as _total_crashes_with_missiles above, applied to
         # flying out of bounds instead of dying.
         self._total_rtb_with_missiles = 0
+
+        # Operator, 2026-10-26: each round's score and kills/deaths/assists from
+        # the end-of-round PERFORMANCE panel (wingman/round_performance.py),
+        # totalled to compare long runs. A round whose panel could not be read
+        # is counted apart, so the totals say how many rounds they cover.
+        # ADR 166: each reading of the squadron leaderboard, in order.
+        self._squadron_rankings: list = []
+        self._jet: "str | None" = None      # ADR 167: read in the lobby, for the next round
+        self._rounds_read = 0
+        self._rounds_unread = 0
+        self._round_totals = {"score": 0, "kills": 0, "deaths": 0, "assists": 0}
+        # Operator, 2026-10-29: a round with a manual takeover is not wingman's
+        # flying, so it is left out of the totals and only counted here.
+        self._rounds_taken_over = 0
+        # Action Item 005 (AI-005-3): the missions whose panel has been read or
+        # tried. Each round gets one try: a second click-through of the same end
+        # screens (ADR 087's lobby scan starts one) used to book an unread round.
+        self._performance_tried: set[int] = set()
 
         # ADR 070 V5: per-ENGAGEMENT survival, the measure a per-mission death
         # rate cannot give. Missions mix engagements the tactic touched with
@@ -239,6 +313,14 @@ class MissionStatsTracker:
                 self._current["missile_evade_count"] += 1
             self._mark_engagement_evaded(ts)
 
+        elif event_name in ("evade_trial_evade", "evade_trial_control"):
+            arm = event_name.rsplit("_", 1)[1]
+            self._mark_engagement_arm(ts, arm)
+            # ADR 165: the arm is drawn once a round, so the round's record keeps
+            # the first one it sees.
+            if self._in_mission and self._current.get("trial_arm") is None:
+                self._current["trial_arm"] = arm
+
         elif event_name == "flare_reload":
             self._total_flare_reloads += 1
             if self._in_mission:
@@ -307,6 +389,58 @@ class MissionStatsTracker:
                 self._total_manual_takeovers += 1
                 self._current["manual_takeover_count"] += 1
 
+    def _round_awaiting_reading(self) -> "dict | None":
+        """The mission whose PERFORMANCE panel is up next: the last one, ended
+        on the end screen, its panel not yet read or tried. Hold the lock."""
+        last = self._missions[-1] if self._missions else None
+        if (self._in_mission or last is None or last["outcome"] != "click_to"
+                or last["index"] in self._performance_tried):
+            return None
+        return last
+
+    def round_awaits_reading(self) -> bool:
+        """True while a round that ended on the end screen waits for its
+        PERFORMANCE panel to be read (AI-005-3). The click-through asks before
+        it reads; a second click-through of the same end screens finds none."""
+        with self._lock:
+            return self._round_awaiting_reading() is not None
+
+    def record_round_performance(self, reading) -> None:
+        """One round's PERFORMANCE panel: a `RoundPerformance` (score, kills,
+        deaths, assists), or None when it could not be read. Arrives from the
+        end-of-round click-through thread, after the round's mission has ended,
+        and is booked against that round, once: a reading no round waits for
+        (a second click-through, or wingman started on the end screen) is not
+        counted (AI-005-3)."""
+        with self._lock:
+            mission = self._round_awaiting_reading()
+            if mission is None:
+                logger.debug("MissionStatsTracker: a round performance reading no round "
+                             "waits for, not counted")
+                return
+            self._performance_tried.add(mission["index"])
+            if reading is not None:
+                mission["performance"] = {"score": reading.score, "kills": reading.kills,
+                                          "deaths": reading.deaths, "assists": reading.assists}
+            # A round the operator took over keeps its reading on its record,
+            # but is left out of every round figure (operator, 2026-10-29).
+            if mission.get("manual_takeover_count", 0) > 0:
+                self._rounds_taken_over += 1
+                return
+            if reading is None:
+                self._rounds_unread += 1
+                return
+            self._rounds_read += 1
+            for key, value in mission["performance"].items():
+                self._round_totals[key] += value
+
+    def record_squadron_ranking(self, reading, ts: float) -> None:
+        """One reading of the squadron leaderboard (ADR 166): a
+        `SquadronReading` (rank, trophies), at `ts`."""
+        with self._lock:
+            self._squadron_rankings.append(
+                {"ts": round(ts, 3), "rank": int(reading.rank), "trophies": int(reading.trophies)})
+
     def finalize(self, run_id: str | None = None, extra: "dict | None" = None) -> dict:
         """Close any open mission, build session dict, write JSON. Returns session dict.
 
@@ -367,6 +501,13 @@ class MissionStatsTracker:
             "total_died_armed_contested": self._total_died_armed_contested,
             "total_died_armed_unclassified": self._total_died_armed_unclassified,
             "total_rtb_with_missiles": self._total_rtb_with_missiles,
+            "round_performance": {
+                "rounds_read": self._rounds_read,
+                "rounds_unread": self._rounds_unread,
+                "rounds_taken_over": self._rounds_taken_over,
+                **self._round_totals,
+            },
+            "squadron_rankings": list(self._squadron_rankings),
             "spawn_crashes": {
                 "window_s": _SPAWN_CRASH_WINDOW_S,
                 "min_s": _SPAWN_CRASH_MIN_S,
@@ -378,6 +519,7 @@ class MissionStatsTracker:
                 "redetect_after_s": self._immediate_redetects,
             },
             "missile_engagements": self._engagement_summary(),
+            "evade_trial_rounds": self._trial_rounds(),
             "avg_mission_duration_s": round(avg_duration, 1) if avg_duration is not None else None,
             "missions": self._missions,
         }
@@ -427,6 +569,11 @@ class MissionStatsTracker:
             f"  Lobby exit      : {s['missions_lobby_exit']:<4} ({pct(s['missions_lobby_exit'])})",
             f"  Unknown outcome : {s['missions_unknown_outcome']:<4} ({pct(s['missions_unknown_outcome'])})",
             f"Avg mission time  : {avg}",
+        ]
+        lines += round_performance_lines(s.get("round_performance") or {})
+        lines += trial_round_lines(s.get("evade_trial_rounds") or {})
+        lines += squadron_ranking_lines(s.get("squadron_rankings") or [])
+        lines += [
             f"Total respawns    : {s['total_respawns']}",
             f"Total flare bursts: {s['total_flare_bursts']}{bursts_per}",
             f"Flare reloads     : {s['total_flare_reloads']}",
@@ -470,6 +617,13 @@ class MissionStatsTracker:
                 f"  without evade   : "
                 f"{surv(eng['not_evaded_survival'], eng['not_evaded_total'], eng['not_evaded_died'])}",
             ]
+            if eng.get("trial_evade_total") or eng.get("trial_control_total"):
+                lines.append(
+                    f"  pursuit trial   : evade arm "
+                    f"{surv(eng['trial_evade_survival'], eng['trial_evade_total'], eng['trial_evade_died'])}"
+                    f", control arm "
+                    f"{surv(eng['trial_control_survival'], eng['trial_control_total'], eng['trial_control_died'])}"
+                    f"  (ADR 163)")
         # Operator, 2026-10-09: "i only want it to print total counts during
         # wingman session summary." Shown at zero too: a session that flew
         # through nothing is what the line is read for.
@@ -511,6 +665,7 @@ class MissionStatsTracker:
             "last_alert_ts": ts,
             "alerts": 1,
             "evaded": False,
+            "trial_arm": None,
             "died_after_s": None,
         })
 
@@ -520,6 +675,17 @@ class MissionStatsTracker:
         last = self._engagements[-1]
         if ts - last["last_alert_ts"] <= _EVADE_ATTRIBUTION_S:
             last["evaded"] = True
+
+    def _mark_engagement_arm(self, ts: float, arm: str) -> None:
+        """ADR 163: the pursuit trial's arm for the engagement this alert opened.
+
+        The arm is what the engagement was assigned, so the trial is read by arm,
+        whether or not the evade could start (a dive recovery, an eject)."""
+        if not self._engagements:
+            return
+        last = self._engagements[-1]
+        if ts - last["last_alert_ts"] <= _EVADE_ATTRIBUTION_S:
+            last["trial_arm"] = arm
 
     def _attribute_death(self, ts: float) -> None:
         """Attribute a death to the most recent engagement still in window."""
@@ -532,11 +698,17 @@ class MissionStatsTracker:
     def _engagement_summary(self) -> dict:
         """Survival rate split by whether an evade fired — the V5 measure."""
         buckets = {"evaded": [0, 0], "not_evaded": [0, 0]}  # [total, died]
+        trial = {"evade": [0, 0], "control": [0, 0]}         # ADR 163, by arm
         for e in self._engagements:
             key = "evaded" if e["evaded"] else "not_evaded"
             buckets[key][0] += 1
             if e["died_after_s"] is not None:
                 buckets[key][1] += 1
+            arm = e.get("trial_arm")
+            if arm in trial:
+                trial[arm][0] += 1
+                if e["died_after_s"] is not None:
+                    trial[arm][1] += 1
 
         def rate(total: int, died: int):
             return round((total - died) / total, 3) if total else None
@@ -550,11 +722,41 @@ class MissionStatsTracker:
             "not_evaded_total": buckets["not_evaded"][0],
             "not_evaded_died": buckets["not_evaded"][1],
             "not_evaded_survival": rate(*buckets["not_evaded"]),
+            "trial_evade_total": trial["evade"][0],
+            "trial_evade_died": trial["evade"][1],
+            "trial_evade_survival": rate(*trial["evade"]),
+            "trial_control_total": trial["control"][0],
+            "trial_control_died": trial["control"][1],
+            "trial_control_survival": rate(*trial["control"]),
             "detail": [
                 {k: v for k, v in e.items() if k != "last_alert_ts"}
                 for e in self._engagements
             ],
         }
+
+    def _trial_rounds(self) -> dict:
+        """ADR 165: the rounds each arm of the evade trial was drawn for, and the
+        sums of their PERFORMANCE readings. A round is a mission that ended on the
+        end screen, the only kind a reading attaches to, and that wingman flew
+        throughout: one with a manual takeover is left out (operator, 2026-10-29)."""
+        by_arm = {}
+        for arm in _TRIAL_ARMS:
+            rounds = [m for m in self._missions
+                      if m.get("trial_arm") == arm and m.get("outcome") == "click_to"
+                      and not m.get("manual_takeover_count")]
+            read = [m["performance"] for m in rounds if m.get("performance")]
+            by_arm[arm] = {"rounds": len(rounds), "rounds_read": len(read),
+                           **{key: sum(p[key] for p in read) for key in self._round_totals}}
+        return by_arm
+
+    def record_jet(self, name: "str | None") -> None:
+        """The jet on the lobby as PLAY was clicked (ADR 167), for the rounds from
+        that click on. None drops the last one: a lobby whose read fails leaves its
+        round without a jet, not under the previous round's. A mission that starts
+        with no click keeps it: a jet changes only in the lobby, and the operator's
+        double `n` restarts a mission in the same round (2026-10-31 07:09:39)."""
+        with self._lock:
+            self._jet = name
 
     def _start_mission(self, ts: float) -> None:
         self._in_mission = True
@@ -571,6 +773,9 @@ class MissionStatsTracker:
             "no_missiles_abort": False,
             "manual_takeover_count": 0,
             "outcome": "unknown",
+            "performance": None,
+            "trial_arm": None,          # ADR 165: the evade trial's arm for this round
+            "tags": {"jet": self._jet} if self._jet else {},    # ADR 167
         }
 
     def _end_mission(self, ts: float, outcome: str) -> None:
