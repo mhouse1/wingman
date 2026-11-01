@@ -53,6 +53,23 @@ def test_constructing_a_controller_registers_nothing(monkeypatch):
         "Controller.__init__ must not touch the keyboard backend"
 
 
+def test_the_mission_keys_release_the_enter_hold(monkeypatch):
+    """SAF-001.4: 'u' hands the aircraft back, and 'o' means "fly it now". The
+    hold has to go with them or the next battle entry would take it straight
+    back from the mission they started."""
+    kb = _RecordingKeyboard()
+    ctrl = _ctrl(monkeypatch, kb)
+    ctrl._analyzer.trigger_event = lambda _name: True
+    ctrl._analyzer.note_battle_event = lambda: None
+    monkeypatch.setattr(ctrl, "_start_default_mission", lambda: None)
+    monkeypatch.setattr(ctrl, "mission_acs", lambda **_kw: None)
+    ctrl.register_hotkeys()
+    for key in (MISSION_J20_KEY, MISSION_ACS_KEY):
+        ctrl._manual_round_hold.set()
+        kb.pressed_keys[key](None)
+        assert not ctrl.manual_held_for_round(), key
+
+
 def test_register_hotkeys_registers_every_operator_key(monkeypatch):
     kb = _RecordingKeyboard()
     ctrl = _ctrl(monkeypatch, kb)

@@ -99,10 +99,12 @@ its own takeover.
 
 **Statement**: Physical flight-control presses within the 2.0 s grace window after
 GAME_BATTLE or GAME_BATTLE_EJECT entry shall be ignored, and the ignored
-press shall be logged when the exception is exercised.
+press shall be logged when the exception is exercised. The window does not
+apply to MANUAL_TAKEOVER_KEY (SAF-001.4).
 
 **Rationale**: Stale-keystroke protection: keystrokes queued during a state transition must
-not flip the aircraft into manual mode the instant a battle begins.
+not flip the aircraft into manual mode the instant a battle begins. Wingman
+never injects MANUAL_TAKEOVER_KEY, so a press of it is never stale.
 
 ## The takeover-key listener stays able to hear keys
 
@@ -133,22 +135,35 @@ injected presses on that display give the liveness signal. Design 009,
   **ID**: `SAF-001`
 
 **Statement**: When the operator presses MANUAL_TAKEOVER_KEY (Enter) in GAME_BATTLE,
-GAME_BATTLE_EJECT or GAME_BATTLE_MANUAL, outside the entry grace window of
-SAF-001.2, wingman shall be in GAME_BATTLE_MANUAL whether or not it was
-commanding flight, and shall stay there through every respawn, without
-re-commanding flight, until the game state leaves the battle states or the
-operator presses the handback key (MISSION_J20_KEY, 'u').
+GAME_BATTLE_EJECT or GAME_BATTLE_MANUAL, wingman shall be in GAME_BATTLE_MANUAL
+whether or not it was commanding flight, and shall stay there through every
+respawn, without re-commanding flight, until the game state leaves the battle
+states or the operator presses the handback key (MISSION_J20_KEY, 'u'). When the
+operator presses it in GAME_STARTING, GAME_STARTING_STALLED or GAME_UNKNOWN,
+wingman shall start no mission for the coming round and shall enter
+GAME_BATTLE_MANUAL, under the same hold, when that round reaches GAME_BATTLE;
+the claim ends if the state reaches GAME_LOBBY, GAME_WAITING or GAME_END_B first.
 
-**Rationale**: Operator, 2026-10-30: "when pressed it should enter manual and stay in manual
+**Rationale**:
+
+**Amended 2026-11-01 — Enter works from the countdown on, with no entry grace.**
+From 2026-10-30 to 2026-11-01, 24 of 73 Enter presses were dropped, and 21 of
+those were followed by another press within 20 s. 12 fell in the entry grace, 11
+of them within 2 s of entering battle; 8 fell in the Good Luck countdown and 2 in
+the GAME_UNKNOWN after a stall. The operator reaches for Enter as a round starts,
+so those are the seconds it most has to work. The grace was kept for this key
+against an Enter queued from lobby chat, which no log shows: wingman never
+injects Enter, and battle entry follows the lobby by at least the Good Luck wait.
+
+Operator, 2026-10-30: "when pressed it should enter manual and stay in manual
 mode until the round exits, respawn should not kick it out of manual". Enter is
 the deliberate "I fly this round" key; i/j/k/l and the arrow keys keep SAF-001's
 return on respawn, so a reflexive grab still hands the aircraft back after a
 death and an unattended session does not need attending (the 2026-08-30
-experiment). Outside the battle states Enter is ordinary input (lobby chat),
-and the entry grace still applies, so an Enter queued from the lobby cannot hold
-a fresh round. The handback key stays the operator's way out. Rounds flown this
-way carry manual_takeover_count above 0, and Design 018 charts them apart from
-wingman's own.
+experiment). In GAME_LOBBY and GAME_WAITING Enter is ordinary input (lobby chat).
+The handback key stays the operator's way out. Rounds flown this way carry
+manual_takeover_count above 0, and Design 018 charts them apart from wingman's
+own.
 
 ## No commanded flight while the aircraft is dead
 

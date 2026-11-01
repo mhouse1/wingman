@@ -1178,9 +1178,11 @@ squadron_ranking:
 
 # ADR 167: each round's jet, read off the lobby as PLAY is clicked. `capture` keeps
 # the label each name was read from, and the whole frame when none came of it, in
-# test_screenshots/jet_name/.
+# test_screenshots/jet_name/. ADR 168: `recheck_s` is how often the label is read
+# again through the wait for a match; two reads in a row must agree on a new jet.
 jet_name:
   capture: true
+  recheck_s: 3.0
 
 # Design 018: the score dashboard, a Grafana and Postgres stack on VEDA fed from
 # the session stats files (`make grafana`). Off here, so a clone runs none of

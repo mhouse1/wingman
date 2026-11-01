@@ -3487,6 +3487,51 @@ class GameStateAnalyzer:
         """
         return [crop for crop in ("PLAY", "READY") if crop in self.crops]
 
+    def stop_if_lobby_on_screen(self) -> None:
+        """ADR 169: 'z' landed in a battle state; is that battle really there?
+
+        A GAME_STARTING health probe can confirm lobby digits and enter a battle
+        that does not exist (2026-11-01 09:16:09: HP:73 over the PLAY button),
+        and a stop deferred to "the next lobby" then waits while sitting in it.
+        PLAY or READY on the newest frame means there is no round to finish, so
+        this walks the FSM back and the main loop's safe point fires on its next
+        tick.
+
+        On the OCR pool because the caller is the key listener's thread, which
+        also hears the takeover keys (SAF-001), and readers are thread-local.
+        Both conditions are read again after the OCR: a second press can cancel
+        the stop while it runs.
+        """
+        with self._click_to_frame_lock:
+            frame = self._click_to_latest_frame
+            frame_ts = self._click_to_frame_ts
+        executor = self.ocr_executor
+        if frame is None or executor is None or time.time() - frame_ts > 3.0:
+            return
+        images = {crop: _crop_for_ocr(frame, self.crops[crop][:4])
+                  for crop in self._lobby_recheck_crops()}
+
+        def _read():
+            try:
+                for crop, image in images.items():
+                    detected, _, _ = _process_text_region(image, self.crops[crop].text or [])
+                    if not detected:
+                        continue
+                    state = self.game_state
+                    if state in BATTLE_STATES and self._round_start_suppressed():
+                        logger.warning(
+                            "\033[93m🏁 FINISH ROUND: %s is on screen in %s — no round "
+                            "in progress, stopping now (ADR 169)\033[0m", crop, state.name)
+                        self._trigger("manual_reset")
+                    return
+            except Exception:
+                logger.exception("Analyzer: lobby read for the pending stop failed")
+
+        try:
+            executor.submit(_read)
+        except RuntimeError as e:
+            logger.debug("Analyzer: lobby read not submitted (%s)", e)
+
     def _stall_recovery_targets(self, state):
         """Return the stall-recovery crops eligible to act right now (ADR 084).
 

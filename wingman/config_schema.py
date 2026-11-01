@@ -706,6 +706,7 @@ SCHEMA = Section(
         # ADR 167: each round's jet, read off the lobby.
         "jet_name": Section(children={
             "capture": Leaf(types=(bool,), default=False),
+            "recheck_s": Leaf(types=(int, float), default=3.0, minimum=1.0),    # ADR 168
         }),
         # Design 018: the score dashboard (Grafana and Postgres, `make grafana`).
         # Off unless the operator turns it on in config.local.yaml.

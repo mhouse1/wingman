@@ -20,8 +20,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.9.3"
-WINGMAN_VERSION_DETAILS = "ACS: terrain avoidance"
+WINGMAN_VERSION = "1.9.4"
+WINGMAN_VERSION_DETAILS = "ACS: J20 update"
 
 from . import capture_budget
 from .capture import Capture
@@ -48,7 +48,7 @@ from .round_performance import (CAPTURE_DIR as ROUND_PERFORMANCE_DIR, KDA_CROP, 
                                 describe_read, frame_tag, read_panel, read_round,
                                 save_frame as save_round_frame, unread_reason)
 from . import jet_name
-from .jet_name import read_jet
+from .jet_name import JetRecheck, read_jet
 from . import squadron_ranking
 from .squadron_ranking import Navigation as SquadronNavigation, SquadronRanking
 from .performance import PerformanceTracker
@@ -59,6 +59,7 @@ from .eject_stuck_detector import EjectStuckDetector
 from .liveness_guard import LivenessGuard
 from .focus_guard import FocusGuard, config_for_display
 from .host_mode import log_host_mode
+from .keybindings import FINISH_ROUND_THEN_EXIT
 from .game_shutdown import (GamePresenceWatch, close_game,
                             close_nested_display, find_game_pids)
 from .tick_handlers import (
@@ -1558,19 +1559,36 @@ def main():
     # ADR 167: each round's jet, off the frame PLAY or READY was clicked on. Live
     # only, as the round's score. The read leaves the quick-scan's thread at once,
     # so the click does not wait for it.
+    jet_recheck = None
     if not replay_mode and not capture_mode and jet_name.CROP in analyzer.crops:
-        jet_capture = bool((cfg.get("jet_name") or {}).get(
-            "capture", schema_default("jet_name.capture")))
+        jet_cfg = cfg.get("jet_name") or {}
+        jet_capture = bool(jet_cfg.get("capture", schema_default("jet_name.capture")))
+
+        def _ocr_jet(frame):
+            return analyzer.run_ocr(read_jet, frame, analyzer.crops[jet_name.CROP])
+
+        def _book_jet(read, frame):
+            _note_jet(read, frame, logger, stats_tracker.record_jet,
+                      jet_capture and _save_jet_frame)
 
         def _read_jet(frame):
-            _note_jet(analyzer.run_ocr(read_jet, frame, analyzer.crops[jet_name.CROP]), frame,
-                      logger, stats_tracker.record_jet, jet_capture and _save_jet_frame)
+            _book_jet(_ocr_jet(frame), frame)
 
         def _on_play_click_read_jet(_crop, frame):
             stats_tracker.record_jet(None)
             threading.Thread(target=_read_jet, args=(frame,), daemon=True,
                              name="jet-name").start()
         analyzer.subscribe(GameEvent.LOBBY_PLAY_CLICK, _on_play_click_read_jet, name="jet_name")
+
+        # ADR 168: the label again through the wait for a match. The ingest takes
+        # any line with `JET NAME: ` in it for a reading, so this one must not.
+        def _on_jet_changed(read, frame):
+            logger.info("Jet recheck: the wait's label changed, was %s", stats_tracker.jet)
+            _book_jet(read, frame)
+
+        jet_recheck = JetRecheck(_ocr_jet, lambda: stats_tracker.jet, _on_jet_changed,
+                                 float(jet_cfg.get("recheck_s",
+                                                   schema_default("jet_name.recheck_s"))))
 
     # Operator, 2026-10-26: each round's score and K/D/A, read off the
     # PERFORMANCE panel during the end-of-round click-through and totalled in
@@ -1984,10 +2002,7 @@ def main():
                             new_game_state.name)
                 if new_game_state != GameState.GAME_UNKNOWN:
                     startup_classification_complete = True
-                if new_game_state not in BATTLE_STATES:
-                    # SAF-001.4: the round has left battle, so an Enter hold
-                    # ends here and the next round starts under wingman.
-                    ctrl.end_manual_round_hold(f"the round left battle ({new_game_state.name})")
+                ctrl.note_round_state(new_game_state)
                 if new_game_state == GameState.GAME_END_B:
                     game_end_b_since = time.time()
                     # GAME_END_B is not a respawn flow; clear the respawn latch
@@ -2112,6 +2127,9 @@ def main():
                 logger.info("SQUADRON RANKING: opening the squadron leaderboard (ADR 166)")
                 squadron.start(_squadron_navigation(), _on_squadron_done)
 
+            # ADR 168: before the fallback below, which can end the tick.
+            if jet_recheck is not None:
+                jet_recheck.tick(frame, current_game_state, time.time())
 
             # GAME_WAITING: scan for CANCEL every 3s to confirm matchmaking.
             # CANCEL visible → matchmaking active → advance to GAME_STARTING.
@@ -2501,9 +2519,9 @@ def main():
             # doing nothing but watching for a second Backspace.
             logger.warning(
                 "\033[93m🖐  STANDBY: wingman has stopped — MetalStorm is still "
-                "running and is yours to fly. Press Backspace again to close "
-                "MetalStorm%s and exit. Ctrl-C leaves everything up.\033[0m",
-                " and the nested display" if nested_display else "")
+                "running and is yours to fly. Press Backspace again or '%s' to "
+                "close MetalStorm%s and exit. Ctrl-C leaves everything up.\033[0m",
+                FINISH_ROUND_THEN_EXIT, " and the nested display" if nested_display else "")
             # ADR 124: standby is an unbounded wait by DESIGN. The shutdown
             # watchdog exists to bound a STALL, and it cannot tell the two
             # apart from inside — so it is disarmed here and re-armed for the
@@ -2558,7 +2576,7 @@ def main():
                     if nested_display:
                         close_nested_display(nested_display, grace_s=_grace)
                 else:
-                    logger.info("STANDBY: second Backspace — closing down")
+                    logger.info("STANDBY: close requested — closing down")
                     _arm_shutdown_watchdog()
                     _close_session()
             except KeyboardInterrupt:

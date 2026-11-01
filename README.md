@@ -67,9 +67,9 @@ One full match cycle:
    health returns.
 6. Match-end click-through and return to lobby, then the loop repeats.
 
-Manual takeover is always available: press **Enter** at the game window (see
-Runtime Hotkeys). A respawn returns control to wingman and restarts the
-mission, so the aircraft is never left flying uncommanded.
+Manual takeover is always available: press **Enter** at the game window, from
+the Good Luck countdown on (see Runtime Hotkeys). It holds until the round ends
+or you press **`u`**, and the next round starts under wingman.
 
 ### Current Capabilities
 
@@ -172,7 +172,11 @@ make nested-stop     # tear the nested server down
 
 Stopping a session:
 
-- **`z`** — finish the round, then close MetalStorm and the nested display.
+- **`z`** — finish the round, then close MetalStorm and the nested display. With
+  the lobby on screen it closes at once, even if wingman thinks a round is on, and
+  in standby it closes as a second Backspace does
+  ([ADR 169](docs/adr/169-z-in-the-lobby-exits-whatever-the-fsm-believes.md)). A
+  second press cancels only while wingman is still waiting for a round to end.
 - **Backspace** — two-stage. The first press stops wingman and **leaves
   MetalStorm running**, so you can take over and keep flying by hand, even
   mid-battle; wingman waits in standby. Press Backspace again, whenever you are
@@ -184,10 +188,12 @@ Guard-triggered exits leave both up, because they mean "restart wingman". Set
 
 **Manual takeover:** press **Enter** at the game window to take the aircraft —
 wingman stops instantly, releases every key, and from then on only deploys
-flares. Press **`u`** to hand it back. Arrow keys also take over, and
-`ctrl+alt+i/j/k/l` works from your own display. Bare `i/j/k/l` at the game
-window are wingman's own roll commands and are ignored there. A respawn ends the
-takeover and the last mission resumes automatically — set
+flares. It holds through respawns until the round ends. Pressed during the
+countdown it claims the coming round: no mission starts, and the aircraft is
+yours from the first second. Press **`u`** to hand it back. Arrow keys also take
+over, and `ctrl+alt+i/j/k/l` works from your own display. Bare `i/j/k/l` at the
+game window are wingman's own roll commands and are ignored there. A respawn
+ends a takeover by those other keys and the last mission resumes automatically — set
 `mission.manual_takeover.persist_through_respawn: true` to keep flying across
 deaths instead.
 

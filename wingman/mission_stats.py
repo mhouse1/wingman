@@ -750,13 +750,20 @@ class MissionStatsTracker:
         return by_arm
 
     def record_jet(self, name: "str | None") -> None:
-        """The jet on the lobby as PLAY was clicked (ADR 167), for the rounds from
-        that click on. None drops the last one: a lobby whose read fails leaves its
-        round without a jet, not under the previous round's. A mission that starts
-        with no click keeps it: a jet changes only in the lobby, and the operator's
-        double `n` restarts a mission in the same round (2026-10-31 07:09:39)."""
+        """The jet on the lobby as PLAY was clicked (ADR 167), or a new one read
+        through the wait for a match (ADR 168), for the rounds from then on. None
+        drops the last one: a lobby whose read fails leaves its round without a jet,
+        not under the previous round's. A mission that starts with no click keeps
+        it: a jet changes only in the lobby, and the operator's double `n` restarts
+        a mission in the same round (2026-10-31 07:09:39)."""
         with self._lock:
             self._jet = name
+
+    @property
+    def jet(self) -> "str | None":
+        """The jet on record (ADR 168). Off the main loop: it takes the lock."""
+        with self._lock:
+            return self._jet
 
     def _start_mission(self, ts: float) -> None:
         self._in_mission = True

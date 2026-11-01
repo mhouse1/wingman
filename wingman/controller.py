@@ -14,7 +14,7 @@ from typing import Callable, NamedTuple
 import cv2
 from mss import mss
 
-from .state import GameState
+from .state import BATTLE_STATES, GameState, ROUND_START_STATES
 from .perception import Perception
 from .telemetry import STEEP_DIVE_MIN_SIN_DEFAULT, path_is_misread
 from .config_schema import schema_default
@@ -511,6 +511,7 @@ class Controller:
         # Set once the backspace hotkey is actually registered below — None
         # if registration was skipped (disable_hotkeys, no keyboard access).
         self._exit_script_hotkey = None
+        self._finish_round_hotkey = None
         self._last_mission = None
         self._last_mission_lock = threading.Lock()
         # CR-018-15: read and commanded only through the Perception port.
@@ -527,8 +528,9 @@ class Controller:
         self._auto_respawn_restart = True  # cleared by manual End press; restored when a mission starts
         # SAF-001.4 (operator, 2026-10-30): a takeover by MANUAL_TAKEOVER_KEY
         # (Enter) holds the aircraft for the rest of the round: a respawn keeps
-        # it in GAME_BATTLE_MANUAL. Cleared by the handback key and when the
-        # round leaves battle (end_manual_round_hold).
+        # it in GAME_BATTLE_MANUAL. Set ahead of the battle, it claims the coming
+        # round (take_claimed_round). Cleared by the handback key and when the
+        # round is over or never began (note_round_state).
         self._manual_round_hold = threading.Event()
         self._game_battle_since = 0.0  # timestamp of last GAME_BATTLE entry; used by grace period guard
         self._ready_button_region = 0  # grid region number for the ready-button click; 0 = not configured
@@ -1409,6 +1411,37 @@ class Controller:
             self._manual_round_hold.clear()
             logger.info("Controller: the Enter manual hold ends — %s", reason)
 
+    def take_claimed_round(self) -> bool:
+        """SAF-001.4: if Enter claimed this round, take the aircraft now.
+
+        True means the round is the operator's and no mission may start. An
+        Enter from before the battle has nothing to take over until the FSM
+        reaches GAME_BATTLE, so it runs here, at the first instant it can.
+
+        @relation(SAF-001.4, scope=function)
+        """
+        if not self._manual_round_hold.is_set():
+            return False
+        if self._analyzer is not None and self._analyzer.game_state == GameState.GAME_BATTLE:
+            logger.info("Controller: Enter was pressed before the battle — "
+                        "taking the aircraft at battle entry")
+            self._handle_maneuver_key_press(MANUAL_TAKEOVER_KEY)
+        return True
+
+    def note_round_state(self, new_state: GameState) -> None:
+        """SAF-001.4: what one FSM transition means for the Enter hold. Called
+        by the main loop's state-change pass, in order, for every transition.
+
+        Entering battle takes a claimed round: the starting loop has already
+        done so on its route, and this covers GAME_UNKNOWN's. A claim outlives a
+        stall (a battle can still follow it), and every other state outside
+        battle means the round is over or never began.
+        """
+        if new_state == GameState.GAME_BATTLE:
+            self.take_claimed_round()
+        elif new_state not in BATTLE_STATES and new_state not in ROUND_START_STATES:
+            self.end_manual_round_hold(f"the round is over or never began ({new_state.name})")
+
     def _on_auto_mission_hotkey(self, _e=None):
         """AUTO_MISSION_KEY handler: force GAME_LOBBY, then click PLAY/READY.
 
@@ -1504,8 +1537,8 @@ class Controller:
                                    state: int = 0) -> bool:
         """Handle manual maneuver-key takeover logic.
 
-        Returns True when the key press triggered mission cancel/manual takeover,
-        otherwise False.
+        Returns True when the key press triggered mission cancel/manual takeover
+        or claimed the coming round, otherwise False.
 
         @relation(SAF-001, scope=function)
         @relation(SAF-001.1, scope=function)
@@ -1539,7 +1572,12 @@ class Controller:
                         key_name,
                     )
                     return False
-        if self._game_battle_since and time.time() - self._game_battle_since < 2.0:
+        # The grace protects against stale keystrokes, and Enter cannot be one
+        # for the same reason it skips the echo guard above. Applied to Enter it
+        # dropped 12 of 73 presses, nearly all as a round began, which is when
+        # the operator reaches for it (2026-10-30 to 11-01, SAF-001.4).
+        if (key_name != MANUAL_TAKEOVER_KEY and self._game_battle_since
+                and time.time() - self._game_battle_since < 2.0):
             logger.debug(
                 "Controller: Maneuver key '%s' ignored — within 2s grace period of battle or eject entry",
                 key_name,
@@ -1547,13 +1585,20 @@ class Controller:
             return False
         # SAF-001.4: Enter in a battle state takes the aircraft for the rest of
         # the round whether or not wingman is flying this instant, so that
-        # wingman does not take it back later in the round. Outside battle it
-        # is an ordinary key (lobby chat), gated like the others below.
+        # wingman does not take it back later in the round. Ahead of a battle it
+        # claims the coming round. In the lobby it is an ordinary key (chat),
+        # gated like the others below.
+        game_state = self._analyzer.game_state if self._analyzer is not None else None
         round_hold = (key_name == MANUAL_TAKEOVER_KEY
-                      and self._analyzer is not None
-                      and self._analyzer.game_state in (GameState.GAME_BATTLE,
-                                                        GameState.GAME_BATTLE_EJECT,
-                                                        GameState.GAME_BATTLE_MANUAL))
+                      and game_state in (GameState.GAME_BATTLE,
+                                         GameState.GAME_BATTLE_EJECT,
+                                         GameState.GAME_BATTLE_MANUAL))
+        round_claim = key_name == MANUAL_TAKEOVER_KEY and game_state in ROUND_START_STATES
+        if round_claim and not self._manual_round_hold.is_set():
+            self._manual_round_hold.set()
+            logger.info("\033[93mController: Enter — manual claimed for the coming "
+                        "round (SAF-001.4): no mission will start. '%s' hands the "
+                        "aircraft back once the battle begins.\033[0m", MISSION_J20_KEY)
         # A climb, evade, or spawn-guard hold is commanded flight even with no
         # mission thread (the tree selects them with mission=False after a
         # respawn cancels the mission) — SAF-001's takeover must fire for
@@ -1565,6 +1610,8 @@ class Controller:
                 or self._pursuing.is_set()
                 or self._climbing.is_set() or self._missile_evading.is_set()
                 or self._spawn_guarding.is_set()):
+            if round_claim:
+                return True
             logger.debug("Controller: maneuver key '%s' ignored — no commanded flight "
                          "(no mission, eject, pursuit, climb, evade or spawn guard) [%s]",
                          key_name, describe_key_source(display, state))
@@ -9039,7 +9086,8 @@ class Controller:
                                 "\033[92mController: game_battle_alive detected in GAME_STARTING "
                                 "— launching mission immediately\033[0m")
                             self._analyzer.trigger_event("good_luck_detected")
-                            self._start_default_mission()
+                            if not self.take_claimed_round():
+                                self._start_default_mission()
                             return
 
                     if not _in_starting():
@@ -9090,10 +9138,11 @@ class Controller:
                                 "Controller: Good-Luck wait ran the full %ds without a "
                                 "battle-alive signal", good_luck_wait)
                         if _in_starting():
-                            logger.info("Controller: game_starting - launching %s mission",
-                                        self._default_mission.upper())
                             self._analyzer.trigger_event("good_luck_detected")
-                            self._start_default_mission()
+                            if not self.take_claimed_round():
+                                logger.info("Controller: game_starting - launching %s mission",
+                                            self._default_mission.upper())
+                                self._start_default_mission()
                         return
             except Exception:
                 logger.exception("Controller: game_starting loop error")
@@ -9134,7 +9183,7 @@ class Controller:
             return "operator stop (standby)"
         if self._exit_event is not None and self._exit_event.is_set():
             return "exit requested"
-        if self._manual_takeover_active():
+        if self._manual_takeover_active() or self._manual_round_hold.is_set():
             return "manual takeover"
         return None
 
@@ -9180,12 +9229,12 @@ class Controller:
     def cleanup(self, keep_hotkeys: bool = False):
         """Stop injection activity, release held keys, deregister hooks.
 
-        `keep_hotkeys=True` tears down every hotkey except Backspace itself,
-        so standby is equivalent to a `make g` session (MetalStorm running
-        with no wingman attached) plus one listener for the close signal —
-        not the operator's own flight. Every other injected key, mission
-        hotkey and takeover key is gone; only the second Backspace still
-        does anything. Everything else still runs: the writers stop and
+        `keep_hotkeys=True` tears down every hotkey except Backspace itself
+        and 'z' (ADR 169), so standby is equivalent to a `make g` session
+        (MetalStorm running with no wingman attached) plus a listener for the
+        close signal — not the operator's own flight. Every other injected
+        key, mission hotkey and takeover key is gone; only the second
+        Backspace or 'z' still does anything. Everything else still runs: the writers stop and
         every injectable key is released, so nothing wingman was holding
         survives into the operator's manual flight.
 
@@ -9246,10 +9295,15 @@ class Controller:
                     keyboard_module.unhook_all()
                     keyboard_module.on_press_key(
                         'backspace', self._exit_script_hotkey, suppress=False)
+                    if self._finish_round_hotkey is not None:
+                        keyboard_module.on_press_key(
+                            FINISH_ROUND_THEN_EXIT, self._finish_round_hotkey,
+                            suppress=False)
                     logger.info(
                         "Controller: standby — every hotkey released except "
-                        "Backspace (equivalent to a wingman-less MetalStorm "
-                        "session); press it again to close MetalStorm")
+                        "Backspace and '%s' (equivalent to a wingman-less "
+                        "MetalStorm session); either one closes MetalStorm",
+                        FINISH_ROUND_THEN_EXIT)
                 except Exception:
                     logger.exception(
                         "Controller: failed to narrow hotkeys down to "

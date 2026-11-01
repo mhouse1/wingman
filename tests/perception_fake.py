@@ -84,3 +84,6 @@ class PerceptionFake:
 
     def note_battle_event(self) -> None:
         self._last_battle_event_ts = time.time()
+
+    def stop_if_lobby_on_screen(self) -> None:
+        pass
