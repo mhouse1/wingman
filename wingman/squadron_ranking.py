@@ -12,11 +12,13 @@ reading takes two frames alike, as the PERFORMANCE panel's does.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import NamedTuple
 
 import cv2
@@ -40,6 +42,18 @@ CROPS = (MENU, MENU_LEADERBOARDS, BOARD_TITLE, BACK, TAB_SQUADRONS, BOARD_HEADER
 # Where `squadron_ranking.capture` saves the frames: the one each reading was
 # taken from, and the last one of a navigation that gave up.
 CAPTURE_DIR = "test_screenshots/squadron_ranking"
+
+# The day of the last reading (ADR 170). Per machine, and one file for every
+# account: the figures are the squadron's, whoever reads them.
+LAST_READ_FILE = os.path.expanduser("~/.config/wingman/squadron_ranking.json")
+
+# A navigation that read nothing is tried again at once, with PLAY held, up to
+# TRIES_PER_LOBBY tries. Then PLAY goes ahead, so a route that fails cannot hold
+# up the rounds, and the first lobby RETRY_AFTER_S later tries again. A session
+# stops at MAX_TRIES and waits for the next day (ADR 170).
+TRIES_PER_LOBBY = 3
+RETRY_AFTER_S = 120.0
+MAX_TRIES = 9
 
 # A step's screen is looked for this often, until the step's time is up.
 POLL_S = 0.4
@@ -80,6 +94,25 @@ def parse_count(text: str) -> "int | None":
     unless its digit groups are those of a number."""
     grouped = re.sub(r",+", ",", "".join(text.split()).replace("O", "0").replace(".", ","))
     return int(grouped.replace(",", "")) if _COUNT_RE.fullmatch(grouped) else None
+
+
+def load_last_read(path: str) -> "date | None":
+    """The day of the last reading, or None. A damaged file reads as None: the
+    worst of that is a second reading that day."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return date.fromisoformat(json.load(f)["last_read"])
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        logger.warning("SQUADRON RANKING: could not read %s (%s)", path, e)
+        return None
+
+
+def save_last_read(path: str, day: date) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"last_read": day.isoformat()}, f)
 
 
 def _crop(frame, crop, scale: float = 1.0):
@@ -269,26 +302,52 @@ class Navigation:
 class SquadronRanking:
     """When the next reading is queued, and the one navigation in flight.
 
-    One reading a day (operator, 2026-10-31): `queue_at`, local time, queues it,
-    and it stays queued until a lobby takes it, so a round being flown ends
-    first. Starting it books the next day's, read or not. Nothing is saved
-    between sessions: a session started after `queue_at` waits for the next
-    day's, which is what keeps restarts from reading twice in a day.
+    One reading a calendar day (operator, 2026-10-31): `queue_at`, local time,
+    queues it, and it stays queued until a lobby takes it, so a round being flown
+    ends first. A reading books the next day's; a navigation that read nothing is
+    tried again (`_book_next`).
+
+    `last_read_file` keeps the day of the last reading between sessions (ADR
+    170), so a day's reading no session has taken is owed to the next session
+    that day, from its first lobby, and a restart cannot read twice. Only a
+    reading counts, so a day a session gave up on is still owed to a new one.
+    Without the file (None), nothing carries over.
+
     While one is due or running, the lobby's PLAY click waits (`holds_play`);
     while one runs, the lobby quick-scan, the escape loop and the deferred exit
     wait too (`active`)."""
 
-    def __init__(self, enabled: bool, queue_at: str, now=datetime.now):
+    def __init__(self, enabled: bool, queue_at: str, now=datetime.now,
+                 last_read_file: "str | None" = None):
         self.enabled = enabled
         self.queue_at = datetime.strptime(queue_at, "%H:%M:%S").time()
         self.now = now
-        self.next_queue = self._after(now())
+        self.last_read_file = last_read_file
+        today = now().date()
+        read_today = last_read_file is not None and load_last_read(last_read_file) == today
+        self.next_queue = self._queue_on(today + timedelta(days=1) if read_today else today)
+        self._tries = 0
         self._active = threading.Event()
 
-    def _after(self, moment: datetime) -> datetime:
-        """The first `queue_at` after `moment`."""
-        today = datetime.combine(moment.date(), self.queue_at)
-        return today if moment < today else today + timedelta(days=1)
+    def _queue_on(self, day: date) -> datetime:
+        return datetime.combine(day, self.queue_at)
+
+    def _book_next(self, day: date, read: bool) -> str:
+        """Queue what follows a navigation started on `day`, and say what that is
+        for the log. Called while the navigation still counts as active: a moment
+        later, a navigation just finished would look due and could start another."""
+        self._tries += 1
+        tries = self._tries
+        if read or tries >= MAX_TRIES:
+            self._tries = 0
+            self.next_queue = self._queue_on(day + timedelta(days=1))
+            return f"try {tries} of {MAX_TRIES} did not read; next at {self.next_queue}"
+        if tries % TRIES_PER_LOBBY:
+            self.next_queue = self.now()
+            return f"try {tries} of {MAX_TRIES} did not read; due again now"
+        self.next_queue = self.now() + timedelta(seconds=RETRY_AFTER_S)
+        return (f"try {tries} of {MAX_TRIES} did not read; PLAY goes ahead and a lobby "
+                f"after {self.next_queue:%H:%M:%S} tries again")
 
     def due(self) -> bool:
         return self.enabled and not self._active.is_set() and self.now() >= self.next_queue
@@ -301,23 +360,32 @@ class SquadronRanking:
 
     def start(self, navigation: Navigation, on_done) -> threading.Thread:
         """Run the navigation on a thread of its own; `on_done(reading, why,
-        navigation)` gets its answer. The attempt counts from now, so a
-        navigation that gives up is not retried before the next day's. Active
-        first: `holds_play` must not drop for an instant between a reading being
-        due and its navigation running (2026-10-31 02:17:56, the quick-scan
-        clicked PLAY in that gap)."""
+        navigation)` gets its answer. Active first: `holds_play` must not drop for
+        an instant between a reading being due and its navigation running
+        (2026-10-31 02:17:56, the quick-scan clicked PLAY in that gap)."""
         self._active.set()
-        self.next_queue = self._after(self.now())
+        day = self.now().date()
 
         def _run():
+            reading, why = None, "the navigation failed"
             try:
                 reading, why = navigation.run()
             except Exception:
                 logger.exception("SQUADRON RANKING: the navigation failed")
-                reading, why = None, "the navigation failed"
             finally:
+                next_step = self._book_next(day, reading is not None)
                 self._active.clear()
             on_done(reading, why, navigation)
+            if reading is None:
+                logger.info("SQUADRON RANKING: %s (ADR 170)", next_step)
+            # After on_done: a day saved over a reading that was lost would stop
+            # the next session from taking it.
+            elif self.last_read_file is not None:
+                try:
+                    save_last_read(self.last_read_file, day)
+                except OSError as e:
+                    logger.warning("SQUADRON RANKING: could not save the day of this "
+                                   "reading (%s); a restart reads again", e)
 
         thread = threading.Thread(target=_run, daemon=True, name="squadron-ranking")
         thread.start()

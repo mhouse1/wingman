@@ -203,8 +203,12 @@ def _squadron_ranking(cfg, analyzer, live: bool, logger) -> SquadronRanking:
     if enabled and missing:
         logger.warning("SQUADRON RANKING: off — crops not calibrated: %s", ", ".join(missing))
     schedule = SquadronRanking(enabled and live and not missing, str(section.get(
-        "queue_at", schema_default("squadron_ranking.queue_at"))))
-    if schedule.enabled:
+        "queue_at", schema_default("squadron_ranking.queue_at"))),
+        last_read_file=squadron_ranking.LAST_READ_FILE)
+    if schedule.due():
+        logger.info("SQUADRON RANKING: today's reading is still owed; the first lobby "
+                    "takes it (ADR 170)")
+    elif schedule.enabled:
         logger.info("SQUADRON RANKING: next reading queues at %s (ADR 166)", schedule.next_queue)
     return schedule
 

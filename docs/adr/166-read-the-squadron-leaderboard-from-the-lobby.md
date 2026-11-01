@@ -59,7 +59,10 @@ the row only once the page title reads LEADERBOARDS. Each step waits up to
   - the guards' safe point and the deferred `z` exit.
 - A pending `z`, standby or exit ends the navigation at its next step, and none starts then.
 
-**D6. Schedule and switch.**
+**D6. Schedule and switch.** Superseded in part by
+[ADR 170](170-a-missed-squadron-reading-falls-to-the-next-session.md): the day of the last reading
+is now saved, a day no session has read falls to the next session that day, and a navigation that
+read nothing is tried again.
 - The setting is `squadron_ranking.enabled`. It ships `false` and is turned on per machine in
   `config.local.yaml`, like the score dashboard.
 - One reading a day at most (operator, 2026-10-31). At `squadron_ranking.queue_at`, 09:38:30 local
@@ -126,8 +129,8 @@ the row only once the page title reads LEADERBOARDS. Each step waits up to
   - no match start is missed because of it.
 - **V3, the trip's cost.** The time from `opening the squadron leaderboard` to the PLAY click,
   measured from the log.
-- **V4, the open menu.** Not yet seen: whether a second click on the menu button shuts the menu
-  (D4).
+- **V4, the open menu.** Whether a second click on the menu button shuts the menu (D4). Met
+  2026-11-01 11:03:05 ([ADR 170](170-a-missed-squadron-reading-falls-to-the-next-session.md)).
 - **V5, the dashboard.** The readings show on the two squadron charts and on Squadron now.
 - **V6, the daily schedule.** Not yet seen live. The start of a session logs `next reading queues
   at`, naming the next 09:38:30. The first `opening the squadron leaderboard` after it comes at the

@@ -367,7 +367,9 @@ Wingman flies in Mobius Squadron, tag `[ISAF]` ([Job Aid 013](../job-aids/013-jo
   - run only in the lobby between rounds: not during matchmaking, in a party or with an invite
     open, and not when a stop is pending;
   - run at most once a day: `squadron_ranking.queue_at` (09:38:30 local time, operator
-    2026-10-31) queues a reading, and the next lobby takes it;
+    2026-10-31) queues a reading, and the next lobby takes it. A try that reads nothing is tried
+    again, and a day with no reading yet falls to the next session that day
+    ([ADR 170](../adr/170-a-missed-squadron-reading-falls-to-the-next-session.md));
   - return to the lobby every time, by the screens' own controls. It must never press ESC, which
     opens Exit to Desktop on the lobby;
   - hold off wingman's stall handling while it runs: the lobby quick-scan, stall recovery (which
