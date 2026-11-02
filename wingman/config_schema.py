@@ -375,15 +375,21 @@ SCHEMA = Section(
             "coarse_cooldown_s": SECONDS,
             # ADR 171: mission_j20's rearm cycle
             "resupply_return": Leaf(types=(bool,), default=True),
+            "descent_alt_m": Leaf(types=NUMBER, minimum=0, default=4000),
             "descent_angle_deg": Leaf(types=NUMBER, minimum=-90, maximum=0, default=-20),
             "descent_tolerance_deg": Leaf(types=NUMBER, minimum=0, default=5),
             "descent_pulse_s": Leaf(types=NUMBER, minimum=0, default=0.6),
             "descent_max_s": Leaf(types=NUMBER, minimum=0, default=90.0),
             "descent_min_pull_kph": Leaf(types=NUMBER, minimum=0, default=450),
+            "descent_observe_s": Leaf(types=NUMBER, minimum=0, default=5.0),
             "resume_alt_m": Leaf(types=NUMBER, minimum=0, default=4000),
             "climb_back_max_s": Leaf(types=NUMBER, minimum=0, default=90.0),
             "ceiling_alt_m": Leaf(types=NUMBER, minimum=0, default=5500),
             "ceiling_path_deg": Leaf(types=NUMBER, minimum=0, default=5),
+            "climb_max_pitch_deg": Leaf(types=NUMBER, minimum=0, maximum=90, default=35),
+            "climb_max_rate": Leaf(types=NUMBER, minimum=0, default=250),
+            "climb_pulse_s": Leaf(types=NUMBER, minimum=0, default=0.5),
+            "ceiling_pulse_s": Leaf(types=NUMBER, minimum=0, default=0.4),
         }),
 
         # ADR 144: mission_acs, ACS_MISSION (mission_su30 until ADR 160)

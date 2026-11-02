@@ -746,3 +746,22 @@ def test_the_level_off_waits_for_the_speed_too():
 
 def test_an_unknown_speed_does_not_hold_the_pull_back():
     assert _descent().update(100.0, 6000.0, -60.0, 1.0, None) == "up"
+
+
+def test_a_pulse_waits_out_the_lag_of_the_last():
+    """05:21:31: five pulses in 6 s at 2,035 KPH, the path still reading +17 to +24
+    deg, then 4,000 m lost."""
+    descent = ControlledDescent(target_alt_m=4000, angle_deg=-20, tolerance_deg=5,
+                                level_angle_deg=-10, max_s=90.0, now=100.0, min_gap_s=5.0)
+    assert descent.update(100.0, 5000.0, +18.0, 1.0) == "down"
+    assert descent.update(101.5, 4900.0, +17.0, 2.0) == "hold"
+    assert descent.update(103.0, 4800.0, +24.0, 3.0) == "hold"
+    assert descent.update(105.1, 4700.0, +10.0, 4.0) == "down"
+
+
+def test_the_gap_holds_the_level_off_too():
+    descent = ControlledDescent(target_alt_m=4000, angle_deg=-20, tolerance_deg=5,
+                                level_angle_deg=-10, max_s=90.0, now=100.0, min_gap_s=5.0)
+    assert descent.update(100.0, 3900.0, -30.0, 1.0) == "up"
+    assert descent.update(102.0, 3800.0, -30.0, 2.0) == "hold"
+    assert descent.update(105.0, 3700.0, -25.0, 3.0) == "up"

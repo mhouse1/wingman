@@ -244,13 +244,15 @@ Apart from `o` (acs), no mission has a hotkey to itself: the jet's profile, else
 the no-prior-mission restart all launch it through `_start_default_mission()`.
 
 **The J-20's cycle** (ADR 171). While `mission_j20` is in play the pursuit starts
-with a controlled descent to `acs_mission.climb_alt_m`, levelling at
-`nose_angle_deg`, with nothing else steering, and is then the ACS pursuit. It ends
+with a controlled descent to `j20_mission.descent_alt_m` (4000), levelling at
+acs's `nose_angle_deg`; the pitch is the descent's and the roll ACS's. It is then the
+ACS pursuit. It ends
 at the confirmed rearm, after its climb-out. `restart_last_mission(climb_back=True)`
 then holds the search-and-destroy loops off until `resume_alt_m`, while the tree
 climbs. No other mission's pursuit changes. While search and destroy runs, Engage
-steers only with the padlock confirmed off, and above `ceiling_alt_m` the mission
-ends a routine climb and holds the nose down.
+steers only with the padlock confirmed off, a routine climb has limits of its own
+(`climb_max_pitch_deg`, `climb_max_rate`, `climb_pulse_s`), and above `ceiling_alt_m`
+the mission ends a routine climb and pulses the nose down.
 
 **Eject and dive** (`eject_and_dive`, ADR 069):
 

@@ -412,7 +412,10 @@ class ControlledDescent:
 
     The flight-path angle lands about every 3 s, so this asks for one pulse per new
     sample and never a hold: a held key overshoots on a lagging reading (ADR
-    068/069). With no fresh altitude it presses nothing and waits, up to `max_s`:
+    068/069). And no sooner than `min_gap_s` after the last: at 2,035 KPH on
+    2026-11-02 05:21:31 five pulses in 6 s all read +17 to +24 deg, and the aircraft
+    lost 4,000 m in the next 10 s. With no fresh altitude it presses nothing and
+    waits, up to `max_s`:
     the chase it would hand to is what a blind aircraft at 6000 m must not start.
 
     Nothing pulls up under `min_pull_kph`. Slow, a steep path means a stalling wing,
@@ -426,12 +429,14 @@ class ControlledDescent:
 
     def __init__(self, *, target_alt_m: float, angle_deg: float, tolerance_deg: float,
                  level_angle_deg: float, max_s: float, now: float,
-                 min_pull_kph: float = 0.0) -> None:
+                 min_pull_kph: float = 0.0, min_gap_s: float = 0.0) -> None:
         self.target_alt_m = float(target_alt_m)
         self.angle_deg = float(angle_deg)
         self.tolerance_deg = float(tolerance_deg)
         self.level_angle_deg = float(level_angle_deg)
         self.min_pull_kph = float(min_pull_kph)
+        self.min_gap_s = float(min_gap_s)
+        self._last_pulse_at: "float | None" = None
         self.pulls_withheld = 0
         self._deadline = now + float(max_s)
         self._sample_ts: "float | None" = None
@@ -454,16 +459,20 @@ class ControlledDescent:
         if self._levelling and angle >= self.level_angle_deg:
             self.ended = "level at %.0f m" % alt
             return None
+        if self._last_pulse_at is not None and now - self._last_pulse_at < self.min_gap_s:
+            return "hold"
         if sample_ts == self._sample_ts:
             return "hold"
         self._sample_ts = sample_ts
         if not self._levelling and angle > self.angle_deg:
+            self._last_pulse_at = now
             return "down"
         if not self._levelling and angle >= self.angle_deg - self.tolerance_deg:
             return "hold"
         if speed_kph is not None and speed_kph < self.min_pull_kph:
             self.pulls_withheld += 1
             return "hold"
+        self._last_pulse_at = now
         return "up"
 
 

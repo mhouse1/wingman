@@ -291,6 +291,19 @@ def _side_of(err: "float | None") -> "str | None":
     return "left" if err < 0 else "right"
 
 
+def _down_pulse_s(angle: "float | None", limit: "float | None", routine_s: float,
+                  configured_s: float) -> float:
+    """A routine climb's nose-down pulse, sized to how far past the pitch limit
+    the path is (ADR 171): `routine_s` at the limit, one more `routine_s` per 15
+    deg past it, never past the configured pulse. Under its own limits the J-20
+    needed both ends: 1.5 s pulses stacked from +33 to -24 deg (20:06:55), and 0.5
+    s ones left it at +72 deg and coasting to a stall (04:17:19). Unknown angle or
+    limit: `routine_s`. Where routine and configured are the same, so is this."""
+    if angle is None or limit is None or angle <= limit:
+        return routine_s
+    return min(max(configured_s, routine_s), routine_s * (1.0 + (angle - limit) / 15.0))
+
+
 def _path_goal(resupply_marker, priority_marker, priority_kind, target_obs):
     """What the pursuit flies at this cycle, for the clear-path planner (Code
     Review 019 step 3d): the marker that has the steering, else the tracked
@@ -1224,11 +1237,20 @@ class Controller:
         self._j20_descent_tolerance_deg = float(_j20_get("descent_tolerance_deg"))
         self._j20_descent_pulse_s = float(_j20_get("descent_pulse_s"))
         self._j20_descent_max_s = float(_j20_get("descent_max_s"))
+        self._j20_descent_alt_m = float(_j20_get("descent_alt_m"))
         self._j20_descent_min_pull_kph = float(_j20_get("descent_min_pull_kph"))
+        self._j20_descent_observe_s = float(_j20_get("descent_observe_s"))
         self._j20_resume_alt_m = float(_j20_get("resume_alt_m"))
         self._j20_ceiling_alt_m = float(_j20_get("ceiling_alt_m"))
         self._j20_ceiling_path_deg = float(_j20_get("ceiling_path_deg"))
+        self._j20_ceiling_pulse_s = float(_j20_get("ceiling_pulse_s"))
         self._j20_ceiling_pushing = False
+        self._j20_ceiling_sample_ts: "float | None" = None
+        # ADR 171: what a routine climb may do while this mission is in play. A
+        # hard emergency keeps the configured limits: see `_climb_limits_in_play`.
+        self._own_climb_limits = {"j20": (float(_j20_get("climb_max_pitch_deg")),
+                                          float(_j20_get("climb_max_rate")),
+                                          float(_j20_get("climb_pulse_s")))}
         self._j20_climb_back_max_s = float(_j20_get("climb_back_max_s"))
         _acs = getattr(config, "acs", None) or {}
         self._acs_climb_alt_m = float(_acs.get("climb_alt_m", 3000))
@@ -4251,9 +4273,16 @@ class Controller:
         `angle-none` (no fresh angle, when a limit is set or
         require_fresh_angle is on), `alt` (the altitude
         push_floor_lookahead_s ahead is below push_floor_m), `alt-none` (a
-        floor is set and there is no fresh altitude), or `-`."""
+        floor is set and there is no fresh altitude), `descent` (ADR 171: a
+        controlled descent has the push), or `-`."""
         if guard:
             return "guard"
+        # ADR 171: the push is the descent's, so the law turns toward the icon's
+        # side instead. Left with "down", it held the wings level for a push it
+        # never got: all 332 icon ticks, an enemy at 130 deg, and the aircraft
+        # flew straight out of the arena (2026-11-02 05:26:32 to 05:27:47).
+        if self._descent_flying:
+            return "descent"
         floor = self._icon_cfg.push_floor_m
         if floor is not None:
             alt = self._read_floor_altitude()
@@ -4453,21 +4482,22 @@ class Controller:
         return snap if snap is not None and snap.altitude_fresh() else None
 
     def _start_descent(self) -> "ControlledDescent | None":
-        """The way down to acs's level-off, or None for an aircraft already there.
+        """The way down to ``descent_alt_m``, or None for an aircraft already there.
         An unknown altitude gets the descent: it holds off the chase until it knows."""
         snap = self._telemetry_snapshot()
         if (snap is not None and snap.altitude.stable_value is not None
-                and snap.altitude.stable_value <= self._acs_climb_alt_m):
+                and snap.altitude.stable_value <= self._j20_descent_alt_m):
             return None
-        logger.info("DESCENT: to %.0f m at %+.0f deg, wings level, then level at %+.0f deg "
-                    "(ADR 171)", self._acs_climb_alt_m, self._j20_descent_angle_deg,
+        logger.info("DESCENT: to %.0f m at %+.0f deg, the roll ACS's, then level at %+.0f deg "
+                    "(ADR 171)", self._j20_descent_alt_m, self._j20_descent_angle_deg,
                     self._acs_nose_angle_deg)
         return ControlledDescent(
-            target_alt_m=self._acs_climb_alt_m, angle_deg=self._j20_descent_angle_deg,
+            target_alt_m=self._j20_descent_alt_m, angle_deg=self._j20_descent_angle_deg,
             tolerance_deg=self._j20_descent_tolerance_deg,
             level_angle_deg=self._acs_nose_angle_deg,
             max_s=self._j20_descent_max_s, now=time.time(),
-            min_pull_kph=self._j20_descent_min_pull_kph)
+            min_pull_kph=self._j20_descent_min_pull_kph,
+            min_gap_s=self._j20_descent_observe_s)
 
     def _descent_step(self, descent: ControlledDescent) -> "str | None":
         """`descent.update` on this tick's telemetry."""
@@ -4638,6 +4668,7 @@ class Controller:
             # in play for this pursuit.
             j20_cycle = self._j20_cycle_in_play()
             descent: "ControlledDescent | None" = None
+            descent_pull_off = False   # the descent's turn has let its pull go
             handback_due = False   # rearmed, waiting out the climb-out
             handback = False       # the rearm ended the pursuit
             try:
@@ -4789,11 +4820,13 @@ class Controller:
                                     "steering resumes", yield_owner)
                             yield_owner = owner
                             yielding = owner is not None
-                        # ADR 171: above where ACS flies, the descent is the only
-                        # steering. A target or a marker below the nose is what took
-                        # this aircraft to 2,978 KPH (2026-11-01 16:56:01), so
-                        # nothing below may steer until it is level; firing carries
-                        # on. A yield comes first: a recovery or an evade outranks it.
+                        # ADR 171: above where ACS flies, the descent has the pitch.
+                        # A target or a marker below the nose is what took this
+                        # aircraft to 2,978 KPH (2026-11-01 16:56:01), so nothing may
+                        # pull it down until it is level. The roll stays ACS's, at
+                        # the target and the ring icons: held level for 60 s the
+                        # aircraft flew out of the arena (2026-11-02 04:51:52). A
+                        # yield comes first: a recovery or an evade outranks it.
                         descent_action = None
                         if descent is not None and not yielding and not rearm_climb_until:
                             descent_action = self._descent_step(descent)
@@ -5043,8 +5076,7 @@ class Controller:
                             logger.info("%s: out of view for 2.0s", priority_name)
                             priority_state = None
                         control_visible = (bool(visible) and not resupply_control
-                                           and not resupply_search and not priority_control
-                                           and not steering_held)
+                                           and not resupply_search and not priority_control)
                         # What the crash recovery waits on: the thing this cycle
                         # steers at, when it can see it. A control point or the
                         # crown with the steering counts as the resupply marker
@@ -5057,7 +5089,7 @@ class Controller:
                             "resupply marker" if resupply_control
                             else priority_hud.lower()
                             if priority_control and not priority_marker_stale
-                            else "target" if control_visible else None)
+                            else "target" if control_visible and not steering_held else None)
                         icon_state = None
                         # In resupply mode the icon law runs on the resupply pin:
                         # no lock to wait out, so no last-seen time either.
@@ -5188,11 +5220,7 @@ class Controller:
                                     seen_at=picture_ts)
                         elif (self._sustained_hold_enabled and not yielding
                             and not resupply_control and not priority_control):
-                            if descent_action is not None:
-                                # Wings level: a nose-down pulse in a bank turns
-                                # the aircraft, and the search roll would spiral it.
-                                self.release_roll_hold(why="descent")
-                            elif wings_level:
+                            if wings_level:
                                 # Step 3: the law's roll ("turn", or "up" with a
                                 # side) when actuate_turn is on; otherwise, and for
                                 # "down" or the hold rung, the wings stay level.
@@ -5215,6 +5243,10 @@ class Controller:
                                         icon_state["rung"],
                                         "bank %s (HLDD 015 step 3)" % icon_roll if icon_roll
                                         else "wings level (HLDD 015 step 2a)"))
+                            elif descent_action is not None:
+                                # ADR 171: with nothing to steer at, wings level: the
+                                # search roll under a pushed nose is a spiral.
+                                self.release_roll_hold(why="descent")
                             elif (not resupply_search
                                   and self._search_climb_active(search_seen_ts, search_seen_err)):
                                 search_climbing = True
@@ -5252,7 +5284,7 @@ class Controller:
                                     error_y, ignore_cancel=True,
                                     sustained_hold=self._sustained_hold_enabled,
                                     seen_at=picture_ts, down_allowed=not guard)
-                        elif control_visible and err_y is not None:
+                        elif control_visible and err_y is not None and not steering_held:
                             if not yielding:
                                 if err_y > 0 and guard:
                                     self.release_pitch_hold(
@@ -5263,7 +5295,11 @@ class Controller:
                                         sustained_hold=self._sustained_hold_enabled,
                                         seen_at=picture_ts, down_allowed=not guard)
                         elif self._sustained_hold_enabled and not yielding:
-                            if descent_action is not None:
+                            # ADR 171: the descent has the pitch, except while the icon
+                            # law turns: a bank without its pull does not turn.
+                            icon_turning = (wings_level and self._icon_cfg.actuate_turn
+                                            and icon_intent[0] == "turn")
+                            if descent_action is not None and not icon_turning:
                                 self.release_pitch_hold(why="descent")
                                 if descent_action == "down" and not guard:
                                     self.nose_down(hold_seconds=self._j20_descent_pulse_s,
@@ -5288,6 +5324,21 @@ class Controller:
                                     desired = "up"      # bank and pull (step 3)
                                 if desired == "down" and withheld != "-":
                                     desired = None
+                                # ADR 171: in the descent the turn's pull follows the
+                                # path, let go at the level-off angle and taken again
+                                # at the descent's; no reading, no pull. Held, it was
+                                # a zoom: -20 to +51 deg in 5 s and 1,250 m up, and
+                                # the descent ran out of time at 5,548 m (2026-11-02
+                                # 05:54:58).
+                                if desired == "up" and descent_action is not None:
+                                    angle = self._telemetry_path_angle_deg()
+                                    if angle is None or angle >= self._acs_nose_angle_deg:
+                                        descent_pull_off = True
+                                    elif angle <= self._j20_descent_angle_deg:
+                                        descent_pull_off = False
+                                    if descent_pull_off:
+                                        desired = None
+                                        why += ", pull let go in the descent"
                                 self.hold_pitch_for_icon(desired, why)
                                 icon_state["pitch"] = desired or "-"
                             elif search_climbing:
@@ -6512,6 +6563,17 @@ class Controller:
             # rotated and the range did not follow".
             samples = []
             _last_ts = [None]
+            # ADR 171: on a jet that goes vertical under a held pull the turn lets
+            # the pull go at the mission's pitch limit and takes it again 10 deg
+            # under it. The roll carries on. None for every other mission.
+            # The limit is an addition to a safety tactic: if it cannot be read,
+            # the turn flies with its full pull rather than not at all.
+            try:
+                pull_limit = self._boundary_pull_limit()
+            except Exception as exc:
+                log_suppressed(logger, "boundary_pull_limit", exc)
+                pull_limit = None
+            pulling = True
             try:
                 # Stopping the climb first: two writers on pitch with different
                 # targets is the interaction ADR 107 D8 refuses to ship.
@@ -6546,6 +6608,19 @@ class Controller:
                             samples.append((_snap.pitch_angle_deg(),
                                             getattr(_snap.speed, "value", None),
                                             _snap.altitude.stable_value))
+                            _angle = samples[-1][0]
+                            if pull_limit is not None and _angle is not None:
+                                if pulling and _angle >= pull_limit:
+                                    self._climb_key(NOSE_UP_KEY, press=False,
+                                                    action="boundary")
+                                    pulling = False
+                                    logger.info("Controller: boundary turn — path %+.0f deg "
+                                                "at the pitch limit, pull let go (ADR 171)",
+                                                _angle)
+                                elif not pulling and _angle < pull_limit - 10.0:
+                                    self._climb_key(NOSE_UP_KEY, press=True,
+                                                    action="boundary")
+                                    pulling = True
                     except Exception:
                         pass          # instrumentation never ends a manoeuvre
                     if time.time() - started >= cap_s:
@@ -6714,6 +6789,40 @@ class Controller:
 
         self._climb_thread = threading.Thread(target=_run, daemon=True)
         self._climb_thread.start()
+
+    def _climb_limits_in_play(self) -> tuple:
+        """(max_pitch_deg, max_rate, pulse_s) for a routine climb by the mission in
+        play.
+
+        ADR 171: the configured 80 deg, 450 m/s and 1.5 s were set on lesser jets.
+        The J-20 goes vertical inside them, one pulse took it to +66 deg (20:08:18),
+        and it coasts from there to 7,000 to 9,500 m and a stall. A hard emergency
+        keeps the configured limits whatever the mission: a pull-up from terrain
+        must not be capped at a cruise climb. The lock has a timeout, as for the
+        altitude floor: the configured limits for one climb beat a stalled hold.
+        """
+        configured = (self._climb_max_pitch_deg, self._climb_max_rate, self._climb_pulse_s)
+        if not self._last_mission_lock.acquire(timeout=1.0):
+            return configured
+        try:
+            return self._own_climb_limits.get(self._last_mission, configured)
+        finally:
+            self._last_mission_lock.release()
+
+    def _boundary_pull_limit(self) -> "float | None":
+        """The pitch a boundary turn's pull may reach, for a mission with climb
+        limits of its own (ADR 171), else None.
+
+        On the J-20 the held pull went vertical: 04:06:01, nose +0 to +90 deg in a
+        9.1 s turn, 3,364 m to 5,413 m, and the aircraft was lost 5 s after it.
+        """
+        if not self._last_mission_lock.acquire(timeout=1.0):
+            return None
+        try:
+            own = self._own_climb_limits.get(self._last_mission)
+        finally:
+            self._last_mission_lock.release()
+        return None if own is None else float(own[0])
 
     def _climb_waits_for_target(self, emergency: bool) -> bool:
         """True when a climb asked for between missions waits for the target
@@ -7409,6 +7518,9 @@ class Controller:
         # hold stays RUNNING. Before D9 this hold only ever saw the value
         # frozen into the `emergency` parameter at thread start.
         emergency_now = bool(emergency)
+        routine_max_pitch, routine_max_rate, routine_pulse_s = self._climb_limits_in_play()
+        own_limits = ((routine_max_pitch, routine_max_rate, routine_pulse_s)
+                      != (self._climb_max_pitch_deg, self._climb_max_rate, self._climb_pulse_s))
         # ADR 148: when a hard-emergency hold first finds itself in GAME_BATTLE_EJECT
         # with a pursuit flying, this is the time it started flying through it. None
         # until then. Once set the hold stays in that mode until it finishes, the
@@ -7433,9 +7545,10 @@ class Controller:
 
             Falls back to the current angle when no rate is known yet.
             """
-            if self._climb_max_pitch_deg is None or last_angle is None:
+            limit = self._climb_max_pitch_deg if emergency_now else routine_max_pitch
+            if limit is None or last_angle is None:
                 return False
-            ceiling = float(self._climb_max_pitch_deg)
+            ceiling = float(limit)
             if last_angle >= ceiling:
                 return True
             if pitch_rate is None or pitch_rate <= 0:
@@ -7805,12 +7918,20 @@ class Controller:
                         # exactly when it is needed most.
                         if not (alt is not None and alt >= exit_alt):
                             pitch_held = NOSE_UP_KEY
-                    elif (self._climb_max_rate is not None
-                            and last_rate > float(self._climb_max_rate)):
+                    elif last_rate > float(
+                            (self._climb_max_rate if emergency_now else routine_max_rate)
+                            or float("inf")):
                         pitch_held = NOSE_DOWN_KEY
                     if pitch_held is not None:
                         self._climb_key(pitch_held, press=True)
-                        pulse_until = now + self._climb_pulse_s
+                        if emergency_now:
+                            pulse_s = self._climb_pulse_s
+                        elif pitch_held == NOSE_DOWN_KEY:
+                            pulse_s = _down_pulse_s(last_angle, routine_max_pitch,
+                                                    routine_pulse_s, self._climb_pulse_s)
+                        else:
+                            pulse_s = routine_pulse_s
+                        pulse_until = now + pulse_s
                         logger.debug(
                             "Controller: climb pitch pulse (%s, rate=%s, angle=%s)",
                             "up" if pitch_held == NOSE_UP_KEY else "down",
@@ -7850,6 +7971,16 @@ class Controller:
                         "misread, held", _new_angle,
                         getattr(alt_signal, "rate", None),
                         "n/a" if prev_angle is None else f"{prev_angle:+.0f} deg")
+                    continue
+                # ADR 171: a stalled altitude reading gives a rate of exactly 0, and
+                # the law takes that for "not climbing" and pulls up. On the J-20,
+                # which climbs at 300 m/s, that pull went vertical twice
+                # (20:07:11, 04:22:52, "up, rate=0.0, angle=0.0"). A zero straight
+                # after a climbing read is skipped like a misread.
+                if (own_limits and getattr(alt_signal, "rate", None) == 0.0
+                        and last_rate is not None and last_rate > self._climb_min_rate):
+                    logger.debug("Controller: climb — rate 0 straight after %+.0f m/s is a "
+                                 "stalled reading, held", last_rate)
                     continue
                 last_rate = getattr(alt_signal, "rate", None)
                 # ADR 086 d7: pitch rate across consecutive angle samples.
@@ -8224,7 +8355,6 @@ class Controller:
                 logger.exception("Controller: mission_j20 failed")
                 self.stop_search_and_destroy_loop()
             finally:
-                self._j20_ceiling_release("mission over")
                 self._mission_complete.set()
                 if self._mission_lock.locked():
                     self._mission_lock.release()
@@ -8235,17 +8365,18 @@ class Controller:
         self._await_mission("mission_j20", mission_a)
 
     def _j20_ceiling_tick(self) -> None:
-        """Hold the nose down above ``ceiling_alt_m`` while the aircraft still rises
+        """Bring the nose down above ``ceiling_alt_m`` while the aircraft still rises
         (ADR 171). One mission tick.
 
         The J-20 coasts out of its climb: of the climbs meant to end at 5000 m on
         2026-11-01, the late ones let go at up to 7,011 m and +757 m/s and went on to
-        8,114 m, 9,395 m at most, and stalled at the top, 151 to 278 KPH. It then
-        falls: both high pursuits began within 4 s of a stall warning, and the path
-        was past -65 deg within 15 s. The climb itself is shared, so this ends a
-        routine one here and pushes over what it leaves. Held, not pulsed: at those
-        speeds the nose moves 3 to 5 deg/s. Nothing is pressed while another tactic
-        owns the axis or on a stale reading (rules 6 and 7).
+        8,114 m, 9,395 m at most, and stalled at the top, 127 to 290 KPH. It then
+        falls. This ends a routine climb there, and pulses the nose down: one
+        ``ceiling_pulse_s`` per new sample, never a hold. All four holds of the first
+        version overshot on the lagging path, one of them 4.5 s from +8 deg, and each
+        ended in a dive, -269 to -435 m/s (20:12:12: -58 deg at 1,614 KPH). Nothing is
+        pressed while another tactic owns the axis or on a stale reading (rules 6
+        and 7).
         """
         snap = self._telemetry_snapshot()
         alt = None if snap is None else snap.altitude.stable_value
@@ -8259,22 +8390,19 @@ class Controller:
             logger.info("Controller: mission_j20 - over the ceiling at %.0f m in a climb, "
                         "ending it (ADR 171)", alt)
             self._climb_stop.set()
-        push = over and not (self.is_climbing() or self.is_spawn_guarding()
-                             or self.is_missile_evading() or self.is_boundary_turning())
-        if not push:
-            self._j20_ceiling_release("under the ceiling or level"
-                                      if snap is not None else "no fresh altitude")
+        if not over:
+            self._j20_ceiling_pushing = False
             return
+        if (self.is_climbing() or self.is_spawn_guarding() or self.is_missile_evading()
+                or self.is_boundary_turning()
+                or snap.altitude.ts == self._j20_ceiling_sample_ts):
+            return
+        self._j20_ceiling_sample_ts = snap.altitude.ts
         if not self._j20_ceiling_pushing:
             logger.info("Controller: mission_j20 - over the ceiling at %.0f m, path %+.0f "
                         "deg: nose down until level (ADR 171)", alt, angle)
             self._j20_ceiling_pushing = True
-        self.hold_pitch_for_icon("down", "j20 ceiling")
-
-    def _j20_ceiling_release(self, why: str) -> None:
-        if self._j20_ceiling_pushing:
-            self._j20_ceiling_pushing = False
-            self.release_pitch_hold(why="j20 ceiling: " + why)
+        self.nose_down(hold_seconds=self._j20_ceiling_pulse_s, block=False)
 
     def _j20_climb_back(self) -> bool:
         """After a rearm: the primary rack, then up to ``resume_alt_m`` (ADR 171).

@@ -243,6 +243,12 @@ def register_hotkeys(ctrl, keyboard_module) -> None:
                 if now - ctrl._last_finish_round_press < 0.5:
                     return                      # debounce key-repeat
                 ctrl._last_finish_round_press = now
+                # Four stops in a row on 2026-11-01 came in matchmaking, and the
+                # log could not say whose hand they were.
+                logger.info("Controller: '%s' received from display %s (injected=%s, "
+                            "state=%#x)", FINISH_ROUND_THEN_EXIT,
+                            getattr(_e, "display", None),
+                            getattr(_e, "is_injected", None), getattr(_e, "state", 0))
                 if ctrl._operator_stop_event.is_set():
                     # ADR 169: Backspace already ended wingman, so nothing is
                     # left to finish and nothing is left to read the screen.

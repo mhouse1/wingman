@@ -111,3 +111,21 @@ def test_main_registers_them_straight_after_construction():
     registered = src.index("ctrl.register_hotkeys()", built)
     next_wiring = src.index("ctrl.set_target_tracker(", built)
     assert registered < next_wiring
+
+
+def test_the_stop_key_says_where_it_came_from(monkeypatch, caplog):
+    """Four stops in a row on 2026-11-01 came in matchmaking, and the log could not
+    say whose hand they were."""
+    from wingman.hotkeys import register_hotkeys
+    from wingman.input_linux import _XKeyEvent
+    from wingman.keybindings import FINISH_ROUND_THEN_EXIT
+    caplog.set_level("INFO")
+    keyboard = _RecordingKeyboard()
+    ctrl = _ctrl(monkeypatch, keyboard)
+    register_hotkeys(ctrl, keyboard)
+
+    keyboard.pressed_keys[FINISH_ROUND_THEN_EXIT](_XKeyEvent(
+        name=FINISH_ROUND_THEN_EXIT, is_injected=False, display=":3", state=0))
+
+    assert "Controller: 'z' received from display :3 (injected=False, state=0x0)" in [
+        r.getMessage() for r in caplog.records]

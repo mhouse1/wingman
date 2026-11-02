@@ -20,10 +20,11 @@ import pytest
 import yaml
 
 import wingman.controller as controller_module
-from tests.test_mission_acs import _Analyzer, _Tracker, _drain, _wait
+from tests.test_mission_acs import _Analyzer, _Tracker, _drain, _snap, _wait
 from tests.test_mission_acs import _make_ctrl as _make_mission_ctrl
 from tests.test_mission_acs import _restart_ctrl
 from tests.test_pursuit_mode import (
+    _MISS,
     _CaptureStub,
     _ScriptedTracker,
     _TelemetryAnalyzer,
@@ -200,18 +201,19 @@ class _Flying(_TelemetryAnalyzer):
 
 
 def _pursuit(monkeypatch, caplog, analyzer, *, mission="j20", marker=None, tracker=None,
-             resupply_return=True, descent_max_s=90.0, start=True, **kwargs):
+             resupply_return=True, descent_max_s=90.0, start=True, capture=None, **kwargs):
     """A real pursuit on the secondary, with a target low in view unless a test says
     otherwise. Returns the controller, still running: see _end."""
     caplog.set_level("DEBUG", logger="wingman.controller")
     monkeypatch.setattr(Controller, "_search_look_down", lambda self: False)
     monkeypatch.setattr(controller_module, "find_resupply_marker",
                         lambda _frame, **_kw: marker)
-    ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, capture=_CaptureStub(),
+    ctrl = _make_ctrl(monkeypatch, analyzer=analyzer, capture=capture or _CaptureStub(),
                       pursuit_enabled=True, pursuit_max_duration_s=0.0,
                       empty_confirm_reads=1, resupply_priority_actuate=True,
                       sustained_hold_enabled=True, **kwargs)
     ctrl._j20_descent_pulse_s = 0.01
+    ctrl._j20_descent_observe_s = 0.0
     ctrl._j20_resupply_return = resupply_return
     ctrl._j20_descent_max_s = descent_max_s
     ctrl.set_target_tracker(tracker or _ScriptedTracker([_LOW]))
@@ -247,19 +249,112 @@ def test_a_target_below_the_nose_is_not_chased_down_from_altitude(monkeypatch, c
     keys = _fly_for(ctrl)
     messages = _messages(caplog)
 
-    assert ("DESCENT: to 3000 m at -20 deg, wings level, then level at -10 deg (ADR 171)"
+    assert ("DESCENT: to 4000 m at -20 deg, the roll ACS's, then level at -10 deg (ADR 171)"
             in messages)
     assert ("key_press", NOSE_DOWN_KEY) in keys
     assert _target_steering(messages) == []
 
 
-def test_the_descent_holds_the_wings_level(monkeypatch, caplog):
+def test_the_descent_turns_toward_a_target_off_the_nose(monkeypatch, caplog):
+    """Operator, 2026-11-02, on the 04:51:52 screenshot: out of the arena, an enemy
+    on the ring, and nothing steering. "it should have been in normal acs mode where
+    it uses the ring icons to steer towards target". The roll is ACS's; only the
+    pitch is the descent's."""
     tracker = _ScriptedTracker([dict(_LOW, error_norm=0.8)])
     ctrl = _pursuit(monkeypatch, caplog, _Flying(alt=6000), tracker=tracker)
+    keys = _fly_for(ctrl)
+    messages = _messages(caplog)
+
+    assert ("key_press", ROLL_RIGHT_KEY) in keys
+    assert not any(m.startswith("HOLD[pitch]") and "target err" in m for m in messages), (
+        "the target must not pull the nose down")
+
+
+def test_the_descent_banks_toward_a_ring_icon(monkeypatch, caplog):
+    """No target in view, an enemy's icon on the ring to the left: the icon law's
+    bank, as in any ACS pursuit."""
+    from tests.test_pursuit_mode import _upper_left
+    ctrl = _pursuit(monkeypatch, caplog, _Flying(alt=6000), capture=_upper_left(),
+                    tracker=_ScriptedTracker([_MISS]),
+                    icon_steering={"enabled": True, "wings_level": True,
+                                   "actuate_pitch": True, "actuate_turn": True})
+    keys = _fly_for(ctrl, 1.2)
+
+    assert ("key_press", ROLL_LEFT_KEY) in keys
+
+
+_ICON_LAW = {"enabled": True, "wings_level": True, "actuate_pitch": True,
+             "actuate_turn": True}
+
+
+def _icon_below_left_pursuit(monkeypatch, caplog, mission):
+    """No target in view, an enemy's icon at 130 deg: below and to the left."""
+    from tests.test_pursuit_mode import _SyntheticIconCapture
+    return _pursuit(monkeypatch, caplog, _Flying(alt=6000), mission=mission,
+                    capture=_SyntheticIconCapture(130.0),
+                    tracker=_ScriptedTracker([_MISS]), icon_steering=_ICON_LAW)
+
+
+def test_the_descent_turns_toward_an_icon_below_and_to_the_side(monkeypatch, caplog):
+    """2026-11-02 05:26:32 to 05:27:47: an enemy's icon at 130 deg for the whole
+    descent, and the aircraft flew straight out of the arena (RETURN TO BATTLE in
+    the 05:27:41 screenshot). Below the horizon the law pushes with the wings level,
+    and the push is the descent's: all 332 icon ticks held the wings level. The
+    refused push turns toward the icon's side, as it does under the dive guard."""
+    ctrl = _icon_below_left_pursuit(monkeypatch, caplog, "j20")
+    keys = _fly_for(ctrl, 1.2)
+
+    assert ("key_press", ROLL_LEFT_KEY) in keys
+    assert any("withheld=descent" in m for m in _messages(caplog))
+
+
+def _descent_turn(monkeypatch, caplog, angle):
+    """A descent at `angle` with an enemy's icon to the left: the turn case."""
+    from tests.test_pursuit_mode import _upper_left
+    ctrl = _pursuit(monkeypatch, caplog, _Flying(alt=6000, angle=angle), capture=_upper_left(),
+                    tracker=_ScriptedTracker([_MISS]), icon_steering=_ICON_LAW)
+    return _fly_for(ctrl, 1.2)
+
+
+def test_the_descent_turn_lets_its_pull_go_at_the_level_off_angle(monkeypatch, caplog):
+    """2026-11-02 05:54:58: a held pull took the path from -20 to +51 deg in 5 s and
+    the aircraft 1,250 m up, and the descent ran out of time at 5,548 m. Level, the
+    turn keeps its bank and lets the pull go."""
+    keys = _descent_turn(monkeypatch, caplog, angle=0.0)
+
+    assert ("key_press", ROLL_LEFT_KEY) in keys
+    assert ("key_press", NOSE_UP_KEY) not in keys
+    assert any("pull let go in the descent" in m for m in _messages(caplog))
+
+
+def test_the_descent_turn_pulls_on_the_way_down(monkeypatch, caplog):
+    """The twin: at the descent's angle the turn banks and pulls."""
+    keys = _descent_turn(monkeypatch, caplog, angle=-22.0)
+
+    assert ("key_press", ROLL_LEFT_KEY) in keys
+    assert ("key_press", NOSE_UP_KEY) in keys
+
+
+def test_without_a_descent_the_same_icon_gets_the_push_with_the_wings_level(monkeypatch,
+                                                                             caplog):
+    """The twin: on acs nothing descends, and the law's own push below the horizon
+    (operator, 2026-09-26) is unchanged."""
+    ctrl = _icon_below_left_pursuit(monkeypatch, caplog, "acs")
+    keys = _fly_for(ctrl, 1.2)
+
+    assert ("key_press", ROLL_LEFT_KEY) not in keys
+    assert ("key_press", NOSE_DOWN_KEY) in keys
+
+
+def test_with_nothing_to_steer_at_the_descent_keeps_the_wings_level(monkeypatch, caplog):
+    """The search roll under a pushed nose is a spiral."""
+    ctrl = _pursuit(monkeypatch, caplog, _Flying(alt=6000),
+                    tracker=_ScriptedTracker([_MISS]))
     keys = _fly_for(ctrl)
 
     assert ("key_press", ROLL_LEFT_KEY) not in keys
     assert ("key_press", ROLL_RIGHT_KEY) not in keys
+    assert ("key_press", NOSE_DOWN_KEY) in keys
 
 
 def test_it_keeps_firing_on_the_way_down(monkeypatch, caplog):
@@ -276,15 +371,15 @@ def test_it_keeps_firing_on_the_way_down(monkeypatch, caplog):
 def test_level_at_acs_altitude_the_acs_pursuit_takes_over(monkeypatch, caplog):
     life = _Flying(alt=6000)
     ctrl = _pursuit(monkeypatch, caplog, life)
-    assert _wait(lambda: "DESCENT: to 3000 m" in caplog.text)
+    assert _wait(lambda: "DESCENT: to 4000 m" in caplog.text)
 
-    life.fly(2950, angle=-20)
+    life.fly(3950, angle=-20)
     assert _wait(lambda: ("key_press", NOSE_UP_KEY) in _keys(ctrl)), "no level-off"
     time.sleep(0.2)
     assert "DESCENT: over" not in caplog.text, "attacked before it was level"
 
-    life.fly(2900, angle=-8)
-    assert _wait(lambda: ("DESCENT: over (level at 2900 m), the ACS pursuit has the aircraft, "
+    life.fly(3900, angle=-8)
+    assert _wait(lambda: ("DESCENT: over (level at 3900 m), the ACS pursuit has the aircraft, "
                           "0 pull(s) withheld while slow" in caplog.text))
     assert _wait(lambda: _target_steering(_messages(caplog)))
     _end(ctrl)
@@ -311,7 +406,7 @@ def test_the_cycle_switched_off_chases_at_once(monkeypatch, caplog):
 
 
 def test_a_j20_already_at_acs_altitude_has_nothing_to_come_down_from(monkeypatch, caplog):
-    ctrl = _pursuit(monkeypatch, caplog, _Flying(alt=2800))
+    ctrl = _pursuit(monkeypatch, caplog, _Flying(alt=3800))
     _fly_for(ctrl)
     messages = _messages(caplog)
 
@@ -346,7 +441,7 @@ def test_no_fresh_altitude_presses_nothing_and_does_not_start_the_chase(monkeypa
     keys = _fly_for(ctrl)
     messages = _messages(caplog)
 
-    assert any(m.startswith("DESCENT: to 3000 m") for m in messages)
+    assert any(m.startswith("DESCENT: to 4000 m") for m in messages)
     assert ("key_press", NOSE_DOWN_KEY) not in keys
     assert _target_steering(messages) == []
 
@@ -371,7 +466,7 @@ def test_a_marker_below_the_nose_waits_for_the_descent_too(monkeypatch, caplog):
     messages = _messages(caplog)
     _end(ctrl)
 
-    assert any(m.startswith("DESCENT: to 3000 m") for m in messages)
+    assert any(m.startswith("DESCENT: to 4000 m") for m in messages)
     assert _target_steering(messages) == []
 
 
@@ -449,7 +544,7 @@ def test_the_airbrake_holds_the_descent_at_any_height(monkeypatch, caplog):
 def test_the_search_climb_gets_a_second_descent_when_the_racks_run_out(monkeypatch, caplog):
     """The pursuit's search climbs when it has no target. Back above ACS's altitude
     with every rack empty, the J-20 comes down before it searches."""
-    life = _Flying(alt=2800, ammo=0)
+    life = _Flying(alt=3800, ammo=0)
     ctrl = _pursuit(monkeypatch, caplog, life, start=False,
                     tracker=_TrackerStub(visible=False, error_norm=None, error_norm_y=None))
     life.fly(4500)
@@ -457,7 +552,7 @@ def test_the_search_climb_gets_a_second_descent_when_the_racks_run_out(monkeypat
     assert _wait(lambda: "RESUPPLY: missiles exhausted" in caplog.text, timeout=3.0)
     _end(ctrl)
 
-    assert any(m.startswith("DESCENT: to 3000 m") for m in _messages(caplog))
+    assert any(m.startswith("DESCENT: to 4000 m") for m in _messages(caplog))
 
 
 # ---------------------------------------------------------------------------
@@ -723,60 +818,96 @@ def _ceiling_ctrl(monkeypatch, samples):
     return ctrl
 
 
-def test_a_rising_j20_over_the_ceiling_gets_the_nose_held_down(monkeypatch, caplog):
+def _nose_downs(ctrl, monkeypatch):
+    pulses = []
+    monkeypatch.setattr(ctrl, "nose_down",
+                        lambda hold_seconds, block=True, **_kw: pulses.append(hold_seconds))
+    return pulses
+
+
+def test_a_rising_j20_over_the_ceiling_gets_a_pulse_down(monkeypatch, caplog):
     """2026-11-01: the climb let go at up to 7,011 m and +757 m/s, and the aircraft
     coasted to 9,395 m and stalled."""
     caplog.set_level("INFO", logger="wingman.controller")
     ctrl = _ceiling_ctrl(monkeypatch, [(6000, 40)])
+    pulses = _nose_downs(ctrl, monkeypatch)
 
     ctrl._j20_ceiling_tick()
 
-    assert ctrl._pitch_held == "down"
+    assert pulses == [0.4]
     assert ("Controller: mission_j20 - over the ceiling at 6000 m, path +40 deg: nose down "
             "until level (ADR 171)") in _messages(caplog)
 
 
-def test_it_is_held_and_not_repeated(monkeypatch, caplog):
+def test_it_never_holds_the_key(monkeypatch):
+    """All four holds overshot on the lagging path: 20:12:12, 4.5 s from +8 deg, then
+    -58 deg at 1,614 KPH."""
+    ctrl = _ceiling_ctrl(monkeypatch, [(5800, 8)])
+    _nose_downs(ctrl, monkeypatch)
+
+    ctrl._j20_ceiling_tick()
+
+    assert ctrl._pitch_held is None
+
+
+def test_one_pulse_per_new_sample(monkeypatch):
+    """The path lands every sample. A pulse between them acts on what it already
+    answered."""
+    ctrl = _ceiling_ctrl(monkeypatch, [(6000, 40)])
+    pulses = _nose_downs(ctrl, monkeypatch)
+    ctrl._analyzer.get_telemetry = lambda: _snap(6000, 40, ts=5000.0)
+    monkeypatch.setattr(TelemetrySnapshot, "altitude_fresh", lambda self: True)
+
+    ctrl._j20_ceiling_tick()
+    ctrl._j20_ceiling_tick()
+
+    assert len(pulses) == 1
+
+
+def test_it_says_so_once_while_it_is_over(monkeypatch, caplog):
     caplog.set_level("INFO", logger="wingman.controller")
     ctrl = _ceiling_ctrl(monkeypatch, [(6000, 40), (6100, 30), (6200, 20)])
+    pulses = _nose_downs(ctrl, monkeypatch)
 
     for _ in range(3):
         ctrl._j20_ceiling_tick()
 
     assert sum("over the ceiling" in m for m in _messages(caplog)) == 1
-    assert ctrl._pitch_held == "down"
+    assert len(pulses) == 3
 
 
-def test_level_lets_it_go(monkeypatch):
+def test_level_stops_the_pulses(monkeypatch):
     ctrl = _ceiling_ctrl(monkeypatch, [(6000, 40), (6100, 3)])
+    pulses = _nose_downs(ctrl, monkeypatch)
 
     ctrl._j20_ceiling_tick()
     ctrl._j20_ceiling_tick()
 
-    assert ctrl._pitch_held is None
+    assert len(pulses) == 1
 
 
 def test_under_the_ceiling_nothing_is_pressed(monkeypatch):
     ctrl = _ceiling_ctrl(monkeypatch, [(5400, 60)])
+    pulses = _nose_downs(ctrl, monkeypatch)
 
     ctrl._j20_ceiling_tick()
 
-    assert ctrl._pitch_held is None
+    assert pulses == []
 
 
 def test_a_descending_j20_over_the_ceiling_is_left_alone(monkeypatch):
     """Coming down from it is the point; the stall is what the nose must not meet."""
     ctrl = _ceiling_ctrl(monkeypatch, [(7000, -5)])
+    pulses = _nose_downs(ctrl, monkeypatch)
 
     ctrl._j20_ceiling_tick()
 
-    assert ctrl._pitch_held is None
+    assert pulses == []
 
 
-def test_a_stale_altitude_lets_go_and_presses_nothing(monkeypatch):
+def test_a_stale_altitude_presses_nothing(monkeypatch):
     ctrl = _ceiling_ctrl(monkeypatch, [(6000, 40)])
-    ctrl._j20_ceiling_tick()
-    assert ctrl._pitch_held == "down"
+    pulses = _nose_downs(ctrl, monkeypatch)
     ctrl._analyzer.get_telemetry = lambda: TelemetrySnapshot(
         speed=TelemetrySignal(value=900.0, stable_value=900.0, ts=1.0, rate=0.0),
         altitude=TelemetrySignal(value=6000, stable_value=6000, ts=1.0, rate=0.0),
@@ -784,7 +915,7 @@ def test_a_stale_altitude_lets_go_and_presses_nothing(monkeypatch):
 
     ctrl._j20_ceiling_tick()
 
-    assert ctrl._pitch_held is None
+    assert pulses == []
 
 
 @pytest.mark.parametrize("owner", ["is_spawn_guarding", "is_missile_evading",
@@ -792,11 +923,12 @@ def test_a_stale_altitude_lets_go_and_presses_nothing(monkeypatch):
 def test_it_stands_aside_for_whatever_owns_the_axis(monkeypatch, owner):
     """Rule 6: one writer per axis."""
     ctrl = _ceiling_ctrl(monkeypatch, [(6000, 40)])
+    pulses = _nose_downs(ctrl, monkeypatch)
     monkeypatch.setattr(ctrl, owner, lambda: True)
 
     ctrl._j20_ceiling_tick()
 
-    assert ctrl._pitch_held is None
+    assert pulses == []
 
 
 def test_a_routine_climb_is_ended_at_the_ceiling(monkeypatch, caplog):
@@ -833,16 +965,265 @@ def test_a_climb_under_the_ceiling_is_left_to_finish(monkeypatch):
     assert not ctrl._climb_stop.is_set()
 
 
-def test_the_running_mission_pushes_over_and_lets_go_when_it_ends(monkeypatch):
-    """Rule 5: a key held past the end of its mission presses into the next life."""
+def test_the_running_mission_pulses_the_nose_down(monkeypatch):
     ctrl, log = _climb_back_ctrl(monkeypatch, [(6000, 40)])
+    pulses = _nose_downs(ctrl, monkeypatch)
 
     t = _run_j20(ctrl)
 
-    assert _wait(lambda: ctrl._pitch_held == "down", timeout=3.0)
+    assert _wait(lambda: pulses, timeout=3.0)
     _drain(ctrl, t)
     assert ctrl._pitch_held is None
-    assert ctrl._j20_ceiling_pushing is False
+
+
+# ---------------------------------------------------------------------------
+# The climb's limits
+# ---------------------------------------------------------------------------
+
+def _climb(monkeypatch, *, mission, angle, rate=100.0, emergency=False, pulse_s=None):
+    """The real climb hold on real telemetry at `angle` and `rate`. True when it
+    pressed NOSE_DOWN inside the time a pulse takes."""
+    monkeypatch.setattr(controller_module, "keyboard_module", None)
+
+    class _Life(_Analyzer):
+        def get_telemetry(self):
+            now = time.time()
+            return TelemetrySnapshot(
+                speed=TelemetrySignal(value=1500.0, stable_value=1500.0, ts=now, rate=0.0),
+                altitude=TelemetrySignal(value=3000, stable_value=3000.0, ts=now, rate=rate),
+                taken_at_s=now, stale_after_s=6.0)
+
+    monkeypatch.setattr(TelemetrySnapshot, "pitch_angle_deg", lambda self: angle)
+    ctrl = Controller((0, 0, 1920, 1200), analyzer=_Life([(3000, 0)]),
+                      exit_event=threading.Event(),
+                      config=ControllerConfig(simulate_os_input=True, disable_hotkeys=True,
+                                              climb={"max_climb_s": 2.0, "pitch_pulse_s": 0.05,
+                                                     "pulse_observe_s": 0.05,
+                                                     "max_pitch_deg": 80.0,
+                                                     "max_climb_rate": 450.0,
+                                                     "pitch_lead_s": 0.0}))
+    ctrl._last_mission = mission
+    if pulse_s is not None:
+        ctrl._own_climb_limits["j20"] = (*ctrl._own_climb_limits["j20"][:2], pulse_s)
+
+    def pressed():
+        return ("key_press", NOSE_DOWN_KEY) in _keys(ctrl)
+
+    ctrl.climb_mode(target_alt=5000.0, max_s=2.0, emergency=emergency)
+    _wait(pressed, timeout=1.5)
+    down = pressed()
+    ctrl._climb_stop.set()
+    assert _wait(lambda: not ctrl.is_climbing(), timeout=4.0)
+    return down
+
+
+def test_a_routine_climb_on_the_j20_is_held_to_its_pitch(monkeypatch):
+    """19:06:07: the cut-off fired on time at 5,666 m and it still coasted to 8,519 m.
+    The climb has to be shallower, not stopped harder."""
+    assert _climb(monkeypatch, mission="j20", angle=45.0)
+
+
+def test_a_routine_climb_on_the_j20_is_held_to_its_rate(monkeypatch):
+    assert _climb(monkeypatch, mission="j20", angle=20.0, rate=300.0)
+
+
+def test_inside_its_limits_nothing_pushes_the_nose_down(monkeypatch):
+    assert not _climb(monkeypatch, mission="j20", angle=20.0, rate=200.0)
+
+
+def test_acs_keeps_the_configured_limits(monkeypatch):
+    """The same 45 deg and 300 m/s, under the configured 80 and 450."""
+    assert not _climb(monkeypatch, mission="acs", angle=45.0, rate=300.0)
+
+
+def test_a_hard_emergency_on_the_j20_keeps_the_configured_limits(monkeypatch):
+    """A pull-up from terrain must not be capped at a cruise climb (SAF-010)."""
+    assert not _climb(monkeypatch, mission="j20", angle=45.0, rate=300.0, emergency=True)
+
+
+def _longest_pulse(monkeypatch, **kwargs):
+    """How long the real climb held the first pitch key, off its own intent log."""
+    held = {}
+    real = Controller._climb_key
+
+    def timed(self, key, press, action="climb"):
+        if key in (NOSE_UP_KEY, NOSE_DOWN_KEY):
+            if press:
+                held["at"] = time.time()
+            elif "at" in held and "s" not in held:
+                held["s"] = time.time() - held["at"]
+        return real(self, key, press, action)
+
+    monkeypatch.setattr(Controller, "_climb_key", timed)
+    _climb(monkeypatch, **kwargs)
+    return held.get("s", 0.0)
+
+
+def test_a_routine_pulse_on_the_j20_is_its_own_length(monkeypatch):
+    """20:08:18: one 1.5 s pulse took this jet to +66 deg. The hold polls every 0.25 s,
+    so these lengths are chosen to tell apart on that clock."""
+    assert _longest_pulse(monkeypatch, mission="j20", angle=45.0, pulse_s=0.8) > 0.6
+
+
+def test_acs_keeps_the_configured_pulse(monkeypatch):
+    """The harness sets pitch_pulse_s 0.05."""
+    assert _longest_pulse(monkeypatch, mission="acs", angle=85.0, pulse_s=0.8) < 0.6
+
+
+def test_a_hard_emergency_keeps_the_configured_pulse(monkeypatch):
+    assert _longest_pulse(monkeypatch, mission="j20", angle=85.0, emergency=True,
+                          pulse_s=0.8) < 0.6
+
+
+def _boundary_turn(monkeypatch, *, mission, angle):
+    """The real boundary turn on real telemetry at `angle`, for a little over a
+    second. Returns the NOSE_UP releases it sent before it was stopped."""
+    monkeypatch.setattr(controller_module, "keyboard_module", None)
+    stamp = [1000.0]
+
+    class _Life(_Analyzer):
+        def get_telemetry(self):
+            stamp[0] += 1.0
+            now = time.time()
+            return TelemetrySnapshot(
+                speed=TelemetrySignal(value=1500.0, stable_value=1500.0, ts=stamp[0], rate=0.0),
+                altitude=TelemetrySignal(value=4000, stable_value=4000.0, ts=stamp[0], rate=0.0),
+                taken_at_s=now, stale_after_s=6.0)
+
+    monkeypatch.setattr(TelemetrySnapshot, "pitch_angle_deg", lambda self: angle)
+    monkeypatch.setattr(TelemetrySnapshot, "altitude_fresh", lambda self: True)
+    ctrl = Controller((0, 0, 1920, 1200), analyzer=_Life([(4000, 0)]),
+                      exit_event=threading.Event(),
+                      config=ControllerConfig(simulate_os_input=True, disable_hotkeys=True))
+    ctrl._last_mission = mission
+    ctrl.boundary_turn_mode(max_s=5.0, lateral=0.2)
+    time.sleep(1.2)
+    releases = [k for k in _keys(ctrl) if k == ("key_release", NOSE_UP_KEY)]
+    ctrl.stop_boundary_turn()
+    assert _wait(lambda: not ctrl.is_boundary_turning(), timeout=4.0)
+    return releases
+
+
+def test_the_j20s_boundary_turn_lets_the_pull_go_at_its_pitch_limit(monkeypatch, caplog):
+    """04:06:01: the held pull went to +90 deg in a 9.1 s turn and the aircraft was
+    lost 5 s after it."""
+    caplog.set_level("INFO", logger="wingman.controller")
+    assert _boundary_turn(monkeypatch, mission="j20", angle=50.0)
+    assert ("Controller: boundary turn — path +50 deg at the pitch limit, pull let go "
+            "(ADR 171)") in _messages(caplog)
+
+
+def test_under_the_limit_the_pull_is_held(monkeypatch):
+    assert _boundary_turn(monkeypatch, mission="j20", angle=20.0) == []
+
+
+def test_a_limit_that_cannot_be_read_still_turns(monkeypatch):
+    """The turn is a safety tactic; the limit is an addition to it."""
+    def _broken(self):
+        raise RuntimeError("no lock")
+    monkeypatch.setattr(Controller, "_boundary_pull_limit", _broken)
+    monkeypatch.setattr(controller_module, "keyboard_module", None)
+    ctrl = Controller((0, 0, 1920, 1200), analyzer=_Analyzer([(4000, 0)]),
+                      exit_event=threading.Event(),
+                      config=ControllerConfig(simulate_os_input=True, disable_hotkeys=True))
+    ctrl.boundary_turn_mode(max_s=5.0, lateral=0.2)
+    assert _wait(lambda: ("key_press", NOSE_UP_KEY) in _keys(ctrl), timeout=2.0)
+    ctrl.stop_boundary_turn()
+    assert _wait(lambda: not ctrl.is_boundary_turning(), timeout=4.0)
+
+
+def test_acs_keeps_its_full_pull(monkeypatch):
+    assert _boundary_turn(monkeypatch, mission="acs", angle=50.0) == []
+
+
+def _climb_on(monkeypatch, *, mission, rates):
+    """The real climb on telemetry that walks `rates` (m/s), one per new sample, at
+    a fixed +20 deg path. Returns the pitch pulses it logged, in order."""
+    monkeypatch.setattr(controller_module, "keyboard_module", None)
+    stamp = [1000.0]
+    seq = list(rates)
+
+    class _Life(_Analyzer):
+        def get_telemetry(self):
+            stamp[0] += 1.0
+            rate = seq[min(int(stamp[0] - 1001), len(seq) - 1)]
+            now = time.time()
+            return TelemetrySnapshot(
+                speed=TelemetrySignal(value=1500.0, stable_value=1500.0, ts=stamp[0], rate=0.0),
+                altitude=TelemetrySignal(value=3000, stable_value=3000.0, ts=stamp[0], rate=rate),
+                taken_at_s=now, stale_after_s=6.0)
+
+    monkeypatch.setattr(TelemetrySnapshot, "pitch_angle_deg", lambda self: 20.0)
+    monkeypatch.setattr(TelemetrySnapshot, "altitude_fresh", lambda self: True)
+    ctrl = Controller((0, 0, 1920, 1200), analyzer=_Life([(3000, 0)]),
+                      exit_event=threading.Event(),
+                      config=ControllerConfig(simulate_os_input=True, disable_hotkeys=True,
+                                              climb={"max_climb_s": 3.0, "pitch_pulse_s": 0.05,
+                                                     "pulse_observe_s": 0.05, "min_climb_rate": 30.0,
+                                                     "max_pitch_deg": 80.0, "max_climb_rate": 450.0,
+                                                     "pitch_lead_s": 0.0}))
+    ctrl._last_mission = mission
+    if mission == "j20":
+        ctrl._own_climb_limits["j20"] = (35.0, 250.0, 0.05)
+    pulses = []
+    real = Controller._climb_key
+
+    def watch(self, key, press, action="climb"):
+        if press and key in (NOSE_UP_KEY, NOSE_DOWN_KEY):
+            pulses.append("up" if key == NOSE_UP_KEY else "down")
+        return real(self, key, press, action)
+
+    monkeypatch.setattr(Controller, "_climb_key", watch)
+    ctrl.climb_mode(target_alt=5000.0, max_s=3.0)
+    time.sleep(1.6)
+    ctrl._climb_stop.set()
+    assert _wait(lambda: not ctrl.is_climbing(), timeout=4.0)
+    return pulses
+
+
+def test_a_stalled_reading_is_not_taken_for_a_stalled_climb(monkeypatch, caplog):
+    """04:22:52: "up, rate=0.0, angle=0.0" in a climb at 300 m/s, and it went vertical."""
+    caplog.set_level("DEBUG", logger="wingman.controller")
+    pulses = _climb_on(monkeypatch, mission="j20", rates=[200.0, 0.0, 0.0, 0.0])
+    assert "up" not in pulses[1:], pulses
+    assert any("is a stalled reading, held" in m for m in _messages(caplog))
+
+
+def test_acs_still_pulls_up_on_a_zero(monkeypatch):
+    """The twin, with no limits of its own: the law it has always flown."""
+    pulses = _climb_on(monkeypatch, mission="acs", rates=[200.0, 0.0, 0.0, 0.0])
+    assert "up" in pulses[1:], pulses
+
+
+def test_a_nose_far_past_the_limit_gets_a_longer_pulse_down():
+    """04:17:19: 0.5 s pulses left it at +72 deg, coasting to a stall."""
+    from wingman.controller import _down_pulse_s
+    assert _down_pulse_s(72.0, 35.0, 0.5, 1.5) == pytest.approx(1.5)
+    assert _down_pulse_s(50.0, 35.0, 0.5, 1.5) == pytest.approx(1.0)
+
+
+def test_a_nose_at_the_limit_gets_the_short_pulse():
+    """20:06:55: 1.5 s pulses stacked from +33 to -24 deg."""
+    from wingman.controller import _down_pulse_s
+    assert _down_pulse_s(36.0, 35.0, 0.5, 1.5) == pytest.approx(0.5 + 0.5 / 15)
+    assert _down_pulse_s(20.0, 35.0, 0.5, 1.5) == 0.5
+    assert _down_pulse_s(None, 35.0, 0.5, 1.5) == 0.5
+
+
+def test_where_routine_and_configured_agree_nothing_changes():
+    """acs, and every mission with no limits of its own."""
+    from wingman.controller import _down_pulse_s
+    assert _down_pulse_s(85.0, 80.0, 1.5, 1.5) == 1.5
+
+
+def test_a_stuck_last_mission_lock_costs_the_limits_and_not_the_climb(monkeypatch):
+    ctrl, _launched = _restart_ctrl(monkeypatch)
+    assert ctrl._last_mission_lock.acquire(timeout=1.0)
+    try:
+        assert ctrl._climb_limits_in_play() == (ctrl._climb_max_pitch_deg, ctrl._climb_max_rate,
+                                                ctrl._climb_pulse_s)
+    finally:
+        ctrl._last_mission_lock.release()
 
 
 def test_acs_has_no_ceiling(monkeypatch):
@@ -975,12 +1356,12 @@ def test_the_cycle_goes_round(monkeypatch, caplog):
     life.fly(6000, ammo=0)
     handler.fire_eject()
     assert life.game_state == GameState.GAME_BATTLE_EJECT
-    assert _wait(lambda: logged("DESCENT: to 3000 m"), timeout=4.0)
+    assert _wait(lambda: logged("DESCENT: to 4000 m"), timeout=4.0)
     assert _wait(lambda: ("key_press", NOSE_DOWN_KEY) in _keys(ctrl))
 
     # Level at ACS's altitude, every rack empty, then through the resupply point.
-    life.fly(2900)
-    assert _wait(lambda: logged("DESCENT: over (level at 2900 m)"))
+    life.fly(3900)
+    assert _wait(lambda: logged("DESCENT: over (level at 3900 m)"))
     assert _wait(lambda: logged("RESUPPLY: missiles exhausted"), timeout=4.0)
     life.fly(1400, ammo=6)
     assert _wait(lambda: logged("RESUPPLY: rearmed, the mission takes"), timeout=4.0)
@@ -1049,13 +1430,19 @@ def test_the_descent_stays_out_of_the_hard_recovery_under_its_brake(shipped_cfg)
     j20 = shipped_cfg["j20_mission"]
     limit_s = shipped_cfg["behavior_tree"]["climb"]["recover_below_time_s"]
     rate = (1000 / 3.6) * math.sin(math.radians(-j20["descent_angle_deg"]))
-    assert shipped_cfg["acs_mission"]["climb_alt_m"] / rate > limit_s
+    assert j20["descent_alt_m"] / rate > limit_s
 
 
 def test_nothing_pulls_up_on_the_edge_of_the_stall(shipped_cfg):
     """Above the speed the tree calls a near-stall, or a pull could start at it."""
     min_pull = shipped_cfg["j20_mission"]["descent_min_pull_kph"]
     assert min_pull > shipped_cfg["behavior_tree"]["stall_prevention"]["min_speed_kph"]
+
+
+def test_the_shipped_limits_are_tighter_than_the_configured_ones(shipped_cfg):
+    j20, climb = shipped_cfg["j20_mission"], shipped_cfg["behavior_tree"]["climb"]
+    assert j20["climb_max_pitch_deg"] < climb["max_pitch_deg"]
+    assert j20["climb_max_rate"] < climb["max_climb_rate"]
 
 
 def test_the_ceiling_is_above_the_band_the_tree_climbs_to(shipped_cfg):
@@ -1070,27 +1457,30 @@ def test_a_run_from_the_highest_altitude_seen_fits_inside_the_bound(shipped_cfg)
     j20 = shipped_cfg["j20_mission"]
     rate = (shipped_cfg["approach_brake"]["cap_kph"] / 3.6) * math.sin(
         math.radians(-j20["descent_angle_deg"]))
-    assert (8476 - shipped_cfg["acs_mission"]["climb_alt_m"]) / rate < j20["descent_max_s"]
+    assert (8476 - j20["descent_alt_m"]) / rate < j20["descent_max_s"]
 
 
-def test_it_comes_down_to_where_acs_flies(shipped_cfg, monkeypatch):
-    """One source: `effectivly using normal acs mode` (operator, 2026-11-01)."""
+def test_it_comes_down_to_4000_and_levels_as_acs_does(shipped_cfg, monkeypatch):
+    """Operator, 2026-11-02: "during secondary weapon it should descende to 4000 then
+    operate like normal acs mode until resupply"."""
     monkeypatch.setattr(controller_module, "keyboard_module", None)
     ctrl = Controller((0, 0, 1920, 1200),
                       config=ControllerConfig.from_config(shipped_cfg, disable_hotkeys=True))
     ctrl._analyzer = _Analyzer([(6000, 0)])
     descent = ctrl._start_descent()
 
-    assert descent.target_alt_m == shipped_cfg["acs_mission"]["climb_alt_m"]
+    assert shipped_cfg["j20_mission"]["descent_alt_m"] == 4000
+    assert descent.target_alt_m == 4000
     assert descent.level_angle_deg == shipped_cfg["acs_mission"]["nose_angle_deg"]
 
 
 def test_the_schema_is_where_the_defaults_live(shipped_cfg):
     j20 = shipped_cfg["j20_mission"]
-    for key in ("resupply_return", "descent_angle_deg",
+    for key in ("resupply_return", "descent_alt_m", "descent_angle_deg",
                 "descent_tolerance_deg", "descent_pulse_s", "descent_max_s",
-                "descent_min_pull_kph", "resume_alt_m", "climb_back_max_s",
-                "ceiling_alt_m", "ceiling_path_deg"):
+                "descent_min_pull_kph", "descent_observe_s", "resume_alt_m", "climb_back_max_s",
+                "ceiling_alt_m", "ceiling_path_deg", "ceiling_pulse_s",
+                "climb_max_pitch_deg", "climb_max_rate", "climb_pulse_s"):
         assert j20[key] == schema_default("j20_mission." + key)
 
 
