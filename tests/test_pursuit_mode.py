@@ -2257,7 +2257,10 @@ def test_enter_during_a_pursuit_takes_over(monkeypatch, caplog):
 
 
 def test_a_takeover_key_with_nothing_flying_is_ignored_and_says_so(monkeypatch, caplog):
-    ctrl = _make_ctrl(monkeypatch, analyzer=_AnalyzerStub(ammo=2))
+    from wingman.state import GameState
+    analyzer = _AnalyzerStub(ammo=2)
+    analyzer.game_state = GameState.GAME_LOBBY     # elsewhere Enter claims the round
+    ctrl = _make_ctrl(monkeypatch, analyzer=analyzer)
     with caplog.at_level("DEBUG", logger="wingman.controller"):
         assert ctrl._handle_maneuver_key_press("enter", display=":3") is False
     assert any("maneuver key 'enter' ignored — no commanded flight" in r.getMessage()

@@ -250,7 +250,7 @@
         "type": "grafana-postgresql-datasource",
         "uid": "wingman-pg"
       },
-      "description": "Every read round at the time it ended. Wingman's own rounds are dots, one colour per account (no account, a round rebuilt from a log that names none), with the mean of their last $window read rounds over all accounts (blue line); rounds with a manual takeover are orange, with their own moving average. The operator expects the takeover rounds to score higher, and the two lines to close as wingman improves (2026-10-29).",
+      "description": "Every read round at the time it ended. Wingman's own rounds are dots, one colour per account (no account, a round rebuilt from a log that names none), with the mean of their last $window read rounds over all accounts (blue line); rounds with a manual takeover are orange, with their own moving average. The operator expects the takeover rounds to score higher, and the two lines to close as wingman improves (2026-10-29). Hover a dot for its account, jet and K/D/A; the time in that tooltip is the nearest round's, not always the dot's. Where dots crowd, narrow the time range first.",
       "gridPos": {
         "x": 0,
         "y": 4,
@@ -258,6 +258,17 @@
         "h": 9
       },
       "targets": [
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wingman-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT ended_at AS time,\n       CASE WHEN manual_takeovers = 0 THEN '' ELSE 'manual takeover, ' END\n         || coalesce(tags->>'account', 'no account') || ', '\n         || coalesce(tags->>'jet', 'jet not recorded')\n         || ', K/D/A ' || kills || '/' || deaths || '/' || assists AS metric,\n       score AS value\nFROM rounds\nWHERE score IS NOT NULL AND $__timeFilter(ended_at)\n  AND tags @> ${tags:sqlstring}::jsonb\nORDER BY 1"
+        },
         {
           "refId": "A",
           "datasource": {
@@ -304,8 +315,36 @@
         "overrides": [
           {
             "matcher": {
-              "id": "byName",
-              "options": "mobius1"
+              "id": "byFrameRefID",
+              "options": "D"
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "line"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 0
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/^mobius1(, |$)/"
             },
             "properties": [
               {
@@ -319,8 +358,8 @@
           },
           {
             "matcher": {
-              "id": "byName",
-              "options": "mobius0"
+              "id": "byRegexp",
+              "options": "/^mobius0(, |$)/"
             },
             "properties": [
               {
@@ -334,8 +373,8 @@
           },
           {
             "matcher": {
-              "id": "byName",
-              "options": "mobius2"
+              "id": "byRegexp",
+              "options": "/^mobius2(, |$)/"
             },
             "properties": [
               {
@@ -349,8 +388,8 @@
           },
           {
             "matcher": {
-              "id": "byName",
-              "options": "mobius3"
+              "id": "byRegexp",
+              "options": "/^mobius3(, |$)/"
             },
             "properties": [
               {
@@ -364,8 +403,8 @@
           },
           {
             "matcher": {
-              "id": "byName",
-              "options": "no account"
+              "id": "byRegexp",
+              "options": "/^no account(, |$)/"
             },
             "properties": [
               {
@@ -410,8 +449,8 @@
           },
           {
             "matcher": {
-              "id": "byName",
-              "options": "manual takeover"
+              "id": "byRegexp",
+              "options": "/^manual takeover(, |$)/"
             },
             "properties": [
               {

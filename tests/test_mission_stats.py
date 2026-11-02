@@ -1049,6 +1049,19 @@ def test_a_mission_restarted_without_a_click_keeps_its_jet(tmp_path):
     assert [m["tags"] for m in _finish(t)] == [{"jet": "KF-21 BORAMAE"}] * 2
 
 
+def test_a_jet_changed_in_the_wait_flies_the_round_that_follows(tmp_path):
+    """ADR 168: the click's reading is replaced before the mission takes its tag."""
+    t = _tracker(tmp_path)
+    t.on_fsm_transition("x", "GAME_UNKNOWN", "GAME_LOBBY", 0.0)
+    t.record_jet("J-10 FIREBIRD")
+    t.on_fsm_transition("x", "GAME_LOBBY", "GAME_WAITING", 1.0)
+    t.record_jet("KF-21 BORAMAE")
+    assert t.jet == "KF-21 BORAMAE"
+    _enter_battle(t, ts=2.0)
+    _leave_battle(t, ts=3.0)
+    assert _finish(t)[0]["tags"] == {"jet": "KF-21 BORAMAE"}
+
+
 def test_the_next_click_replaces_the_jet(tmp_path):
     t = _tracker(tmp_path)
     t.on_fsm_transition("x", "GAME_UNKNOWN", "GAME_LOBBY", 0.0)

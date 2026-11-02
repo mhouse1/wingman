@@ -185,6 +185,11 @@ The actuation layer. Holds the mission lock, fires keys/clicks, manages the game
 | `_last_mission` | String (`"j20"` / `"acs"`): used by `restart_last_mission()` |
 | `_target_painting_mode` | Bool: when True, J20 mission includes target-lock painting phase |
 
+**Mission selection** — the jet picks the mission (ADR 171). At launch
+`mission_for_jet` compares the jet on record (`set_jet_source`, the record the
+round is tagged from) with `jet_profile.profiles`; a jet with no profile flies
+`mission.default_mission`. A respawn restarts `_last_mission` instead.
+
 **Mission execution** (`mission_j20`) — the scripted maneuver script described
 here in earlier versions of this document is retired. The behavior tree now
 owns every in-battle decision (sustained climb, engage geometry, missile
@@ -234,9 +239,18 @@ pursuit early. Spec: `docs/missions/acs.md`.
   the mission's own `alt_floor_m`, and the armed sustain climb stands aside
   (`altitude_floor_override_m`, `sustain_climb_suppressed`).
 
-Apart from `o` (acs), no mission has a hotkey to itself:
-`mission.default_mission` picks the mission, and battle entry, the `u` hotkey and
+Apart from `o` (acs), no mission has a hotkey to itself: the jet's profile, else
+`mission.default_mission`, picks the mission, and battle entry, the `u` hotkey and
 the no-prior-mission restart all launch it through `_start_default_mission()`.
+
+**The J-20's cycle** (ADR 171). While `mission_j20` is in play the pursuit starts
+with a controlled descent to `acs_mission.climb_alt_m`, levelling at
+`nose_angle_deg`, with nothing else steering, and is then the ACS pursuit. It ends
+at the confirmed rearm, after its climb-out. `restart_last_mission(climb_back=True)`
+then holds the search-and-destroy loops off until `resume_alt_m`, while the tree
+climbs. No other mission's pursuit changes. While search and destroy runs, Engage
+steers only with the padlock confirmed off, and above `ceiling_alt_m` the mission
+ends a routine climb and holds the nose down.
 
 **Eject and dive** (`eject_and_dive`, ADR 069):
 
@@ -531,6 +545,7 @@ target, engage, assess.
 | ACS piece | Where | Status |
 |---|---|---|
 | Jet profile flag | `jet_profile` in config, `AnalyzerSnapshot.has_padlock` (whether the jet uses the padlock to fire) | Read at startup; nothing branches on it yet |
+| Jet detection | `jet_name.py`, `mission_for_jet` (ADR 167, ADR 171) | Live. Reads the lobby label and picks the mission |
 | Target tracking | `tracker.py` (Design 005) | Live. Senses every battle tick; steers only inside a pursuit |
 | Icon-directed search | `icon_steering.py` (Design 015) | Live inside pursuits |
 | Pursuit | `Controller.pursue_and_engage` (Design 015) | Live, `pursuit_mode.enabled: true` |
@@ -875,11 +890,12 @@ All tunable values live in `wingman/config.yaml`. Key bindings are module-level 
 | `telemetry` | Plausibility bounds, smoothing, `eject_closed_loop` thresholds (ADR 038/067/069) |
 | `nested` | Nested display lane: `enabled`, `display`, `size` (ADR 099). Override one run with `make r NESTED=0` |
 | `minimap` | Ring mask and EMA, plus `regroup_enabled` and `friendly_hsv` (ADR 028 rev 4) and the Design 010 boundary instrumentation (`boundary_hsv`, `boundary_near_frac`, `boundary_trace_ticks`) |
-| `jet_profile` | ACS (Design 011): the active airframe profile and its `has_padlock`, meaning whether the jet uses the padlock to fire. Read at startup; nothing branches on it yet |
+| `jet_profile` | ACS (Design 011): the active airframe profile and its `has_padlock`, meaning whether the jet uses the padlock to fire, read at startup, with nothing branching on it yet. Each profile's `match` and `mission` pick a jet's mission at launch (ADR 171) |
 | `tracking` | ACS target tracker (Design 005): acquisition region, HUD exclusion zones, nameplate cluster gates, roll and pitch gains. `actuate: false` keeps it sensing only in normal battle. `battle_priority_shadow` logs `BATTLEPRI:` |
 | `pursuit_mode` | ACS pursuit (Design 015): `enabled`, `pursuit_max_duration_s` (0 = no cap), steering and engage cadences, search-resume delays, ammo confirmation, `dive_safety`, `crash_recovery` and `recovery_max_s` (ADR 148), the `resupply_priority` block (ADR 152), and the `icon_steering` block |
 | `acs_mission` | ACS_MISSION's script: climb and nose-angle numbers, `alt_floor_m`, `yield_to_target` |
-| `mission.default_mission` | Which mission battle entry and the `u` hotkey launch: `acs` (shipped) or `j20` (ADR 145, ADR 160) |
+| `mission.default_mission` | Which mission battle entry and the `u` hotkey launch for a jet with no profile: `acs` (shipped) or `j20` (ADR 145, ADR 160) |
+| `j20_mission` | `mission_j20`'s cycle (`resupply_return`, the `descent_*` keys, `resume_alt_m`, `climb_back_max_s`, ADR 171) and `target_painting_mode`. The rest of the block tunes the shared Engage tactic |
 | `hud` | Live HUD snapshot output path and archive |
 | `capture_budget` | Free-space floor and per-directory file and size limits for every capture writer |
 | `game_unknown_close` | Close-button recovery (ADR 146): `min_stuck_s`, retry interval, click budget, match score |
@@ -919,8 +935,8 @@ enter main loop → startup classifier routes GAME_UNKNOWN → lobby or battle (
   → _start_game_starting_loop() thread starts
   → press J20 key every 5s
   → scan good_luck crop
-  → Good Luck detected → wait 13s → launch the default mission
-    (_start_default_mission, mission.default_mission)
+  → Good Luck detected → wait 13s → launch the jet's mission
+    (_start_default_mission, jet_profile.profiles, else mission.default_mission)
   → fire good_luck_detected → GAME_BATTLE
 
 [GAME_BATTLE]
@@ -1124,6 +1140,7 @@ held afterburner and pitch key, and the operator could not fly.
 | [152](adr/152-pursuit-resupply-priority.md) | Escalating resupply priority in pursuit mode |
 | [159](adr/159-the-emergency-climbs-nose-up-carries-the-afterburner.md) | The emergency climb's nose-up carries the afterburner; the airbrake is for a steep dive only |
 | [160](adr/160-acs-mission-and-j20-are-the-only-missions.md) | ACS_MISSION (was mission_su30) and J20 are the only missions; loiter, survey, F-111 and JAS39 removed |
+| [171](adr/171-the-jet-picks-the-mission-and-j20-comes-back-from-a-rearm.md) | The jet picks the mission; mission_j20 descends and levels at the switch to the secondary, attacks as ACS, rearms, climbs back and resumes |
 | [Design 001](hldd/001-terrain-avoidance-hldd.md) | Terrain avoidance: shadow sky-occlusion check, and the Phase 2 motion-based looming design |
 | [Design 011](hldd/011-acs-mode-hldd.md) | ACS: the airframe-independent combat layer |
 | [Design 015](hldd/015-target-tracking-pursuit-mode-hldd.md) | ACS pursuit and icon-directed search |

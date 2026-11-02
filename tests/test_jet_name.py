@@ -1,6 +1,8 @@
-"""ADR 167: each round's jet, read off the lobby as PLAY is clicked."""
+"""ADR 167: each round's jet, read off the lobby as PLAY is clicked. ADR 168: read
+again through the wait for a match."""
 
 import logging
+import threading
 from pathlib import Path
 
 import cv2
@@ -11,8 +13,17 @@ import yaml
 from wingman import jet_name
 from wingman.config_schema import schema_default
 from wingman.crop_region import CropCoords
-from wingman.jet_name import JetRead, name_band, parse_name, read_jet
+from wingman.jet_name import (
+    JetRead,
+    JetRecheck,
+    mission_for_jet,
+    name_band,
+    parse_name,
+    read_jet,
+    same_jet,
+)
 from wingman.main import _note_jet
+from wingman.state import GameState
 
 MAIN_SRC = Path("wingman/main.py").read_text(encoding="utf-8")
 
@@ -156,6 +167,193 @@ def test_with_capture_off_nothing_is_kept():
     _note_jet(None, "the frame", logging.getLogger("t"), lambda name: None, False, stamp="s")
 
 
+# -- the wait for a match (ADR 168) ------------------------------------------------
+
+class _Inline(threading.Thread):
+    """Runs the read at once, so that a test does not wait on a thread."""
+
+    def start(self):
+        self.run()
+
+
+class _Wait:
+    """A JetRecheck in a wait, its reads scripted and the jet on record held here."""
+
+    def __init__(self, monkeypatch, jet, reads):
+        monkeypatch.setattr(jet_name.threading, "Thread", _Inline)
+        self.jet = jet
+        self.reads = iter(reads)
+        self.changes = []
+        self.reads_done = 0
+        self.now = 0.0
+        self.recheck = JetRecheck(self._read, lambda: self.jet, self._change, interval_s=3.0)
+
+    def _read(self, _frame):
+        self.reads_done += 1
+        name = next(self.reads)
+        return None if name == "no OCR" else JetRead(name, name or "")
+
+    def _change(self, read, _frame):
+        self.jet = read.name
+        self.changes.append(read.name)
+
+    def tick(self, state=GameState.GAME_STARTING):
+        self.recheck.tick("the frame", state, self.now)
+        self.now += 3.0
+
+    def run(self, count):
+        for _ in range(count):
+            self.tick()
+
+
+def test_a_jet_changed_in_the_wait_is_booked_on_the_second_read(monkeypatch):
+    wait = _Wait(monkeypatch, "F-14 TOMCAT", ["SU-27 FLANKER", "SU-27 FLANKER"])
+    wait.run(1)
+    assert wait.changes == []
+    wait.run(1)
+    assert wait.changes == ["SU-27 FLANKER"]
+
+
+def test_the_jet_can_change_again_in_the_same_wait(monkeypatch):
+    wait = _Wait(monkeypatch, "A", ["BBB", "BBB", "CCC", "CCC"])
+    wait.run(4)
+    assert wait.changes == ["BBB", "CCC"]
+
+
+def test_the_same_jet_books_nothing(monkeypatch):
+    wait = _Wait(monkeypatch, "F-14 TOMCAT", ["F-14 TOMCAT"] * 3)
+    wait.run(3)
+    assert wait.changes == []
+
+
+def test_one_misread_does_not_rename_a_jet(monkeypatch):
+    wait = _Wait(monkeypatch, "F-14 TOMCAT", ["F-14 TOMBAT", "F-14 TOMCAT", "F-14 TOMBAT"])
+    wait.run(3)
+    assert wait.changes == []
+
+
+def test_two_different_misreads_do_not_agree(monkeypatch):
+    wait = _Wait(monkeypatch, "F-14 TOMCAT", ["F-14 TOMBAT", "F-14 TOMBOT"])
+    wait.run(2)
+    assert wait.changes == []
+
+
+def test_a_spelling_of_the_same_jet_is_not_a_change(monkeypatch):
+    """A-6 INTRUDER and A-6-INTRUDER, 2026-10-31: a dashboard row each for one jet."""
+    wait = _Wait(monkeypatch, "A-6 INTRUDER", ["A-6-INTRUDER", "A-6-INTRUDER"])
+    wait.run(2)
+    assert wait.changes == []
+    assert same_jet("A-6 INTRUDER", "A-6-INTRUDER")
+    assert not same_jet("F-14 TOMCAT", "F-15 EAGLE")
+
+
+@pytest.mark.parametrize("failed", [None, "no OCR"])
+def test_a_failed_read_keeps_the_jet_and_breaks_the_run_of_reads(monkeypatch, failed):
+    """The label can be covered for a moment. Clearing the jet then would lose a
+    good reading, and the two reads that count must be in a row."""
+    wait = _Wait(monkeypatch, "F-14 TOMCAT", ["SU-27 FLANKER", failed, "SU-27 FLANKER", failed])
+    wait.run(4)
+    assert wait.jet == "F-14 TOMCAT" and wait.changes == []
+
+
+def test_the_wait_recovers_a_lobby_whose_click_read_failed(monkeypatch):
+    wait = _Wait(monkeypatch, None, ["SU-27 FLANKER", "SU-27 FLANKER"])
+    wait.run(2)
+    assert wait.jet == "SU-27 FLANKER"
+
+
+@pytest.mark.parametrize("state", [GameState.GAME_WAITING, GameState.GAME_STARTING])
+def test_it_reads_in_both_wait_states(monkeypatch, state):
+    wait = _Wait(monkeypatch, "A", ["BBB", "BBB"])
+    wait.tick(state)
+    wait.tick(state)
+    assert wait.changes == ["BBB"]
+
+
+@pytest.mark.parametrize("state", [GameState.GAME_LOBBY, GameState.GAME_BATTLE,
+                                   GameState.GAME_END_B, GameState.GAME_UNKNOWN])
+def test_it_reads_nothing_outside_the_wait(monkeypatch, state):
+    """The scoreboard stays up for 15 s into GAME_LOBBY (ADR 167 V3)."""
+    wait = _Wait(monkeypatch, "A", [])     # a read would raise StopIteration
+    wait.tick(state)
+    wait.tick(state)
+    assert wait.changes == []
+
+
+def test_the_first_read_comes_a_full_interval_into_the_wait(monkeypatch):
+    """After the click's own read, which clears the jet until it finishes."""
+    wait = _Wait(monkeypatch, "A", ["A"])
+    wait.recheck.tick("f", GameState.GAME_LOBBY, 100.0)
+    wait.recheck.tick("f", GameState.GAME_WAITING, 102.9)
+    assert wait.reads_done == 0
+    wait.recheck.tick("f", GameState.GAME_WAITING, 103.0)
+    assert wait.reads_done == 1
+
+
+def test_reads_stay_an_interval_apart(monkeypatch):
+    wait = _Wait(monkeypatch, "A", ["A"])
+    for now in (10.0, 11.0, 12.9):
+        wait.recheck.tick("f", GameState.GAME_STARTING, now)
+    assert wait.reads_done == 1
+
+
+def test_leaving_the_wait_forgets_a_read_waiting_for_its_second(monkeypatch):
+    wait = _Wait(monkeypatch, "A", ["BBB", "BBB"])
+    wait.tick()
+    wait.tick(GameState.GAME_BATTLE)
+    wait.tick()
+    assert wait.reads_done == 2 and wait.changes == []
+
+
+def test_only_one_read_runs_at_a_time_and_a_slow_one_does_not_hold_the_tick(monkeypatch):
+    started, release = threading.Event(), threading.Event()
+    reads = []
+
+    def slow(_frame):
+        reads.append(1)
+        started.set()
+        release.wait(timeout=5.0)
+
+    recheck = JetRecheck(slow, lambda: "A", lambda *a: None, interval_s=1.0)
+    recheck.tick("f", GameState.GAME_STARTING, 10.0)
+    assert started.wait(timeout=5.0)
+    recheck.tick("f", GameState.GAME_STARTING, 20.0)
+    assert len(reads) == 1, "still reading, and the tick came back"
+    release.set()
+
+
+def test_a_read_that_raises_does_not_end_the_rechecks(monkeypatch):
+    monkeypatch.setattr(jet_name.threading, "Thread", _Inline)
+    calls = []
+
+    def fails(_frame):
+        calls.append(1)
+        raise RuntimeError("OCR")
+
+    recheck = JetRecheck(fails, lambda: "A", lambda *a: None, interval_s=1.0)
+    for now in (10.0, 20.0):
+        with pytest.raises(RuntimeError):
+            recheck.tick("f", GameState.GAME_STARTING, now)
+    assert len(calls) == 2
+
+
+def test_a_recheck_that_finds_a_new_jet_goes_through_the_click_reads_booking():
+    block = MAIN_SRC[MAIN_SRC.index("def _on_jet_changed("):]
+    assert "_book_jet(read, frame)" in block[:block.index("jet_recheck = JetRecheck(")]
+
+
+def test_its_own_log_line_is_not_taken_for_a_reading():
+    """The ingest reads any line with `JET NAME: ` in it as a reading, and with no
+    name in the shape of one, as no jet: it would blank the round on the dashboard."""
+    block = MAIN_SRC[MAIN_SRC.index("def _on_jet_changed("):]
+    assert "JET NAME: " not in block[:block.index("_book_jet(read, frame)")]
+
+
+def test_it_ticks_before_the_fallback_that_can_end_the_tick():
+    assert (MAIN_SRC.index("jet_recheck.tick(frame, current_game_state, time.time())")
+            < MAIN_SRC.index("if waiting_fallback.tick(frame, current_game_state):"))
+
+
 # -- the wiring --------------------------------------------------------------------
 
 def test_the_read_leaves_the_click_alone_and_clears_the_last_round_first():
@@ -221,3 +419,36 @@ def test_real_ocr_reads_each_jet(reader, jet):
 @pytest.mark.slow
 def test_real_frames_off_the_lobby_read_nothing(reader):
     assert read_jet(reader, _load("end_of_round.jpg"), _config_crop()).name is None
+
+
+# ADR 171: the jet on record picks the mission.
+
+_PROFILES = {"j20": {"match": "J-20", "mission": "j20"},
+             "active_only": {"has_padlock": True},
+             "no_mission": {"match": "F-14"}}
+
+
+@pytest.mark.parametrize("name", ["J-20 MIGHTY DRAGON", "J-20", "J20 MIGHTY DRAGON",
+                                  "J-20-MIGHTY DRAGON"])
+def test_a_jet_matches_its_profile_on_the_start_of_its_name(name):
+    """Only letters and digits count, as in `same_jet`: OCR has read one mark two
+    ways, and a profile names the mark because the rest of the label is unproven."""
+    assert mission_for_jet(name, _PROFILES) == "j20"
+
+
+@pytest.mark.parametrize("name", ["J-10 FIREBIRD", "J35 DRAKEN", "JAS39 GRIPEN",
+                                  "F-20 TIGERSHARK", "F-22 RAPTOR", "KF-21 BORAMAE"])
+def test_a_jet_read_on_a_real_label_is_not_mistaken_for_it(name):
+    """The nearest names on the labels in test_screenshots/jet_name/."""
+    assert mission_for_jet(name, _PROFILES) is None
+
+
+def test_no_jet_has_no_mission():
+    assert mission_for_jet(None, _PROFILES) is None
+    assert mission_for_jet("", _PROFILES) is None
+
+
+def test_a_profile_without_a_match_or_a_mission_picks_nothing():
+    assert mission_for_jet("F-14 TOMCAT", _PROFILES) is None
+    assert mission_for_jet("J-20", {"bad": None}) is None
+    assert mission_for_jet("J-20", {}) is None

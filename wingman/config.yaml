@@ -41,11 +41,20 @@ nested:
 # airframe supports. Read once at startup into AnalyzerSnapshot.has_padlock.
 # Nothing branches on this yet — every profile is has_padlock: true today —
 # it exists so a future BoresightEngage leaf has something to condition on.
+#
+# ADR 171 (operator, 2026-11-01): the jet read off the lobby (ADR 167, ADR 168)
+# picks the mission. `match` is the start of the jet's name on the label, letters
+# and digits only, and that jet flies `mission`. Any other jet, and a round whose
+# jet was not read, flies mission.default_mission. A jet with a custom mission
+# later needs a profile here and nothing else in the launch path. `active` and
+# `has_padlock` are not part of this; they are still read once at startup.
 jet_profile:
   active: j20
   profiles:
     j20:
       has_padlock: true
+      match: J-20
+      mission: j20
 
 unattended_mode: true
 # Party invites: false clicks REJECT, true clicks ACCEPT then readies up.
@@ -624,7 +633,45 @@ j20_mission: {target_painting_mode: false, attack_mode_dry_run: false, min_safe_
   bearing_deadzone_deg: 12, short_ring_min_count: 1, ring_debounce_ticks: 2, ema_reseed_angle_deg: 60,
   rear_commit_deg: 150, rear_release_deg: 90, orbit_direction: right, orbit_roll_hold_s: 0.3,
   orbit_roll_interval_s: 2.0, coarse_kp: 0.5, coarse_min_hold_s: 0.15, coarse_max_hold_s: 0.6,
-  coarse_cooldown_s: 2.0}
+  coarse_cooldown_s: 2.0,
+  # ADR 171 (operator, 2026-11-01): "after missiles are exausted it descends and
+  # resupplies then climbs back to higher altitude and resume search and destroy",
+  # then "when it switches to secondary it flies down too fast and crashes, it needs
+  # to descend altitude level out and attack using secondary weapons and boresight,
+  # effectivly using normal acs mode". Unlike the keys above, these are mission_j20's
+  # own. resupply_return ends the pursuit at the confirmed rearm and restarts the
+  # mission; off, this block does nothing and the pursuit flies as it did before.
+  resupply_return: true,
+  # The pursuit starts at 5000 to 7000 m and was made at 3000 m. It comes down first,
+  # with nothing else steering, to acs_mission.climb_alt_m, levels at
+  # acs_mission.nose_angle_deg, and is then the ACS pursuit: acs's own numbers, so the
+  # two cannot drift. The airbrake holds it near approach_brake.cap_kph on the way.
+  # The angle is a named guess inside a measured limit: recover_below_time_s 30 means
+  # under 100 m/s at 3000 m or the tree's hard recovery takes the airframe, and at
+  # 850 KPH -20 deg is 81 m/s, about 50 s from 7000 m. The tolerance is how far past
+  # it the nose may go before a pulse brings it back; the pulse is
+  # acs_mission.angle_pulse_s. The time is a bound: a run at 8000 m takes about 60 s,
+  # and running out of it starts the chase from wherever the aircraft is.
+  descent_angle_deg: -20, descent_tolerance_deg: 5, descent_pulse_s: 0.6,
+  descent_max_s: 90.0,
+  # Nothing pulls up under this. Slow, a steep path is a stalling wing and a pull
+  # steepens it: three of the four descents of 2026-11-01 sent UP pulses under about
+  # 330 KPH and ran to -60 to -77 deg, and the one that sent none stayed under -94 m/s.
+  # Named guess between the 300 KPH stall line and the 500 KPH where the nose is
+  # measured to come up 21 deg/s.
+  descent_min_pull_kph: 450,
+  # Search and destroy resumes here, on the climb the tree flies (its floor, ADR
+  # 141, and the sustain entry, pinned equal to both); the sustain band goes on to
+  # 5000 m. climb_back_max_s is sustain.max_climb_s: past it, the loops start anyway.
+  resume_alt_m: 4000, climb_back_max_s: 90.0,
+  # The J-20 coasts out of its climb: on 2026-11-01 it let go as late as 7,011 m at
+  # +757 m/s and went on to 9,395 m, stalled at 151 to 278 KPH, and fell, which is what
+  # put the pursuits at -70 deg before anything steered them. Above ceiling_alt_m, with
+  # the path still above ceiling_path_deg, the mission holds the nose down. 5500 is the
+  # top of the sustain band plus the 500 m a climb that lets go on time still coasts
+  # (5,012 m to 5,577 m at 17:51). The path is a named guess: level enough to stop
+  # gaining height, not so tight that noise presses it.
+  ceiling_alt_m: 5500, ceiling_path_deg: 5}
 # mission_acs, ACS_MISSION ('o', docs/missions/acs.md, ADR 144; mission_su30
 # until ADR 160 renamed it): a four-step script run
 # once per life — nose up, switch to the secondary weapon, level off at
@@ -1165,9 +1212,11 @@ round_performance:
 # game's squadron leaderboard in the lobby between rounds. Off here; the operator
 # switches it on per machine in config.local.yaml. One reading a day: queue_at,
 # local time and quoted (YAML takes an unquoted 10:38:30 for a number), queues it
-# and the next lobby takes it. Each step of the navigation waits step_timeout_s
-# for its screen. `squadron` is the name in our row. `capture` keeps the frame of
-# each reading, and the last frame of a navigation that gave up, in
+# and the next lobby takes it. A try that reads nothing is tried again, and a day
+# with no reading yet is owed to the next session started after queue_at that day
+# (ADR 170). Each step of the navigation waits step_timeout_s for its screen.
+# `squadron` is the name in our row. `capture` keeps the frame of each reading,
+# and the last frame of a navigation that gave up, in
 # test_screenshots/squadron_ranking/.
 squadron_ranking:
   enabled: false
@@ -1178,9 +1227,11 @@ squadron_ranking:
 
 # ADR 167: each round's jet, read off the lobby as PLAY is clicked. `capture` keeps
 # the label each name was read from, and the whole frame when none came of it, in
-# test_screenshots/jet_name/.
+# test_screenshots/jet_name/. ADR 168: `recheck_s` is how often the label is read
+# again through the wait for a match; two reads in a row must agree on a new jet.
 jet_name:
   capture: true
+  recheck_s: 3.0
 
 # Design 018: the score dashboard, a Grafana and Postgres stack on VEDA fed from
 # the session stats files (`make grafana`). Off here, so a clone runs none of

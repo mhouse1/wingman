@@ -168,6 +168,9 @@ def register_hotkeys(ctrl, keyboard_module) -> None:
                     logger.info("Controller: '%s' key pressed - mission %s already "
                                 "running, ignoring", MISSION_J20_KEY, flying)
                     return
+                # Before the FSM moves: the main loop reads the hold on the
+                # transition to GAME_BATTLE, and would take the aircraft back.
+                ctrl.end_manual_round_hold(f"'{MISSION_J20_KEY}' handed the aircraft back")
                 ctrl._auto_respawn_restart = True
                 current_state = ctrl._analyzer.game_state if ctrl._analyzer is not None else None
                 if current_state == GameState.GAME_BATTLE_MANUAL:
@@ -187,7 +190,7 @@ def register_hotkeys(ctrl, keyboard_module) -> None:
                     # must work — the old state-based echo check ate those.
                     logger.info("Controller: '%s' key pressed - starting the configured mission "
                                 "(%s, state=%s)",
-                                MISSION_J20_KEY, ctrl._default_mission,
+                                MISSION_J20_KEY, ctrl.launch_mission_name(),
                                 current_state.name if current_state is not None and hasattr(current_state, 'name') else current_state)
                     # Force FSM into GAME_BATTLE so lobby-only background loops (quick-scan
                     # stall-ESC, GAME_LOBBY escape loop) stop treating this as an idle lobby.
@@ -213,6 +216,7 @@ def register_hotkeys(ctrl, keyboard_module) -> None:
                 if now - ctrl._last_acs_key_ts < 0.5:  # debounce: ignore key-repeat
                     return
                 ctrl._last_acs_key_ts = now
+                ctrl.end_manual_round_hold(f"'{MISSION_ACS_KEY}' started a mission")
                 current_state = ctrl._analyzer.game_state if ctrl._analyzer is not None else None
                 logger.info("Controller: '%s' key pressed - starting ACS mission (state=%s)",
                             MISSION_ACS_KEY,
@@ -239,7 +243,24 @@ def register_hotkeys(ctrl, keyboard_module) -> None:
                 if now - ctrl._last_finish_round_press < 0.5:
                     return                      # debounce key-repeat
                 ctrl._last_finish_round_press = now
+                if ctrl._operator_stop_event.is_set():
+                    # ADR 169: Backspace already ended wingman, so nothing is
+                    # left to finish and nothing is left to read the screen.
+                    # All that remains of this key's meaning is the close.
+                    ctrl._close_all_event.set()
+                    logger.info("\033[93mController: '%s' in standby — closing "
+                                "MetalStorm and the nested display\033[0m",
+                                FINISH_ROUND_THEN_EXIT)
+                    return
+                _st = ctrl._analyzer.game_state if ctrl._analyzer is not None else None
                 if ctrl._finish_round_event.is_set():
+                    # ADR 169: with no round left to wait for, the stop fires
+                    # within a tick, so a repeat is the operator making sure.
+                    # Cancelling on it left MetalStorm running.
+                    if (_st is not None and _st not in BATTLE_STATES
+                            and _st != GameState.GAME_END_B):
+                        logger.info("\033[93m🏁 FINISH ROUND: already stopping\033[0m")
+                        return
                     # A deferred action that cannot be recalled is a trap:
                     # the operator waits minutes with no way back except
                     # killing the process (ADR 094).
@@ -252,18 +273,19 @@ def register_hotkeys(ctrl, keyboard_module) -> None:
                 # safe point is already true, and the quick-scan is now barred
                 # from starting another round. Say which one is happening -
                 # "at the next lobby" while sitting IN the lobby reads as a
-                # long wait and invites a second press that cancels it.
-                _st = ctrl._analyzer.game_state if ctrl._analyzer is not None else None
+                # long wait and invites a second press.
                 if _st is not None and _st not in BATTLE_STATES:
                     logger.info("\033[93m🏁 FINISH ROUND: requested in %s — no "
                                 "round in progress, stopping now and closing "
-                                "MetalStorm (ADR 094). Press '%s' again to "
-                                "cancel.\033[0m", _st.name, FINISH_ROUND_THEN_EXIT)
+                                "MetalStorm (ADR 094).\033[0m", _st.name)
                 else:
                     logger.info("\033[93m🏁 FINISH ROUND: requested — wingman will "
                                 "stop at the next lobby, then close MetalStorm "
                                 "(ADR 094). Press '%s' again to cancel.\033[0m",
                                 FINISH_ROUND_THEN_EXIT)
+                    if ctrl._analyzer is not None:
+                        ctrl._analyzer.stop_if_lobby_on_screen()
+            ctrl._finish_round_hotkey = finish_round_then_exit
             keyboard_module.on_press_key(FINISH_ROUND_THEN_EXIT,
                                          finish_round_then_exit, suppress=False)
             logger.info("Controller: registered hotkey '%s' to finish the round "

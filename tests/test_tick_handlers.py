@@ -1588,6 +1588,12 @@ class _TrackCtrlStub:
         self.orients.append(err)
         return "right"
 
+    def padlock_state(self):
+        return False
+
+    def is_padlock_blocked(self):
+        return False
+
 
 class _TrackAnalyzerStub:
     def get_ammo_missiles(self):

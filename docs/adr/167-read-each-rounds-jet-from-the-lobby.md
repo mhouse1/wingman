@@ -8,6 +8,7 @@ Operator, 2026-10-31: "i want to detect which jet is flying and track it on the 
 is to monitor wingman performance per jet type some jets will perform better than others in wingman
 i want to be able to view the dashboard and see which". This reverses
 [Design 018](../hldd/018-score-per-round-in-grafana-hldd.md)'s non-goal of no panel per jet.
+[ADR 168](168-read-the-jet-again-through-the-wait-for-a-match.md) extends D1 and D4.
 
 ## Decision
 

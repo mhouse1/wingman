@@ -10,18 +10,31 @@ label, and no reading: a round without a jet beats a round under the wrong one.
 The game keeps the selected jet in none of the PlayerPrefs wingman reads
 (wingman/game_stats.py), so it is read off the screen. `read_jet` runs on the
 analyzer's OCR pool with that thread's reader (`GameStateAnalyzer.run_ocr`).
+
+The label stays up through the wait for a match, so `JetRecheck` reads it again
+there: the jet can change after PLAY, and a queue can start with no click of
+wingman's to read it on (operator, 2026-11-01, ADR 168).
+
+The jet on record also picks the mission: `mission_for_jet` finds it in
+`jet_profile.profiles`, and a jet with no profile flies the default (ADR 171).
 """
 
 from __future__ import annotations
 
 import re
 import string
+import threading
 from typing import NamedTuple
 
 import cv2
 import numpy as np
 
+from .state import GameState
+
 CROP = "JET_NAME"
+
+# The wait for a match. The lobby's label is on screen throughout.
+WAIT_STATES = (GameState.GAME_WAITING, GameState.GAME_STARTING)
 
 # Where `jet_name.capture` saves the band each name was read from.
 CAPTURE_DIR = "test_screenshots/jet_name"
@@ -94,3 +107,77 @@ def read_jet(reader, frame, crop) -> JetRead:
     text = " ".join(str(word) for _x, word in
                     sorted((min(p[0] for p in box), word) for box, word, _conf in boxes))
     return JetRead(parse_name(text), text, band)
+
+
+def _letters_and_digits(name: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", name.upper())
+
+
+def same_jet(one: str, other: str) -> bool:
+    """Whether two names are one jet. OCR read one jet's mark two ways on
+    2026-10-31 (A-6 INTRUDER and A-6-INTRUDER), so only letters and digits count."""
+    return _letters_and_digits(one) == _letters_and_digits(other)
+
+
+def mission_for_jet(name: "str | None", profiles: dict) -> "str | None":
+    """The mission of the first profile in `jet_profile.profiles` whose `match`
+    the jet's name starts with, or None. A start, not the whole name: a profile
+    names the mark (J-20) and the label goes on to the jet's nickname. Only letters
+    and digits count, as in `same_jet`."""
+    if not name:
+        return None
+    jet = _letters_and_digits(name)
+    for profile in profiles.values():
+        match = _letters_and_digits((profile or {}).get("match") or "")
+        if match and jet.startswith(match) and profile.get("mission"):
+            return profile["mission"]
+    return None
+
+
+class JetRecheck:
+    """Reads the label again every `interval_s` through the wait for a match, and
+    reports a jet other than the one on record (ADR 168).
+
+    A new name counts only when two reads in a row agree on it, so that one misread
+    does not rename a round's jet. A read with no name changes nothing: the label
+    can be covered for a moment, and a round under the jet last read beats a round
+    with none. `tick` runs on the main loop, so the read has a thread of its own.
+    """
+
+    def __init__(self, read, current, change, interval_s: float):
+        self._read = read              # frame -> JetRead or None; blocks
+        self._current = current        # () -> the jet on record
+        self._change = change          # (JetRead, frame) on a confirmed new jet
+        self._interval_s = interval_s
+        self._next_at = 0.0
+        self._candidate = None
+        self._busy = False
+
+    def tick(self, frame, state, now: float) -> None:
+        """Called every tick. The first read comes a full interval into the wait,
+        after the click's own read has finished."""
+        if state not in WAIT_STATES:
+            self._candidate = None
+            self._next_at = now + self._interval_s
+            return
+        if self._busy or now < self._next_at:
+            return
+        self._busy = True
+        self._next_at = now + self._interval_s
+        threading.Thread(target=self._check, args=(frame,), daemon=True,
+                         name="jet-recheck").start()
+
+    def _check(self, frame) -> None:
+        try:
+            read = self._read(frame)
+            name = None if read is None else read.name
+            current = self._current()
+            if name is None or (current is not None and same_jet(name, current)):
+                self._candidate = None
+            elif self._candidate is not None and same_jet(name, self._candidate):
+                self._candidate = None
+                self._change(read, frame)
+            else:
+                self._candidate = name
+        finally:
+            self._busy = False

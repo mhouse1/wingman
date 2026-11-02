@@ -162,6 +162,15 @@ def test_a_log_keeps_a_jet_until_the_next_read():
     assert [r.tags.get("jet") for r in rs.rows_from_log(log, "x")] == ["SU-35 SUPER FLANKER", None]
 
 
+def test_a_jet_changed_in_the_wait_reaches_a_log_round():
+    """ADR 168: both lines are wingman's, the click's then the recheck's. The recheck's
+    own note must not read as a failed reading."""
+    log = [_line("02:49:00", "✈️ JET NAME: F-14 TOMCAT"),
+           _line("02:49:30", "Jet recheck: the wait's label changed, was F-14 TOMCAT"),
+           _line("02:49:30", "✈️ JET NAME: SU-27 FLANKER")] + _LOG
+    assert rs.rows_from_log(log, "x")[0].tags["jet"] == "SU-27 FLANKER"
+
+
 def test_a_log_keeps_a_jet_with_a_slash_or_a_dot():
     for jet in ("F/A-18F SUPER HORNET", "M.III"):
         log = [_line("02:50:00", f"✈️ JET NAME: {jet}")] + _LOG
@@ -418,6 +427,11 @@ def _score_per_round():
     return [sql for title, sql in _dashboard_sql() if title.startswith("Score per round")]
 
 
+def _score_panel():
+    dashboard = json.loads(Path("grafana/dashboards/score-per-round.json").read_text(encoding="utf-8"))
+    return next(p for p in dashboard["panels"] if p["title"].startswith("Score per round"))
+
+
 def test_every_round_panel_but_score_per_round_is_wingman_only():
     others = [sql for title, sql in _dashboard_sql()
               if not title.startswith("Score per round") and "FROM rounds" in sql]
@@ -427,12 +441,47 @@ def test_every_round_panel_but_score_per_round_is_wingman_only():
 def test_score_per_round_draws_each_account_and_the_takeovers_apart():
     """Operator, 2026-10-29: a dot colour per account, wingman's moving average,
     and the rounds with a manual takeover with their own."""
-    dots, wingman, taken_over = _score_per_round()
+    _hover, dots, wingman, taken_over = _score_per_round()
     assert "AS metric" in dots and "tags->>'account'" in dots
     assert "AND manual_takeovers = 0" in dots and "AND manual_takeovers = 0" in wingman
     assert '"wingman, moving average"' in wingman
     assert "NOT manual_takeovers = 0" in taken_over
     assert '"manual takeover"' in taken_over and '"manual takeover, moving average"' in taken_over
+
+
+def test_hovering_a_dot_names_the_rounds_account_jet_and_kda():
+    """Operator, 2026-11-01. A time series tooltip shows a series' name and value and
+    nothing else from its row, so each account, jet and K/D/A is its own series."""
+    hover, *_ = _score_per_round()
+    assert "AS metric" in hover and "score AS value" in hover
+    for part in ("tags->>'account'", "tags->>'jet'", "K/D/A ", "kills", "deaths", "assists"):
+        assert part in hover
+    assert "manual_takeovers = 0 AND" not in hover, "an orange dot has its details too"
+
+
+def test_a_round_with_no_jet_keeps_its_details():
+    """In SQL a NULL jet would blank the whole name, and 548 read rounds have none."""
+    hover, *_ = _score_per_round()
+    assert "coalesce(tags->>'jet', 'jet not recorded')" in hover
+
+
+def test_the_hover_series_win_a_tie_with_the_account_dots():
+    """Both draw the round at one spot and the first series wins the tie. Queried after
+    the account dots, the tooltip read `mobius3 300` with no details."""
+    assert _score_panel()["targets"][0]["refId"] == "D"
+
+
+def test_the_hover_series_draw_nothing_so_the_legend_still_isolates_an_account():
+    """A legend click leaves alone any series hidden from the legend. Drawn as dots, every
+    account stayed on screen when one was isolated. These must also stay out of the
+    legend: 460 of them on 2026-11-01."""
+    (hover,) = [o for o in _score_panel()["fieldConfig"]["overrides"]
+                if o["matcher"] == {"id": "byFrameRefID", "options": "D"}]
+    props = {q["id"]: q["value"] for q in hover["properties"]}
+    assert props["custom.hideFrom"] == {"legend": True, "tooltip": False, "viz": False}
+    assert props["custom.drawStyle"] == "line"
+    assert props["custom.lineWidth"] == 0
+    assert props["custom.showPoints"] == "never"
 
 
 def test_both_moving_averages_are_lines_and_the_takeover_one_shows_its_points():
@@ -483,12 +532,24 @@ def test_the_jet_panels_bars_are_one_colour_not_good_and_bad():
     assert properties["color"] == {"mode": "fixed", "fixedColor": "blue"}
 
 
+def _colours(name):
+    """The colours the name-pattern overrides give a series called `name`."""
+    return [p["value"]["fixedColor"] for o in _score_panel()["fieldConfig"]["overrides"]
+            if o["matcher"]["id"] == "byRegexp"
+            and re.search(o["matcher"]["options"].strip("/"), name)
+            for p in o["properties"] if p["id"] == "color"]
+
+
 def test_the_accounts_have_their_own_colours():
-    dashboard = json.loads(Path("grafana/dashboards/score-per-round.json").read_text(encoding="utf-8"))
-    panel = next(p for p in dashboard["panels"] if p["title"].startswith("Score per round"))
-    named = {o["matcher"]["options"] for o in panel["fieldConfig"]["overrides"]}
-    assert {"mobius0", "mobius1", "mobius2", "mobius3", "no account"} <= named
-    assert not {"main", "acct1", "acct2", "acct3"} & named
+    """The hover series take their account's colour, so the ring on a hovered dot does too."""
+    colours = [_colours(a) for a in ("mobius0", "mobius1", "mobius2", "mobius3", "no account")]
+    assert all(len(c) == 1 for c in colours) and len({c[0] for c in colours}) == 5
+    assert _colours("mobius2, J35 DRAKEN, K/D/A 0/5/0") == _colours("mobius2")
+    assert not any(_colours(name) for name in ("main", "acct1", "acct2", "acct3"))
+
+
+def test_a_taken_over_rounds_hover_series_stays_orange():
+    assert _colours("manual takeover, mobius2, J35 DRAKEN, K/D/A 0/5/0") == ["orange"]
 
 
 # -- Phase 2: the ingest after a session ---------------------------------------------

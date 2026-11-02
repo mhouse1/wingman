@@ -8,6 +8,7 @@ of raising AttributeError.
 
 import threading
 import time
+import types
 import pytest
 import yaml
 import wingman.controller as controller_module
@@ -15,7 +16,7 @@ from wingman.controller_config import ControllerConfig
 
 from constants import CONFIG_PATH
 from wingman.controller import Controller
-from wingman.analyzer import GameState
+from wingman.analyzer import GameState, GameStateAnalyzer
 from tests.perception_fake import PerceptionFake
 
 
@@ -1033,24 +1034,157 @@ def test_enter_in_battle_takes_over_for_the_round_with_no_commanded_flight(monke
     assert ctrl._auto_respawn_restart is False
 
 
-def test_enter_outside_battle_takes_nothing(monkeypatch):
+@pytest.mark.parametrize("state", [GameState.GAME_LOBBY, GameState.GAME_WAITING])
+def test_enter_outside_battle_takes_nothing(monkeypatch, state):
     """In the lobby Enter is chat: no takeover, no hold, auto restart untouched."""
     from wingman.keybindings import MANUAL_TAKEOVER_KEY
-    ctrl, analyzer = _held_ctrl(monkeypatch, GameState.GAME_LOBBY)
+    ctrl, analyzer = _held_ctrl(monkeypatch, state)
     assert ctrl._handle_maneuver_key_press(MANUAL_TAKEOVER_KEY) is False
     assert analyzer.trigger_calls == []
     assert not ctrl.manual_held_for_round()
     assert ctrl._auto_respawn_restart is True
 
 
-def test_enter_within_the_entry_grace_is_ignored(monkeypatch):
-    """SAF-001.2 still applies: an Enter queued from lobby chat must not take a
-    fresh round for its whole length."""
+def test_enter_within_the_entry_grace_takes_over(monkeypatch):
+    """Wingman never injects Enter, so a press in the grace is the operator's.
+    The grace dropped 12 of 73 presses from 2026-10-30 to 2026-11-01, 11 of them
+    at the start of a round, which is when the operator reaches for it."""
     from wingman.keybindings import MANUAL_TAKEOVER_KEY
     ctrl, analyzer = _held_ctrl(monkeypatch, GameState.GAME_BATTLE)
     ctrl._game_battle_since = time.time()
-    assert ctrl._handle_maneuver_key_press(MANUAL_TAKEOVER_KEY) is False
-    assert not ctrl.manual_held_for_round()
+    assert ctrl._handle_maneuver_key_press(MANUAL_TAKEOVER_KEY) is True
+    assert analyzer.trigger_calls == ["manual_takeover"]
+    assert ctrl.manual_held_for_round()
+
+
+def test_an_arrow_key_within_the_entry_grace_is_still_ignored(monkeypatch):
+    """SAF-001.2 keeps its stale-keystroke protection for the other takeover keys."""
+    ctrl, analyzer = _held_ctrl(monkeypatch, GameState.GAME_BATTLE)
+    ctrl._mission_lock.acquire(blocking=False)
+    try:
+        ctrl._game_battle_since = time.time()
+        assert ctrl._handle_maneuver_key_press("up") is False
+        assert analyzer.trigger_calls == []
+    finally:
+        if ctrl._mission_lock.locked():
+            ctrl._mission_lock.release()
+
+
+@pytest.mark.parametrize("state", [GameState.GAME_STARTING,
+                                   GameState.GAME_STARTING_STALLED,
+                                   GameState.GAME_UNKNOWN])
+def test_enter_before_the_battle_claims_the_round(monkeypatch, state):
+    """8 of the 24 dropped presses landed in the Good Luck countdown. The claim
+    moves nothing yet: the battle has not started."""
+    from wingman.keybindings import MANUAL_TAKEOVER_KEY
+    ctrl, analyzer = _held_ctrl(monkeypatch, state)
+    assert ctrl._handle_maneuver_key_press(MANUAL_TAKEOVER_KEY) is True
+    assert analyzer.trigger_calls == []
+    assert ctrl.manual_held_for_round()
+    assert ctrl._airframe_handed_back() == "manual takeover"
+
+
+def test_enter_before_the_battle_still_stops_commanded_flight(monkeypatch):
+    """SAF-001: a mission can be up while the FSM reads GAME_UNKNOWN, and a claim
+    must not turn the takeover that stops it into a note for later."""
+    from wingman.keybindings import MANUAL_TAKEOVER_KEY
+    ctrl, analyzer = _held_ctrl(monkeypatch, GameState.GAME_UNKNOWN)
+    ctrl._mission_lock.acquire(blocking=False)
+    try:
+        assert ctrl._handle_maneuver_key_press(MANUAL_TAKEOVER_KEY) is True
+        assert ctrl._mission_cancel.is_set()
+        assert ctrl.manual_held_for_round()
+    finally:
+        if ctrl._mission_lock.locked():
+            ctrl._mission_lock.release()
+
+
+def _real_fsm_ctrl(monkeypatch):
+    """A Controller on the real FSM, parked in GAME_STARTING."""
+    monkeypatch.setattr(controller_module, "keyboard_module", None)
+    cfg = _load_config()
+    analyzer = GameStateAnalyzer(cfg)
+    ctrl = Controller((0, 0, cfg["region"]["width"], cfg["region"]["height"]),
+                      analyzer=analyzer)
+    assert analyzer.trigger_event("unknown_to_lobby_detected")
+    assert analyzer.trigger_event("cancel_detected")
+    assert analyzer.game_state == GameState.GAME_STARTING
+    return ctrl, analyzer
+
+
+def _run_starting_loop(ctrl, analyzer, monkeypatch, done):
+    """The real GAME_STARTING loop, with Good Luck read on its first scan."""
+    monkeypatch.setattr(ctrl, "_capture",
+                        types.SimpleNamespace(grab_from_thread=lambda: object()))
+    monkeypatch.setattr(analyzer, "scan_region_for_good_luck", lambda _frame: True)
+    monkeypatch.setattr(ctrl, "_good_luck_wait_s", 0.2)
+    ctrl._start_game_starting_loop()
+    deadline = time.time() + 5.0
+    while not done() and time.time() < deadline:
+        time.sleep(0.02)
+
+
+def test_a_claimed_round_enters_manual_and_launches_no_mission(monkeypatch):
+    """The 2026-11-01 05:42 press sequence, with the first press now honoured:
+    no second press, and wingman never flies the opening seconds."""
+    from wingman.keybindings import MANUAL_TAKEOVER_KEY
+    ctrl, analyzer = _real_fsm_ctrl(monkeypatch)
+    launched = []
+    monkeypatch.setattr(ctrl, "_start_default_mission", lambda: launched.append(1))
+    try:
+        ctrl._handle_maneuver_key_press(MANUAL_TAKEOVER_KEY)
+        _run_starting_loop(ctrl, analyzer, monkeypatch,
+                           lambda: analyzer.game_state == GameState.GAME_BATTLE_MANUAL)
+        assert analyzer.game_state == GameState.GAME_BATTLE_MANUAL
+        assert launched == []
+        assert ctrl.manual_held_for_round()
+        assert ctrl._auto_respawn_restart is False
+    finally:
+        analyzer.cleanup()
+
+
+def test_an_unclaimed_round_still_launches_the_mission(monkeypatch):
+    ctrl, analyzer = _real_fsm_ctrl(monkeypatch)
+    launched = []
+    monkeypatch.setattr(ctrl, "_start_default_mission", lambda: launched.append(1))
+    try:
+        _run_starting_loop(ctrl, analyzer, monkeypatch, lambda: launched)
+        assert analyzer.game_state == GameState.GAME_BATTLE
+        assert launched == [1]
+    finally:
+        analyzer.cleanup()
+
+
+def test_a_claim_survives_a_stall_into_the_battle(monkeypatch):
+    """2026-10-31 15:32: GAME_STARTING timed out, the FSM fell to GAME_UNKNOWN,
+    and the round was found 10 s later. The operator's press belongs to it."""
+    from wingman.keybindings import MANUAL_TAKEOVER_KEY
+    ctrl, analyzer = _real_fsm_ctrl(monkeypatch)
+    try:
+        ctrl._handle_maneuver_key_press(MANUAL_TAKEOVER_KEY)
+        for trigger in ("starting_timeout", "starting_stalled_reclassify"):
+            assert analyzer.trigger_event(trigger)
+            ctrl.note_round_state(analyzer.game_state)
+            assert ctrl.manual_held_for_round()
+        assert analyzer.trigger_event("unknown_to_battle_detected")
+        ctrl.note_round_state(analyzer.game_state)
+        assert analyzer.game_state == GameState.GAME_BATTLE_MANUAL
+    finally:
+        analyzer.cleanup()
+
+
+def test_a_claim_ends_when_the_round_never_starts(monkeypatch):
+    """ADR 102: PLAY came back. The claim was for a round that did not happen,
+    so it must not silently hold the next one."""
+    from wingman.keybindings import MANUAL_TAKEOVER_KEY
+    ctrl, analyzer = _real_fsm_ctrl(monkeypatch)
+    try:
+        ctrl._handle_maneuver_key_press(MANUAL_TAKEOVER_KEY)
+        assert analyzer.trigger_event("starting_play_visible")
+        ctrl.note_round_state(analyzer.game_state)
+        assert not ctrl.manual_held_for_round()
+    finally:
+        analyzer.cleanup()
 
 
 def test_a_flight_key_takeover_does_not_hold_the_round(monkeypatch):

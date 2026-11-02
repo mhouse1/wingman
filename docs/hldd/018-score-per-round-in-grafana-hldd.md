@@ -301,9 +301,11 @@ one `jsonb` column, so a new key needs no change to the table, the ingest or the
     stats file but did write that line, and its 12 rounds were first drawn as "no account".
   - Any `tags` object in the stats file is copied through. One at the top of the file covers the
     whole session; one in a mission record covers a value that can change between rounds, and
-    wins over the session's. Wingman writes `jet` into each mission record
-    ([ADR 167](../adr/167-read-each-rounds-jet-from-the-lobby.md)). A round rebuilt from a log takes
-    it from the log's `JET NAME:` line.
+    wins over the session's. Wingman writes `jet` into each mission record: read at the PLAY click
+    ([ADR 167](../adr/167-read-each-rounds-jet-from-the-lobby.md)) and again through the wait for a
+    match, so a jet changed there counts
+    ([ADR 168](../adr/168-read-the-jet-again-through-the-wait-for-a-match.md)). A round rebuilt from
+    a log takes it from the log's last `JET NAME:` line.
 - **Past rounds.** The ingest re-reads every stats file and updates rows that already exist, so a
   new tag also reaches past rounds whose files are still on VEDA.
 - **In a query.** `WHERE tags->>'jet' = 'j20'` filters on one tag, and
@@ -365,7 +367,9 @@ Wingman flies in Mobius Squadron, tag `[ISAF]` ([Job Aid 013](../job-aids/013-jo
   - run only in the lobby between rounds: not during matchmaking, in a party or with an invite
     open, and not when a stop is pending;
   - run at most once a day: `squadron_ranking.queue_at` (09:38:30 local time, operator
-    2026-10-31) queues a reading, and the next lobby takes it;
+    2026-10-31) queues a reading, and the next lobby takes it. A try that reads nothing is tried
+    again, and a day with no reading yet falls to the next session that day
+    ([ADR 170](../adr/170-a-missed-squadron-reading-falls-to-the-next-session.md));
   - return to the lobby every time, by the screens' own controls. It must never press ESC, which
     opens Exit to Desktop on the lobby;
   - hold off wingman's stall handling while it runs: the lobby quick-scan, stall recovery (which
@@ -529,7 +533,7 @@ reading in each period instead (see Squadron ranking).
 
 | Panel | Type | Shows |
 |-------|------|-------|
-| Score per round | Time series: points, plus a line each | Every read round at `ended_at`: wingman's own as dots in one colour per account, with their moving average over the last `window` read rounds pooled over the accounts, and the rounds with a manual takeover as their own dots and moving average (operator, 2026-10-29), to see whether a takeover scores better than wingman alone. The takeover average shows its points: its rounds are few, and a line with one point draws nothing. The account dots come from a `metric` column, so a new account gets its own series with no change to the dashboard |
+| Score per round | Time series: points, plus a line each | Every read round at `ended_at`: wingman's own as dots in one colour per account, with their moving average over the last `window` read rounds pooled over the accounts, and the rounds with a manual takeover as their own dots and moving average (operator, 2026-10-29), to see whether a takeover scores better than wingman alone. The takeover average shows its points: its rounds are few, and a line with one point draws nothing. The account dots come from a `metric` column, so a new account gets its own series with no change to the dashboard. Hovering a dot names its round's account, jet and K/D/A (see Hovering a dot) |
 | By period | Time series: bars | `aggregate` of `metric` per `granularity`, for example the sum of score per month |
 | Rounds per period | Time series: stacked bars | Rounds flown and rounds read per period |
 | Totals in range | Stat | Rounds flown, rounds read, total score, and the mean and median per read round, for wingman's own rounds; and the rounds with a manual takeover, counted apart |
@@ -581,6 +585,39 @@ Grafana's transformations allow further changes without writing SQL. For example
 calculation" provides cumulative and window functions, and "Filter data by values" filters rows. A
 panel changed this way is kept by exporting the dashboard JSON, as above.
 
+**Hovering a dot (operator, 2026-11-01).** Hovering a dot on Score per round shows its round's
+account, jet and K/D/A beside its score, for example `mobius2, J35 DRAKEN, K/D/A 0/5/0`. In Grafana
+12.2 a time series tooltip shows one series' name and value and nothing else from its row, so the
+details go in the name:
+
+- **Query D** makes one series per account, jet and K/D/A: 460 for the 743 read rounds on
+  2026-11-01. A round with no jet reads `jet not recorded`. Of the 548 read rounds with none, all
+  but one ended before 06:56 on 2026-10-31, the first round with a jet
+  ([ADR 167](../adr/167-read-each-rounds-jet-from-the-lobby.md)).
+- **It draws nothing.** Its series are lines of width 0 with no points, left out of the legend, so
+  the account dots stay the ones on screen and in the legend. A legend click leaves alone any series
+  hidden from the legend, so drawn dots stayed on screen when one account was isolated. Hover still
+  rings the dot.
+- **It is the first query.** Two series at one spot tie, and the first wins. After the account dots,
+  some tooltips read `mobius3 300`, with no details.
+- **Its colours** come from the account dots' name patterns, so the ring takes the dot's colour. A
+  new account's rounds keep their tooltip, and their ring takes a palette colour until the account
+  gets a pattern.
+
+The tooltip goes to the nearest dot by height within about 15 px of the mouse, so a crowded chart
+can name a neighbour. Measured on 2026-11-01 in headless Chromium, 1,800 px of plot, with the mouse
+placed on every read round's dot in turn and the tooltip compared with the round's row:
+
+| Time range | Rounds per 100 px | Rounds | That round | A neighbour | Score only | Tooltip time is the round's |
+|------------|-------------------|--------|------------|-------------|------------|-----------------------------|
+| Last 30 days, 5 of them flown | 245 | 743 | 427 (58%) | 313 (42%) | 3 | 98 of 740 |
+| The 5 days flown | 42 | 743 | 615 (83%) | 122 (16%) | 6 | 491 of 737 |
+| One day, 2026-10-31 | 10 | 174 | 167 (96%) | 5 (3%) | 2 | 167 of 172 |
+
+Of the neighbours, 226 of 313, 101 of 122 and 5 of 5 had the same score as the dot, so nothing on
+the chart could tell them apart. The ring shows which dot the tooltip means, and the name and score
+always belong to one round. To read one round, narrow the time range first.
+
 **Reading the dashboard.**
 
 - Compare periods by the mean per read round, with the count beside it, and only where nearly
@@ -599,6 +636,11 @@ panel changed this way is kept by exporting the dashboard JSON, as above.
 - The first and last periods of a range are usually partial.
 - With fewer than a few hundred rounds in a period, a difference in the mean is mostly noise (see
   Context).
+- The time in a Score per round tooltip is that of the round nearest the mouse across the chart,
+  not always the hovered dot's. When they differ, it is off by a median of 22 minutes on the last
+  30 days and 5 on one day. It is the only part of that tooltip that can belong to another round.
+- With an account isolated in the legend, the hidden accounts' rounds still answer a hover, on empty
+  chart.
 
 ### Make targets
 
@@ -654,6 +696,9 @@ Everything in this table is tracked, except `grafana/.env`. The switch is turned
   - **A manual takeover.** A mission's takeovers are counted, from a stats file or a log, and a
     takeover does not carry into the next round. Every panel but Score per round leaves taken-over
     rounds out, and Score per round averages them apart.
+  - **Hovering a dot.** The hover series name the account, jet and K/D/A, of taken-over rounds too,
+    and keep a round with no jet. They come first, draw nothing, stay out of the legend, and take
+    their account's colour.
   - **The change log.** `grafana/changes.yaml` parses, and every entry has a label and a time with
     its offset.
   - **The load.** The CSV for `COPY` is correct.
@@ -755,6 +800,7 @@ Everything in this table is tracked, except `grafana/.env`. The switch is turned
 | Memory on VEDA, which had 4 to 8 GB of swap in use during the 2026-10-27 and 28 sessions | The stack runs on demand; V2 measures it |
 | A Grafana upgrade changes the dashboard JSON schema | The image is pinned; upgrade deliberately and re-export the JSON |
 | A tag value spelt two ways (`j20` and `J-20`) splits a filter | Wingman writes the values, not a person; the Tags panel shows every value in use |
+| The hover series grow with the rounds in range. At 460 the page rendered in 4.3 s against 4.4 s without them; a full 30 days, about 4,000 rounds, is not yet measured | They draw nothing, so a slow range is the only effect. If it comes to that, drop the account from their names |
 
 ## Alternatives considered
 
@@ -804,6 +850,16 @@ Everything in this table is tracked, except `grafana/.env`. The switch is turned
 - **Wingman writing each round to the database as it reads it.** The charts would be live, but the
   main loop would depend on a database server, and the stats file already holds every read round.
   Not now (see Non-goals).
+- **For Hovering a dot: an XY chart for Score per round.** It finds the dot under the mouse in both
+  directions and shows extra fields in its tooltip, which suits the request. Rejected: in Grafana
+  12.2 it has no annotations, so no change markers (Goal 9), and no drag to zoom.
+- **For Hovering a dot: a tooltip listing all series, with the jet and K/D/A as hidden fields.** No
+  overlay, and its rows would all come from one round. Rejected: it picks the row by time alone
+  (inferred from the tooltip's code, not measured), so with several rounds to a pixel most dots
+  could not be reached, and a miss could be far up or down the chart.
+- **For Hovering a dot: a data link in the tooltip.** A link's title can hold the details, but it
+  shows on hover only as `oneClick`, which reads "Click to open …" and makes every click on the
+  chart follow it. Rejected.
 
 ## Open questions
 

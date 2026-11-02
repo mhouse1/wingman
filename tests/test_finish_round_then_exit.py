@@ -593,3 +593,175 @@ def test_standby_is_not_armed_when_close_game_is_disabled():
 
 def test_standby_is_not_armed_for_the_finish_round_exit():
     assert "and not finish_round_exit" in MAIN_SRC
+
+
+# --- ADR 169: 'z' on the lobby screen ends wingman whatever the FSM believes --
+
+class _Pool:
+    """Runs a submitted read at once, so a test can assert straight after it."""
+    def submit(self, fn, *args):
+        fn(*args)
+
+
+def _z_rig(monkeypatch, state, read_says=None):
+    """The real hotkey closure on the real FSM, in `state`. Only the OCR is
+    canned: `read_says` is the crop that reads true, and None reads nothing."""
+    import threading
+    import time
+    import types
+    import numpy as np
+    import yaml
+    from constants import CONFIG_PATH
+    from wingman import analyzer as analyzer_module, controller as controller_module
+    from wingman.analyzer import GameStateAnalyzer
+    from wingman.controller import Controller
+    from wingman.state import GameState
+
+    class _Keyboard:
+        def __init__(self):
+            self.keys = {}
+
+        def on_press_key(self, key, callback, suppress=False):
+            self.keys[key] = callback
+
+        def add_hotkey(self, key, callback):
+            pass
+
+        def release(self, key):
+            pass
+
+        def unhook_all(self):
+            self.keys.clear()
+
+    keyboard = _Keyboard()
+    monkeypatch.setattr(controller_module, "keyboard_module", keyboard)
+    cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+    analyzer = GameStateAnalyzer(cfg)
+    ctrl = Controller((0, 0, cfg["region"]["width"], cfg["region"]["height"]),
+                      analyzer=analyzer, exit_event=threading.Event())
+    analyzer.set_round_start_suppressor(ctrl.finish_round_requested)
+    ctrl.register_hotkeys()
+    assert analyzer.trigger_event("unknown_to_lobby_detected")
+    if state != GameState.GAME_LOBBY:
+        assert analyzer.trigger_event("manual_force_battle")
+    if state == GameState.GAME_END_B:
+        assert analyzer.trigger_event("click_to_detected")
+    assert analyzer.game_state == state
+
+    frame = np.zeros((cfg["region"]["height"], cfg["region"]["width"], 3), dtype=np.uint8)
+    analyzer._click_to_latest_frame = frame
+    analyzer._click_to_frame_ts = time.time()
+    monkeypatch.setattr(GameStateAnalyzer, "ocr_executor", property(lambda _self: _Pool()))
+    words = {crop: tuple(analyzer.crops[crop].text) for crop in ("PLAY", "READY")}
+
+    def read(_image, tokens):
+        return (read_says is not None and tuple(tokens) == words[read_says], 0.0, None)
+
+    monkeypatch.setattr(analyzer_module, "_process_text_region", read)
+
+    def press():
+        ctrl._last_finish_round_press = 0.0
+        keyboard.keys["z"](types.SimpleNamespace())
+
+    return types.SimpleNamespace(ctrl=ctrl, analyzer=analyzer, press=press, keyboard=keyboard)
+
+
+@pytest.mark.parametrize("button", ["PLAY", "READY"])
+def test_z_on_the_lobby_screen_ends_a_battle_that_is_not_there(monkeypatch, button):
+    """2026-11-01 09:16: a health probe read lobby digits, the FSM said
+    GAME_BATTLE over the PLAY button, and 'z' waited for a next lobby."""
+    from wingman.state import GameState
+    rig = _z_rig(monkeypatch, GameState.GAME_BATTLE, read_says=button)
+    try:
+        rig.press()
+        assert rig.ctrl.finish_round_requested()
+        assert rig.analyzer.game_state == GameState.GAME_LOBBY, \
+            "the main loop's safe point is the FSM's state, so the stop only fires from here"
+    finally:
+        rig.analyzer.cleanup()
+
+
+def test_z_in_a_real_battle_still_finishes_the_round(monkeypatch):
+    from wingman.state import GameState
+    rig = _z_rig(monkeypatch, GameState.GAME_BATTLE, read_says=None)
+    try:
+        rig.press()
+        assert rig.ctrl.finish_round_requested()
+        assert rig.analyzer.game_state == GameState.GAME_BATTLE
+    finally:
+        rig.analyzer.cleanup()
+
+
+def test_a_cancel_during_the_read_leaves_the_battle_alone(monkeypatch):
+    """The read runs on the pool, so a second press can land while it does."""
+    from wingman.state import GameState
+    rig = _z_rig(monkeypatch, GameState.GAME_BATTLE, read_says="PLAY")
+    try:
+        rig.ctrl._finish_round_event.clear()
+        rig.analyzer.stop_if_lobby_on_screen()
+        assert rig.analyzer.game_state == GameState.GAME_BATTLE
+    finally:
+        rig.analyzer.cleanup()
+
+
+def test_a_stale_frame_is_no_evidence_of_the_lobby(monkeypatch):
+    """Frames stop arriving in a stalled loop; the last one may be an old lobby."""
+    from wingman.state import GameState
+    rig = _z_rig(monkeypatch, GameState.GAME_BATTLE, read_says="PLAY")
+    try:
+        rig.ctrl._finish_round_event.set()
+        rig.analyzer._click_to_frame_ts = 0.0
+        rig.analyzer.stop_if_lobby_on_screen()
+        assert rig.analyzer.game_state == GameState.GAME_BATTLE
+    finally:
+        rig.analyzer.cleanup()
+
+
+def test_a_repeat_press_in_the_lobby_does_not_cancel_the_stop(monkeypatch):
+    """The stop fires within a tick there, so a repeat is the operator making
+    sure. On 2026-11-01 they pressed 'z' eight times in seven seconds."""
+    from wingman.state import GameState
+    rig = _z_rig(monkeypatch, GameState.GAME_LOBBY)
+    try:
+        rig.press()
+        rig.press()
+        assert rig.ctrl.finish_round_requested()
+    finally:
+        rig.analyzer.cleanup()
+
+
+@pytest.mark.parametrize("state_name", ["GAME_BATTLE", "GAME_END_B"])
+def test_a_repeat_press_still_cancels_while_there_is_something_to_wait_for(monkeypatch, state_name):
+    """ADR 094: a deferred stop that cannot be recalled is a trap."""
+    from wingman.state import GameState
+    rig = _z_rig(monkeypatch, GameState[state_name], read_says=None)
+    try:
+        rig.press()
+        rig.press()
+        assert not rig.ctrl.finish_round_requested()
+    finally:
+        rig.analyzer.cleanup()
+
+
+def test_z_in_standby_closes_everything(monkeypatch):
+    """2026-11-01 09:16:19: five presses in standby toggled a flag nothing reads."""
+    from wingman.state import GameState
+    rig = _z_rig(monkeypatch, GameState.GAME_LOBBY)
+    try:
+        rig.ctrl._operator_stop_event.set()
+        rig.press()
+        assert rig.ctrl.close_all_requested()
+    finally:
+        rig.analyzer.cleanup()
+
+
+def test_z_is_kept_when_standby_releases_the_hotkeys(monkeypatch):
+    """It only reached standby through unhook_all leaving the listener's table
+    full. Fixing that leak must not take this key away."""
+    from wingman.state import GameState
+    rig = _z_rig(monkeypatch, GameState.GAME_LOBBY)
+    try:
+        rig.ctrl.cleanup(keep_hotkeys=True)
+        assert set(rig.keyboard.keys) == {"backspace", "z"}
+    finally:
+        rig.analyzer.cleanup()
