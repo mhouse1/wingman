@@ -190,7 +190,7 @@ def register_hotkeys(ctrl, keyboard_module) -> None:
                     # must work — the old state-based echo check ate those.
                     logger.info("Controller: '%s' key pressed - starting the configured mission "
                                 "(%s, state=%s)",
-                                MISSION_J20_KEY, ctrl._default_mission,
+                                MISSION_J20_KEY, ctrl.launch_mission_name(),
                                 current_state.name if current_state is not None and hasattr(current_state, 'name') else current_state)
                     # Force FSM into GAME_BATTLE so lobby-only background loops (quick-scan
                     # stall-ESC, GAME_LOBBY escape loop) stop treating this as an idle lobby.

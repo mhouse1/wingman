@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from wingman.resupply import (
+    ControlledDescent,
     MissilePriority,
     ResupplyMarker,
     ResupplyMarkerMemory,
@@ -637,3 +638,111 @@ def test_the_pursuit_passes_the_occluded_list_to_the_resupply_scan():
     src = inspect.getsource(Controller.pursue_and_engage)
     assert "occluded=resupply_behind)" in src
     assert '"RESUPPLY", "resupply marker")' in src
+
+
+# ADR 171: mission_j20's way down to where ACS flies.
+
+def _descent(max_s=90.0):
+    return ControlledDescent(target_alt_m=3000, angle_deg=-20, tolerance_deg=5,
+                             level_angle_deg=-10, max_s=max_s, now=100.0, min_pull_kph=450)
+
+
+def test_a_shallow_nose_gets_a_pulse_down():
+    assert _descent().update(100.0, 6000.0, -2.0, 1.0) == "down"
+
+
+def test_the_nose_in_the_band_gets_nothing():
+    assert _descent().update(100.0, 6000.0, -22.0, 1.0) == "hold"
+
+
+def test_a_nose_past_the_tolerance_gets_a_pulse_up():
+    assert _descent().update(100.0, 6000.0, -26.0, 1.0) == "up"
+
+
+def test_one_pulse_per_new_sample():
+    """The angle lands about every 3 s; a second pulse on one sample is how the
+    first live pursuit went to -36 deg against a -20 deg limit (2026-09-26 01:58)."""
+    descent = _descent()
+    assert descent.update(100.0, 6000.0, -2.0, 1.0) == "down"
+    assert descent.update(100.2, 6000.0, -2.0, 1.0) == "hold"
+    assert descent.update(103.0, 5900.0, -3.0, 2.0) == "down"
+
+
+def test_at_the_altitude_it_levels_off_before_it_ends():
+    """Operator, 2026-11-01: "descend altitude level out and attack". Down at -20
+    deg with the altitude reached, the chase has not been handed anything yet."""
+    descent = _descent()
+    assert descent.update(100.0, 2990.0, -20.0, 1.0) == "up"
+    assert descent.ended is None
+    assert descent.update(101.0, 2900.0, -14.0, 2.0) == "up"
+    assert descent.update(102.0, 2850.0, -9.0, 3.0) is None
+    assert descent.ended == "level at 2850 m"
+
+
+def test_the_level_off_is_not_undone_by_coming_back_through_the_altitude():
+    descent = _descent()
+    descent.update(100.0, 2950.0, -20.0, 1.0)
+    assert descent.update(101.0, 3050.0, -15.0, 2.0) == "up"
+
+
+def test_no_fresh_altitude_presses_nothing_and_holds_the_chase_off():
+    """The search it used to hand to is safe from here; the chase is not, and an
+    aircraft that cannot read its height at 6000 m must not start one."""
+    descent = _descent()
+    assert descent.update(100.0, None, None, None) == "hold"
+    assert descent.ended is None
+
+
+def test_no_angle_presses_nothing_but_the_descent_goes_on():
+    assert _descent().update(100.0, 6000.0, None, 1.0) == "hold"
+
+
+def test_the_descent_ends_on_its_bound():
+    descent = _descent(max_s=90.0)
+    assert descent.update(189.9, 3500.0, -20.0, 1.0) == "hold"
+    assert descent.update(190.0, 3500.0, -20.0, 2.0) is None
+    assert descent.ended == "time limit at 3500 m"
+
+
+def test_the_bound_holds_with_no_altitude_too():
+    descent = _descent(max_s=90.0)
+    assert descent.update(190.0, None, None, None) is None
+    assert descent.ended == "time limit"
+
+
+def test_a_descent_that_ended_stays_ended():
+    descent = _descent()
+    descent.update(100.0, 2900.0, -5.0, 1.0)
+    assert descent.update(101.0, 6000.0, -2.0, 2.0) is None
+    assert descent.ended == "level at 2900 m"
+
+
+
+def test_a_slow_aircraft_is_not_pulled_up():
+    """2026-11-01 17:49:33: UP pulses under about 330 KPH, and the path ran from -7 to
+    -77 deg. Slow, a steep path is a stalling wing and a pull adds drag."""
+    descent = _descent()
+    assert descent.update(100.0, 6000.0, -60.0, 1.0, 240.0) == "hold"
+    assert descent.pulls_withheld == 1
+
+
+def test_the_pull_comes_back_with_the_speed():
+    descent = _descent()
+    assert descent.update(100.0, 6000.0, -60.0, 1.0, 240.0) == "hold"
+    assert descent.update(102.0, 5800.0, -60.0, 2.0, 600.0) == "up"
+
+
+def test_a_slow_aircraft_may_still_be_put_nose_down():
+    """Down is how it gets its speed back."""
+    assert _descent().update(100.0, 6000.0, 0.0, 1.0, 240.0) == "down"
+
+
+def test_the_level_off_waits_for_the_speed_too():
+    descent = _descent()
+    assert descent.update(100.0, 2900.0, -20.0, 1.0, 300.0) == "hold"
+    assert descent.ended is None
+    assert descent.update(102.0, 2800.0, -20.0, 2.0, 700.0) == "up"
+
+
+def test_an_unknown_speed_does_not_hold_the_pull_back():
+    assert _descent().update(100.0, 6000.0, -60.0, 1.0, None) == "up"

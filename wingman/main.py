@@ -1593,6 +1593,9 @@ def main():
         jet_recheck = JetRecheck(_ocr_jet, lambda: stats_tracker.jet, _on_jet_changed,
                                  float(jet_cfg.get("recheck_s",
                                                    schema_default("jet_name.recheck_s"))))
+        # ADR 171: the same record picks the mission at battle entry. Live only, as
+        # the read: a replay lane has no jet and flies its configured mission.
+        ctrl.set_jet_source(lambda: stats_tracker.jet)
 
     # Operator, 2026-10-26: each round's score and K/D/A, read off the
     # PERFORMANCE panel during the end-of-round click-through and totalled in

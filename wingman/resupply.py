@@ -398,6 +398,75 @@ class ResupplyPassWatch:
         return ResupplyPass(last_off, outward, now - last_t)
 
 
+class ControlledDescent:
+    """What the pitch does on the way down to where ACS flies, and the level-off
+    there (ADR 171).
+
+    mission_j20 runs out of primaries at 5000 to 7000 m and the pursuit it hands to
+    was made at 3000 m. On 2026-11-01 it followed its target down from there with
+    nothing to stop it: the dive brake acts under 3000 m and the crash recovery
+    waits while a target is in view, so of four pursuits three passed -300 m/s,
+    against 8% of the 5,381 pursuits begun under 3500 m. The worst reached -791 m/s
+    at 2,978 KPH with the pull-out predicted to end at -9,688 m, and crashed. So the
+    aircraft is brought down first, and the pursuit starts where it always has.
+
+    The flight-path angle lands about every 3 s, so this asks for one pulse per new
+    sample and never a hold: a held key overshoots on a lagging reading (ADR
+    068/069). With no fresh altitude it presses nothing and waits, up to `max_s`:
+    the chase it would hand to is what a blind aircraft at 6000 m must not start.
+
+    Nothing pulls up under `min_pull_kph`. Slow, a steep path means a stalling wing,
+    not a low nose, and a pull adds drag and steepens it. On 2026-11-01 three of four
+    descents did that, UP pulses under about 330 KPH with the path running from -7 to
+    -77 deg (17:49:33), and the fourth sent none and stayed under -94 m/s. So the nose
+    is left to fall and the speed to come back.
+
+    No I/O and no clock of its own: `update` is called once per steering tick.
+    """
+
+    def __init__(self, *, target_alt_m: float, angle_deg: float, tolerance_deg: float,
+                 level_angle_deg: float, max_s: float, now: float,
+                 min_pull_kph: float = 0.0) -> None:
+        self.target_alt_m = float(target_alt_m)
+        self.angle_deg = float(angle_deg)
+        self.tolerance_deg = float(tolerance_deg)
+        self.level_angle_deg = float(level_angle_deg)
+        self.min_pull_kph = float(min_pull_kph)
+        self.pulls_withheld = 0
+        self._deadline = now + float(max_s)
+        self._sample_ts: "float | None" = None
+        self._levelling = False
+        self.ended: "str | None" = None   # why it is over
+
+    def update(self, now: float, alt: "float | None", angle: "float | None",
+               sample_ts: "float | None", speed_kph: "float | None" = None) -> "str | None":
+        """`alt`, `angle` and `speed_kph` are fresh readings or None. "down" or "up":
+        one pulse for this new sample. "hold": still flying the descent, with
+        nothing to press this tick. None: it is over, and `ended` says why."""
+        if self.ended is not None:
+            return None
+        if now >= self._deadline:
+            self.ended = "time limit" + ("" if alt is None else " at %.0f m" % alt)
+            return None
+        if alt is None or angle is None:
+            return "hold"
+        self._levelling = self._levelling or alt <= self.target_alt_m
+        if self._levelling and angle >= self.level_angle_deg:
+            self.ended = "level at %.0f m" % alt
+            return None
+        if sample_ts == self._sample_ts:
+            return "hold"
+        self._sample_ts = sample_ts
+        if not self._levelling and angle > self.angle_deg:
+            return "down"
+        if not self._levelling and angle >= self.angle_deg - self.tolerance_deg:
+            return "hold"
+        if speed_kph is not None and speed_kph < self.min_pull_kph:
+            self.pulls_withheld += 1
+            return "hold"
+        return "up"
+
+
 class MissileUrgency:
     """Confirm ammo changes and retain spent-missile urgency for one pursuit."""
 

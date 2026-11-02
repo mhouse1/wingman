@@ -54,7 +54,7 @@ per-session statistics are written on exit.
 One full match cycle:
 
 1. Lobby, popups and matchmaking are handled end to end, into battle.
-2. In battle, the configured mission flies the aircraft. The behavior tree
+2. In battle, the mission for the jet flies the aircraft. The behavior tree
    handles navigation, climb and disengage, and ACS
    ([Design 011](docs/hldd/011-acs-mode-hldd.md)) chases the enemies it can
    see (see [Roadmap](#roadmap)).
@@ -64,7 +64,9 @@ One full match cycle:
    point to rearm
    ([ADR 152](docs/adr/152-pursuit-resupply-priority.md), in live trial). The
    eject-and-dive for a rearmed respawn remains when pursuit is off or its
-   time cap expires.
+   time cap expires. A J-20 comes down to the ACS altitude before this pursuit,
+   and after the rearm climbs back and resumes search and destroy
+   ([ADR 171](docs/adr/171-the-jet-picks-the-mission-and-j20-comes-back-from-a-rearm.md), in live trial).
 5. Respawn detection (dual-sensor, [ADR 064](docs/adr/064-dual-sensor-respawn-detection.md)) and immediate restart the moment
    health returns.
 6. Match-end click-through and return to lobby, then the loop repeats.
@@ -219,7 +221,7 @@ on your own display, and work bare when the nested game window has focus. See [A
 | Key | Action |
 |-----|--------|
 | `enter` | **Manual takeover** — wingman releases every control instantly; only flare deployment continues |
-| `u` | Start the configured mission (`mission.default_mission`) — and, while in manual, hand control back to wingman |
+| `u` | Start the mission for the jet on record (`mission.default_mission` when it has no profile) — and, while in manual, hand control back to wingman |
 | `o` | Start ACS_MISSION, taking the aircraft from a running mission |
 | `n` | Activate unattended mode (also auto-enabled from config) |
 | `end` | Cancel active mission |
@@ -232,11 +234,13 @@ on your own display, and work bare when the nested game window has focus. See [A
 | `backspace` | Stop wingman, leaving MetalStorm up for manual flight; press again to close everything |
 | `z` | Finish the round, then exit and close MetalStorm |
 
-**Missions.** `mission.default_mission` in `wingman/config.yaml` picks the
-mission, and battle entry, respawn and `u` all launch it ([ADR 145](docs/adr/145-mission-jas39-cloak-and-u-launches-the-configured-mission.md)). There are
-two. `acs` (ACS_MISSION, shipped, [Design 011](docs/hldd/011-acs-mode-hldd.md))
+**Missions.** The jet picks the mission ([ADR 171](docs/adr/171-the-jet-picks-the-mission-and-j20-comes-back-from-a-rearm.md)): the name on the lobby label is matched against
+`jet_profile.profiles`, and any other jet flies `mission.default_mission` in
+`wingman/config.yaml`. Battle entry and `u` launch it, and a respawn restarts it ([ADR 145](docs/adr/145-mission-jas39-cloak-and-u-launches-the-configured-mission.md)). There are
+two. `acs` (ACS_MISSION, the default, [Design 011](docs/hldd/011-acs-mode-hldd.md))
 climbs, fires along the bore sight and hands over to pursuit; it was the Su-30 script, renamed once it flew other jets.
-`j20` is the original padlock mission. The loiter, survey, JAS39 and F-111
+`j20`, flown by the J-20, is the original padlock mission: when the primaries run out it descends, levels
+out and attacks as `acs` does, then resupplies, climbs back and resumes search and destroy. The loiter, survey, JAS39 and F-111
 missions were removed ([ADR 160](docs/adr/160-acs-mission-and-j20-are-the-only-missions.md)). Each mission is specified in
 [`docs/missions/`](docs/missions/). In every mission, flares are fired by the
 incoming-missile detector, so they go out only when a missile is actually
@@ -403,9 +407,13 @@ Built and flying today:
   holds in air superiority
   ([Design 015](docs/hldd/015-target-tracking-pursuit-mode-hldd.md)).
 
-Not built yet: weapon-lock confirmation, and choosing ACS
-([Design 011](docs/hldd/011-acs-mode-hldd.md)) or padlock
-automatically from the jet profile. Today ACS_MISSION
+- **Jet detection** (live): the jet read off the lobby
+  picks the mission, so a J-20 flies `j20` and any other jet `acs`
+  ([ADR 171](docs/adr/171-the-jet-picks-the-mission-and-j20-comes-back-from-a-rearm.md)).
+
+Not built yet: weapon-lock confirmation, and choosing the engagement tactic
+inside the behavior tree from the jet profile
+([Design 011](docs/hldd/011-acs-mode-hldd.md)). Today ACS_MISSION
 (`acs`) and the missiles-empty response start the ACS
 ([Design 011](docs/hldd/011-acs-mode-hldd.md)) pieces
 ([ADR 160](docs/adr/160-acs-mission-and-j20-are-the-only-missions.md)).
@@ -431,6 +439,7 @@ Roadmap: [`docs/PROJECT_AI_ROADMAP.md`](docs/PROJECT_AI_ROADMAP.md) · Architect
 
 | Document | Description |
 |---|---|
+| [`docs/adr/171-the-jet-picks-the-mission-and-j20-comes-back-from-a-rearm.md`](docs/adr/171-the-jet-picks-the-mission-and-j20-comes-back-from-a-rearm.md) | The jet read off the lobby picks the mission; mission_j20's rearm cycle |
 | [`docs/adr/070-missile-evade-tactic.md`](docs/adr/070-missile-evade-tactic.md) | MISSILE_EVADE_MODE tactic (d1–d13, live V5 survival evidence) |
 | [`docs/adr/073-climb-tactic-shadow-first.md`](docs/adr/073-climb-tactic-shadow-first.md) | Climb tactic and the shadow-first validation pipeline for new tactics |
 | [`docs/adr/086-climb-exit-attitude-and-time-to-ground-recovery.md`](docs/adr/086-climb-exit-attitude-and-time-to-ground-recovery.md) | Dive recovery on predicted time to ground |

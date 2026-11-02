@@ -14,6 +14,9 @@ analyzer's OCR pool with that thread's reader (`GameStateAnalyzer.run_ocr`).
 The label stays up through the wait for a match, so `JetRecheck` reads it again
 there: the jet can change after PLAY, and a queue can start with no click of
 wingman's to read it on (operator, 2026-11-01, ADR 168).
+
+The jet on record also picks the mission: `mission_for_jet` finds it in
+`jet_profile.profiles`, and a jet with no profile flies the default (ADR 171).
 """
 
 from __future__ import annotations
@@ -106,10 +109,29 @@ def read_jet(reader, frame, crop) -> JetRead:
     return JetRead(parse_name(text), text, band)
 
 
+def _letters_and_digits(name: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", name.upper())
+
+
 def same_jet(one: str, other: str) -> bool:
     """Whether two names are one jet. OCR read one jet's mark two ways on
     2026-10-31 (A-6 INTRUDER and A-6-INTRUDER), so only letters and digits count."""
-    return re.sub(r"[^A-Z0-9]", "", one) == re.sub(r"[^A-Z0-9]", "", other)
+    return _letters_and_digits(one) == _letters_and_digits(other)
+
+
+def mission_for_jet(name: "str | None", profiles: dict) -> "str | None":
+    """The mission of the first profile in `jet_profile.profiles` whose `match`
+    the jet's name starts with, or None. A start, not the whole name: a profile
+    names the mark (J-20) and the label goes on to the jet's nickname. Only letters
+    and digits count, as in `same_jet`."""
+    if not name:
+        return None
+    jet = _letters_and_digits(name)
+    for profile in profiles.values():
+        match = _letters_and_digits((profile or {}).get("match") or "")
+        if match and jet.startswith(match) and profile.get("mission"):
+            return profile["mission"]
+    return None
 
 
 class JetRecheck:

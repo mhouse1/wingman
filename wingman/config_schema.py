@@ -106,9 +106,18 @@ _CROP = Section(
 )
 
 
+# The missions a launch can name; ADR 160 leaves acs (was su30) and j20.
+_MISSIONS = ("j20", "acs")
+
 # Design 011 (ACS Mode) step 1. Profile names are caller-defined (like
 # `crops:`), not fixed schema keys — MapOf, not Section, for the same reason.
-_JET_PROFILE = Section(children={"has_padlock": BOOL})
+# ADR 171: `match` is the start of the jet's name on the lobby label, and a jet
+# it matches flies `mission` instead of mission.default_mission.
+_JET_PROFILE = Section(children={
+    "has_padlock": BOOL,
+    "match": STR,
+    "mission": Leaf(types=(str,), choices=_MISSIONS),
+})
 
 # capture_budget: 0 = unlimited for that dimension.
 _CAPTURE_BUDGET = Section(children={"max_files": _int(0), "max_mb": _num(0)})
@@ -309,7 +318,7 @@ SCHEMA = Section(
             "j20_turn_guard_s": SECONDS,   # ADR 132
             # ADR 144: which mission battle entry launches; ADR 145 makes the
             # 'u' hotkey launch it too; ADR 160 leaves acs (was su30) and j20
-            "default_mission": Leaf(types=(str,), choices=("j20", "acs")),
+            "default_mission": Leaf(types=(str,), choices=_MISSIONS),
             "padlock_spread_missiles": _int(0),
             # ADR 137 D5, pre_crash_buffer_s/pre_crash_freshness_s/
             # pre_crash_lookback_s added D8
@@ -364,6 +373,17 @@ SCHEMA = Section(
             "coarse_min_hold_s": SECONDS,
             "coarse_max_hold_s": SECONDS,
             "coarse_cooldown_s": SECONDS,
+            # ADR 171: mission_j20's rearm cycle
+            "resupply_return": Leaf(types=(bool,), default=True),
+            "descent_angle_deg": Leaf(types=NUMBER, minimum=-90, maximum=0, default=-20),
+            "descent_tolerance_deg": Leaf(types=NUMBER, minimum=0, default=5),
+            "descent_pulse_s": Leaf(types=NUMBER, minimum=0, default=0.6),
+            "descent_max_s": Leaf(types=NUMBER, minimum=0, default=90.0),
+            "descent_min_pull_kph": Leaf(types=NUMBER, minimum=0, default=450),
+            "resume_alt_m": Leaf(types=NUMBER, minimum=0, default=4000),
+            "climb_back_max_s": Leaf(types=NUMBER, minimum=0, default=90.0),
+            "ceiling_alt_m": Leaf(types=NUMBER, minimum=0, default=5500),
+            "ceiling_path_deg": Leaf(types=NUMBER, minimum=0, default=5),
         }),
 
         # ADR 144: mission_acs, ACS_MISSION (mission_su30 until ADR 160)

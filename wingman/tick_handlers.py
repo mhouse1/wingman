@@ -2724,7 +2724,21 @@ class BehaviorTreeHandler:
 
     def _actuate_engage(self, components, altitude, now, steer_only: bool = False):
         """3.1a: the Engage selection drives ring-engage geometry (ported from
-        the retired EngageNavHandler; log labels kept for parser continuity)."""
+        the retired EngageNavHandler; log labels kept for parser continuity).
+
+        ADR 171 (operator, 2026-11-01): "when padlock turns off steer towards
+        targets and if padlock is on steering continues existing trajectory". The
+        rings are read off a view the padlock camera turns away from the nose, so
+        until it is confirmed off nothing is commanded and nothing reaches the
+        navigator's smoothing. 40 to 46% of the J-20's Engage rolls on 2026-11-01
+        came with it unconfirmed. Unknown is untrusted, as `padlock_state` says.
+        Only where the padlock is in use: acs never presses it.
+        """
+        if (self._ctrl.padlock_state() is not False
+                and not self._ctrl.is_padlock_blocked()):
+            logger.debug("EngageNav: holding the trajectory, padlock camera not "
+                         "confirmed off (ADR 171)")
+            return
         intent = self._nav.update(
             components, altitude, now,
             friendly_components=getattr(self, "_friendly_components", None),

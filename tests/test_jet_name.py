@@ -13,7 +13,15 @@ import yaml
 from wingman import jet_name
 from wingman.config_schema import schema_default
 from wingman.crop_region import CropCoords
-from wingman.jet_name import JetRead, JetRecheck, name_band, parse_name, read_jet, same_jet
+from wingman.jet_name import (
+    JetRead,
+    JetRecheck,
+    mission_for_jet,
+    name_band,
+    parse_name,
+    read_jet,
+    same_jet,
+)
 from wingman.main import _note_jet
 from wingman.state import GameState
 
@@ -411,3 +419,36 @@ def test_real_ocr_reads_each_jet(reader, jet):
 @pytest.mark.slow
 def test_real_frames_off_the_lobby_read_nothing(reader):
     assert read_jet(reader, _load("end_of_round.jpg"), _config_crop()).name is None
+
+
+# ADR 171: the jet on record picks the mission.
+
+_PROFILES = {"j20": {"match": "J-20", "mission": "j20"},
+             "active_only": {"has_padlock": True},
+             "no_mission": {"match": "F-14"}}
+
+
+@pytest.mark.parametrize("name", ["J-20 MIGHTY DRAGON", "J-20", "J20 MIGHTY DRAGON",
+                                  "J-20-MIGHTY DRAGON"])
+def test_a_jet_matches_its_profile_on_the_start_of_its_name(name):
+    """Only letters and digits count, as in `same_jet`: OCR has read one mark two
+    ways, and a profile names the mark because the rest of the label is unproven."""
+    assert mission_for_jet(name, _PROFILES) == "j20"
+
+
+@pytest.mark.parametrize("name", ["J-10 FIREBIRD", "J35 DRAKEN", "JAS39 GRIPEN",
+                                  "F-20 TIGERSHARK", "F-22 RAPTOR", "KF-21 BORAMAE"])
+def test_a_jet_read_on_a_real_label_is_not_mistaken_for_it(name):
+    """The nearest names on the labels in test_screenshots/jet_name/."""
+    assert mission_for_jet(name, _PROFILES) is None
+
+
+def test_no_jet_has_no_mission():
+    assert mission_for_jet(None, _PROFILES) is None
+    assert mission_for_jet("", _PROFILES) is None
+
+
+def test_a_profile_without_a_match_or_a_mission_picks_nothing():
+    assert mission_for_jet("F-14 TOMCAT", _PROFILES) is None
+    assert mission_for_jet("J-20", {"bad": None}) is None
+    assert mission_for_jet("J-20", {}) is None
