@@ -1949,13 +1949,13 @@ class Controller:
         Controller. One record, so the launch and the round's tag cannot disagree."""
         self._jet_source = source
 
-    def flare_reload_at(self) -> "int | None":
-        """The flare count at or under which the jet on record reloads them with its
-        special ability (its profile's `flare_reload_at`), or None for a jet with no
-        such point (operator, 2026-11-02, for the J-20)."""
+    def special_weapon_profile(self) -> "dict | None":
+        """The jet on record's `special_weapon` section ({ability, trigger,
+        flares_at}), or None for a jet without one or a round whose jet was not read
+        (ADR 173). The J-20's flare reload at 1 (operator, 2026-11-02) is one."""
         profile = profile_for_jet(self._jet_on_record(), self._jet_profiles) or {}
-        at = profile.get("flare_reload_at")
-        return None if at is None else int(at)
+        section = profile.get("special_weapon")
+        return dict(section) if section else None
 
     def set_round_note(self, note) -> None:
         """Wire in the session summary's event intake, (event_name, ts) -> None, so a
@@ -3017,21 +3017,23 @@ class Controller:
         self._execute_key_press(SPECIAL_ABILITY, hold_seconds=0.1, block=block,
                                 action_name='reload_flares', ignore_cancel=ignore_cancel)
 
-    def activate_special_weapon(self, block: bool = True):
-        """Press SPECIAL_ABILITY once (ADR 145, written for the JAS39's cloak).
+    def activate_special_weapon(self, block: bool = False, ignore_cancel: bool = True):
+        """Press SPECIAL_ABILITY once (ADR 145; ADR 173 for every jet).
 
         The same key and the same 0.1 s tap as reload_flares; what the ability
         does depends on the airframe. The tap length is hard-coded, as it is for
         every other tap wingman makes (fire, padlock, weapon switch): long
-        enough for the game to register it. There is no log line here:
-        _execute_key_press already logs each press at DEBUG. No mission calls
-        it since ADR 160 removed the JAS39 mission and its cloak loop.
+        enough for the game to register it. The caller logs the press, with the
+        ability and its trigger (ADR 173 D6).
 
+        `ignore_cancel`, as the flares take it: a pursuit runs with the mission
+        cancelled, and the J-20's reload press was dropped there on 2026-11-02.
         Goes through _execute_key_press, which suppresses every key except
         flares during manual takeover (SAF-001).
         """
         self._execute_key_press(SPECIAL_ABILITY, hold_seconds=0.1, block=block,
-                                action_name='activate_special_weapon')
+                                action_name='activate_special_weapon',
+                                ignore_cancel=ignore_cancel)
 
     def _eject_key(self, press: bool, key: str, note: str = "eject_and_dive") -> None:
         """Press or release a key inside the eject sequence, honoring replay simulation.

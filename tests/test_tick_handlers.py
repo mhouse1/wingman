@@ -259,6 +259,10 @@ class _AmmoAnalyzerStub:
         self.low_flares_event = _EventStub()
         self.no_missiles_event = _EventStub()
         self.flares = None
+        self.special_ready = True   # ADR 173: the special weapon's ring is lit
+
+    def special_weapon_ready(self):
+        return self.special_ready
 
     def get_ammo_flares(self):
         return self.flares
@@ -301,8 +305,16 @@ class _AmmoCtrlStub:
         self.padlock_switches = 0
         self.flare_at = None
 
-    def flare_reload_at(self):
-        return self.flare_at
+    def special_weapon_profile(self):
+        """ADR 173: `flare_at` stands for the J-20's low_flares special weapon."""
+        if self.flare_at is None:
+            return None
+        return {"ability": "flare_reload", "trigger": "low_flares",
+                "flares_at": self.flare_at}
+
+    def activate_special_weapon(self, block=False, ignore_cancel=True):
+        self.reloads += 1
+        self.reload_ignored_cancel = ignore_cancel
 
     def is_mission_running(self):
         return self._running
@@ -3498,3 +3510,16 @@ def test_reload_flares_passes_ignore_cancel_to_the_press(monkeypatch):
     assert seen.get("ignore_cancel") is True
     c.reload_flares()
     assert seen.get("ignore_cancel") is False
+
+
+def test_the_special_weapon_presses_through_a_cancelled_mission(monkeypatch):
+    """ADR 173: the pursuit runs with the mission cancelled; the J-20's reload and
+    the MiG-23's burst must still go out there."""
+    from wingman.controller import Controller
+    c = Controller.__new__(Controller)
+    seen = {}
+    monkeypatch.setattr(c, "_execute_key_press", lambda key, **kw: seen.update(kw, key=key),
+                        raising=False)
+    c.activate_special_weapon()
+    assert seen.get("ignore_cancel") is True
+    assert seen.get("key") == "q"

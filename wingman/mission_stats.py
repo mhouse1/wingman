@@ -167,6 +167,9 @@ class MissionStatsTracker:
         self._total_respawns = 0
         self._total_flare_bursts = 0
         self._total_flare_reloads = 0
+        # ADR 173: special-weapon presses, and triggers dropped with the icon unlit.
+        self._total_special_weapon_used = 0
+        self._total_special_weapon_skipped = 0
         self._total_manual_takeovers = 0
         self._total_missile_evades = 0
         # ADR 137: respawns where the aircraft was NOT in a deliberate eject
@@ -348,6 +351,15 @@ class MissionStatsTracker:
             if self._in_mission and self._current.get("trial_arm") is None:
                 self._current["trial_arm"] = arm
 
+        elif event_name == "special_weapon_used":
+            self._total_special_weapon_used += 1
+            if self._in_mission:
+                self._current["special_weapon_count"] = (
+                    self._current.get("special_weapon_count", 0) + 1)
+
+        elif event_name == "special_weapon_skipped":
+            self._total_special_weapon_skipped += 1
+
         elif event_name == "flare_reload":
             self._total_flare_reloads += 1
             if self._in_mission:
@@ -520,6 +532,8 @@ class MissionStatsTracker:
             "total_respawns": self._total_respawns,
             "total_flare_bursts": self._total_flare_bursts,
             "total_flare_reloads": self._total_flare_reloads,
+            "total_special_weapon_used": self._total_special_weapon_used,
+            "total_special_weapon_skipped": self._total_special_weapon_skipped,
             "total_manual_takeovers": self._total_manual_takeovers,
             "total_missile_evades": self._total_missile_evades,
             "total_crashes_with_missiles": self._total_crashes_with_missiles,
@@ -604,6 +618,9 @@ class MissionStatsTracker:
             f"Total respawns    : {s['total_respawns']}",
             f"Total flare bursts: {s['total_flare_bursts']}{bursts_per}",
             f"Flare reloads     : {s['total_flare_reloads']}",
+            f"Special weapon    : {s.get('total_special_weapon_used', 0)} used, "
+            f"{s.get('total_special_weapon_skipped', 0)} triggers with the icon unlit "
+            f"(ADR 173)",
             f"Missile evades    : {s.get('total_missile_evades', 0)}",
             f"Manual takeovers  : {s['total_manual_takeovers']}",
             f"Died armed        : {s.get('total_crashes_with_missiles', 0)}  "
@@ -803,6 +820,7 @@ class MissionStatsTracker:
             "respawn_count": 0,
             "flare_burst_count": 0,
             "flare_reload_count": 0,
+            "special_weapon_count": 0,
             "missile_evade_count": 0,
             "no_missiles_abort": False,
             "manual_takeover_count": 0,

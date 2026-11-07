@@ -117,10 +117,14 @@ _JET_PROFILE = Section(children={
     "has_padlock": BOOL,
     "match": STR,
     "mission": Leaf(types=(str,), choices=_MISSIONS),
-    # The flare count at or under which the jet's special ability reloads them, in
-    # battle or in a pursuit (operator, 2026-11-02); absent keeps the low-flares
-    # reload at exactly 2, in battle only.
-    "flare_reload_at": _int(0),
+    # ADR 173: the jet's special weapon on `q` and the trigger that spends it.
+    # `flares_at` is the low_flares trigger's count (the J-20's flare reload at 1,
+    # operator, 2026-11-02). Absent: no special-weapon press on this jet.
+    "special_weapon": Section(children={
+        "ability": STR,
+        "trigger": Leaf(types=(str,), choices=("incoming", "low_flares", "ready")),
+        "flares_at": _int(0),
+    }, required=frozenset({"ability", "trigger"})),
 })
 
 # capture_budget: 0 = unlimited for that dimension.
@@ -285,6 +289,26 @@ SCHEMA = Section(
                 "max_per_session": _int(0),
                 "dir": STR,
             }),
+        }),
+
+        # ADR 173: the special weapon's ring reader and press policy.
+        "special_weapon": Section(children={
+            "enabled": Leaf(types=(bool,), default=True),
+            "sectors": Leaf(types=(int,), minimum=4, default=16),
+            "min_lit_sectors": Leaf(types=(int,), minimum=1, default=14),
+            # A ring partly under a coloured HUD marker: this many lit, and the
+            # covered sectors making up min_lit_sectors, also reads READY.
+            "min_lit_when_covered": Leaf(types=(int,), minimum=1, default=13),
+            "min_value": Leaf(types=NUMBER, minimum=0, maximum=255, default=200),
+            "max_saturation": Leaf(types=NUMBER, minimum=0, maximum=255, default=60),
+            "inside_margin": Leaf(types=NUMBER, minimum=0, default=40),
+            "outside_margin": Leaf(types=NUMBER, minimum=0, default=8),
+            "stale_after_s": Leaf(types=NUMBER, minimum=0, default=5.0),
+            "press_retry_s": Leaf(types=NUMBER, minimum=0, default=3.0),
+            "max_presses": Leaf(types=(int,), minimum=1, default=2),
+            # Crops of a READY dropping to a partial ring (a press or a misread).
+            "capture_dir": Leaf(types=(str,), default="test_screenshots/special_weapon/live"),
+            "capture_max": Leaf(types=(int,), minimum=0, default=40),
         }),
 
         "fuel": Section(children={

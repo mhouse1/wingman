@@ -1676,6 +1676,7 @@ def main():
         # keeps the debounce and every suppression gate and hands over only
         # the confirmed verdict.
         bt_owns_eject=bt_active,
+        special_weapon_cfg=cfg.get("special_weapon", {}),
     )
     enemy_presence = EnemyPresenceHandler(analyzer, ctrl)
     behavior_tree = BehaviorTreeHandler(

@@ -19,6 +19,7 @@ from .compass import CompassReader
 from .config_schema import schema_default
 from .full_map import FullMapReader
 from .crop_region import CropCoords, get_crop, load_crops, draw_crops
+from .special_weapon import SpecialWeaponReader
 from .telemetry import TelemetryProcessor, pitch_band_from_angle_deg
 # CR-018-15: the FSM vocabulary lives in the leaf module .state, so code that
 # needs only these names does not import EasyOCR through this module. Every
@@ -1004,6 +1005,14 @@ class GameStateAnalyzer:
         # Named percentage-coordinate crop regions (ADR 023)
         self.crops = load_crops(config.get("crops", {}))
 
+        # ADR 173: the special weapon's ring, read on every battle frame. No crop,
+        # or `special_weapon.enabled: false`, leaves it unknown and nothing presses.
+        sw_cfg = config.get("special_weapon", {}) or {}
+        sw_box = self.crops.get("SPECIAL_WEAPON")
+        if sw_cfg.get("enabled") is False:
+            sw_box = None
+        self._special_weapon = SpecialWeaponReader(sw_box, sw_cfg)
+
         # Enemy HSV range for red-color detection in ENEMY_CLOSE_BY crop
         enemy_hsv_cfg = config.get("enemy_hsv", {})
         self._enemy_hsv_lower = np.array(enemy_hsv_cfg.get("lower", [0, 120, 120]), dtype=np.uint8)
@@ -1726,6 +1735,11 @@ class GameStateAnalyzer:
         if value != self._last_logged_fuel:
             logger.debug("Afterburner fuel: %d%%", value)
             self._last_logged_fuel = value
+
+    def special_weapon_ready(self) -> "bool | None":
+        """ADR 173: True while the special weapon's ring is lit, False when it is
+        not, None with no fresh read (outside battle, or no SPECIAL_WEAPON crop)."""
+        return self._special_weapon.ready()
 
     def get_afterburner_fuel_pct(self) -> "int | None":
         """Latest afterburner fuel percentage, or None when unknown/stale.
@@ -2894,6 +2908,9 @@ class GameStateAnalyzer:
         state['is_respawning'] = respawn_detected
         state['respawn_confidence'] = confidence
         state['respawn_method'] = method
+
+        if self.game_state in BATTLE_STATES:
+            self._special_weapon.update(frame)
 
         # Detect incoming missiles - use cached result from background OCR
         with self._incoming_cache_lock:

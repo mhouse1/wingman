@@ -27,6 +27,7 @@ import time
 
 from . import capture_budget
 from .compass import fmt_heading
+from .special_weapon import SpecialWeaponPresser
 from .state import GameState, BATTLE_STATES
 from .suppressed import log_suppressed
 from .terrain_loom import fmt_tau, fmt_taus
@@ -112,6 +113,10 @@ def update_waiting_fallback(
 
 # Single definition lives in analyzer; aliased to keep the local name.
 _BATTLE_STATES = BATTLE_STATES
+
+# ADR 173: a low_flares special weapon without its own `flares_at` fires at the
+# low-flares reload's count.
+_LOW_FLARES_AT = 2
 
 
 
@@ -932,7 +937,7 @@ class AmmoEventsHandler:
     def __init__(self, analyzer, ctrl, mission_cfg, *, perf_tracker=None,
                  stats_tracker=None, emit_capture_event=None,
                  flare_reload_cooldown_s: float = 30.0,
-                 bt_owns_eject: bool = False):
+                 bt_owns_eject: bool = False, special_weapon_cfg=None):
         self._analyzer = analyzer
         self._ctrl = ctrl
         self._perf = perf_tracker
@@ -954,6 +959,10 @@ class AmmoEventsHandler:
         self._padlock_spread_missiles = int(mission_cfg.get("padlock_spread_missiles", 2))
 
         self._last_flare_reload_ts = 0.0
+        # ADR 173: one press policy per (ability, trigger); the jet can change
+        # between rounds, so the profile is asked each tick.
+        self._special_weapon_cfg = special_weapon_cfg or {}
+        self._special_pressers = {}
         self._zero_streak = 0
         self._battle_started_ts = 0.0
         self._ignore_until = 0.0
@@ -1091,6 +1100,9 @@ class AmmoEventsHandler:
         threading.Thread(target=_flare_burst, daemon=True).start()
         self._flare_roll(flares_done)
         self._pursuit_evade(alert_ts)
+        # ADR 173 D4: a jet whose special weapon answers an incoming missile (the
+        # MiG-23's flare burst) spends it here, after the flares are under way.
+        self.tick_special_weapon(incoming_edge=True)
         return True
 
     def _flare_roll(self, flares_done: threading.Event) -> None:
@@ -1124,7 +1136,10 @@ class AmmoEventsHandler:
         self._analyzer.low_flares_event.clear()
         if self._analyzer.game_state != GameState.GAME_BATTLE:
             return
-        if self._jet_flare_reload_at() is not None:
+        if self._special_weapon_profile() is not None:
+            # ADR 173 D5: a jet with a special weapon of its own spends it on its
+            # own trigger; a press here would waste a MiG-23's burst or a JAS39's
+            # cloak as a reload.
             return
         elapsed = time.time() - self._last_flare_reload_ts
         if elapsed < self._flare_reload_cooldown_s:
@@ -1218,41 +1233,82 @@ class AmmoEventsHandler:
         else:
             self._ctrl.eject_and_dive(on_complete=_on_complete)
 
-    def _jet_flare_reload_at(self) -> "int | None":
+    def _special_weapon_profile(self) -> "dict | None":
         try:
-            return self._ctrl.flare_reload_at()
+            return self._ctrl.special_weapon_profile()
         except Exception as exc:
-            log_suppressed(logger, "flare_reload_at", exc)
+            log_suppressed(logger, "special_weapon_profile", exc)
             return None
 
-    def handle_jet_flare_reload(self) -> None:
-        """Operator, 2026-11-02: on a jet whose profile names `flare_reload_at` (the
-        J-20's is 1), the special ability reloads the flares once they read that many
-        or fewer, in battle or in a pursuit, under the same cooldown. The low-flares
-        reload fires on a reading of exactly 2 and only in GAME_BATTLE; J-20 bursts
-        step past 2 and its pursuit runs in GAME_BATTLE_EJECT, so that day the count
-        read 1 about 120 times and 0 about 30 for about three reloads."""
-        at = self._jet_flare_reload_at()
-        if at is None or self._analyzer.game_state not in (
-                GameState.GAME_BATTLE, GameState.GAME_BATTLE_EJECT):
-            return
-        flares = self._analyzer.get_ammo_flares()
-        if flares is None or flares > at:
-            return
-        if time.time() - self._last_flare_reload_ts < self._flare_reload_cooldown_s:
-            return
-        logger.info("Flares %d, at or under the jet's reload point %d: special ability "
-                    "reloads them", flares, at)
-        # Through a cancelled mission, as the flares are: the pursuit runs with the
-        # mission cancelled, and the first live press was dropped.
-        self._ctrl.reload_flares(ignore_cancel=True)
-        self._last_flare_reload_ts = time.time()
+    def _special_weapon_ready(self) -> "bool | None":
+        try:
+            return self._analyzer.special_weapon_ready()
+        except Exception as exc:
+            log_suppressed(logger, "special_weapon_ready", exc)
+            return None
+
+    def tick_special_weapon(self, incoming_edge: bool = False) -> bool:
+        """ADR 173: press the jet's special weapon on its own trigger, only while its
+        HUD icon is lit, in battle or in a pursuit, after the post-respawn grace.
+
+        Triggers: `incoming` (the MiG-23's flare burst) fires on a new incoming
+        alert; `low_flares` (the J-20's reload, operator 2026-11-02) while the flare
+        count reads `flares_at` or fewer; `ready` (the JAS39's cloak) whenever the
+        icon is lit. A jet without a `special_weapon` profile, or with the ability
+        not unlocked (no icon), gets no press. Returns True when `q` went out."""
+        sw = self._special_weapon_profile()
+        if not sw:
+            return False
+        if self._analyzer.game_state not in (GameState.GAME_BATTLE,
+                                             GameState.GAME_BATTLE_EJECT):
+            return False
+        if time.time() < self._ignore_until:
+            return False
+        trigger = sw.get("trigger")
+        ability = sw.get("ability") or "special_weapon"
+        key = (ability, trigger)
+        presser = self._special_pressers.get(key)
+        if presser is None:
+            try:
+                presser = SpecialWeaponPresser.from_config(trigger, self._special_weapon_cfg)
+            except ValueError as exc:
+                log_suppressed(logger, "special_weapon_trigger", exc)
+                return False
+            self._special_pressers[key] = presser
+        if trigger == "incoming":
+            fired = incoming_edge
+        elif trigger == "low_flares":
+            flares = self._analyzer.get_ammo_flares()
+            at = sw.get("flares_at")
+            at = _LOW_FLARES_AT if at is None else int(at)
+            fired = flares is not None and flares <= at
+        else:
+            fired = True
+        ready = self._special_weapon_ready()
+        skipped = presser.skipped_not_ready
+        press = presser.tick(time.time(), ready, fired)
+        if presser.skipped_not_ready != skipped:
+            logger.info("Special weapon %s: %s trigger with the icon %s; flares only",
+                        ability, trigger, "not lit" if ready is False else "unread")
+            if self._stats is not None:
+                self._stats.on_event("special_weapon_skipped", time.time())
+        if not press:
+            return False
+        logger.info("\033[93m✨ Special weapon %s: trigger %s, icon READY\033[0m",
+                    ability, trigger)
+        self._ctrl.activate_special_weapon()
+        now = time.time()
         if self._stats is not None:
-            self._stats.on_event("flare_reload", self._last_flare_reload_ts)
+            self._stats.on_event("special_weapon_used", now)
+            if ability == "flare_reload":
+                self._stats.on_event("flare_reload", now)
+        if ability == "flare_reload":
+            self._last_flare_reload_ts = now
+        return True
 
     def tick_events(self) -> None:
         """Fire the ammo event handlers whose analyzer events are set."""
-        self.handle_jet_flare_reload()
+        self.tick_special_weapon()
         if self._analyzer.low_flares_event.is_set():
             self.handle_low_flares()
         if self._analyzer.no_missiles_event.is_set():

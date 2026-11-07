@@ -59,8 +59,18 @@ jet_profile:
       # flare reload by pressing 'q'". The low-flares reload fires on a reading of
       # exactly 2 and only in GAME_BATTLE: J-20 bursts step past 2, and its pursuit
       # runs in GAME_BATTLE_EJECT, so on 2026-11-02 the count read 1 about 120 times
-      # and 0 about 30 for about three reloads.
-      flare_reload_at: 1
+      # and 0 about 30 for about three reloads. ADR 173: now its special weapon,
+      # pressed only while the icon is lit.
+      special_weapon: {ability: flare_reload, trigger: low_flares, flares_at: 1}
+    # ADR 173 (operator, 2026-11-07): each jet's special weapon on `q`, spent on the
+    # jet's own trigger and only while its HUD icon is lit. A jet without the
+    # ability unlocked shows no icon and gets no press.
+    mig23:
+      match: MIG-23
+      special_weapon: {ability: flare_burst, trigger: incoming}
+    jas39:
+      match: JAS39
+      special_weapon: {ability: cloak, trigger: ready}
 
 unattended_mode: true
 # Party invites: false clicks REJECT, true clicks ACCEPT then readies up.
@@ -279,6 +289,13 @@ crops:
     coords:
     - [0.3167, 0.6333]
     - [0.3604, 0.6722]
+  # ADR 173: the special weapon's ring above the Q key cap. The box hugs the ring:
+  # its centre is the ring's centre and its half-height the ring's radius
+  # (fitted on test_screenshots/special_weapon/ready_full.png: 570.5, 717.2, r 34.4 px).
+  SPECIAL_WEAPON:
+    coords:
+    - [0.2792, 0.569]
+    - [0.315, 0.6263]
   MINIMAP:
     coords:
     - [0.8319, 0.0044]
@@ -538,6 +555,27 @@ health:
   respawn_stall_capture: {enabled: true, capture_after_s: 30.0, recapture_interval_s: 20.0,
     max_per_session: 12}
 fuel: {stale_after_s: 6.0, rearm_margin_pct: 5}
+# ADR 173: the special weapon's ring (crop SPECIAL_WEAPON) and when `q` goes out.
+# A sector of the ring is lit when its brightest pixels reach min_value at no more
+# than max_saturation and stand inside_margin above the disc inside the ring and
+# outside_margin above the background outside it; the ring is READY with
+# min_lit_sectors of `sectors` lit on two reads in a row. Measured on 2026-11-07
+# MiG-23 frames: a full ring scores 16/16, the cooldown disc 13/16 or less, and a
+# taken press's arc 11-14 on its first read and lower after, so it cannot hold 14
+# for two reads; keep press_retry_s longer than two reads for that reason. A press
+# the icon does not answer (still READY after press_retry_s) is repeated, up to
+# max_presses for one trigger. 14, not 15: a lit ring over bright cloud or beside
+# an objective marker misses the outside margin in 2 sectors (ADR 173 D1a).
+# A sector not lit but mostly strongly coloured is covered by a HUD marker (the
+# misreads caught on 2026-11-07 were mostly a yellow target marker across the ring);
+# with min_lit_when_covered lit and the covered ones making up min_lit_sectors, READY.
+special_weapon: {enabled: true, sectors: 16, min_lit_sectors: 14, min_lit_when_covered: 13,
+  min_value: 200,
+  max_saturation: 60, inside_margin: 40, outside_margin: 8, stale_after_s: 5.0,
+  press_retry_s: 3.0, max_presses: 2,
+  # A READY dropping to 8-14 of 16 saves the icon's crop here, up to capture_max a
+  # session: the 2026-11-07 run had 8 one-read drops with no press (cause unseen).
+  capture_dir: test_screenshots/special_weapon/live, capture_max: 40}
 # ADR 098: suppress injection when the game does not have focus. Off until a
 # full session confirms it never suppresses legitimate presses (ADR 098 D6).
 # on_unknown: "inject" (default) or "suppress" — see ADR 098 D4.
