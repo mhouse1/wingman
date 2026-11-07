@@ -77,7 +77,7 @@ class AnalyzerSnapshot:
     # ADR 086 d2: signed altitude rate in m/s, negative while descending. The
     # emergency recovery trigger needs the RATE, not just the value — an
     # altitude threshold cannot distinguish a cruise through 4000 m from a
-    # 560 m/s dive through it, and on 2026-08-21 18:41 it did not.
+    # 560 m/s dive through it, and on 2026-08-21 it did not.
     altitude_rate: "float | None" = None
     # ADR 028 revision 4: friendly / objective minimap icons. Consumed only by
     # Regroup, which fills the ticks where no enemy renders — 59% of them,
@@ -304,7 +304,7 @@ _SETTLED = 2
 
 # Code Review 019 cycle 33: a flight path this steep says the altitude fell
 # faster than the aircraft flies, which only a misread does (the path clamps at
-# 90 deg when the rate outruns the speed). Live 2026-10-18 20:13:20 the HUD read
+# 90 deg when the rate outruns the speed). Live 2026-10-18 the HUD read
 # 2,791, 2,143 and 2,675 m 1.5 s apart and the pull-out trigger fired on the
 # middle one at -90 deg. Over 401 missions such readings neither firing nor
 # clearing it cut its alarms 10% and lifted its precision from 16.5% to 18.5%,
@@ -375,8 +375,12 @@ class BoundaryCondition:
                 release_frac: "float | None" = None,
                 min_clear_frac: float = 0.35,
                 blind_ticks: int = 3,
-                entry_ratio: float = 0.25):
+                entry_ratio: float = 0.25,
+                scale_fn=None):
         self._turn_frac = turn_frac
+        # ADR 171: () -> a factor of 1 or more on every distance below, for a fast
+        # jet that needs the turn sooner; None, or a failing read, is 1.
+        self._scale_fn = scale_fn
         self._recede_frac = recede_frac
         self._yields_to_fn = yields_to_fn
         self._release_frac = release_frac
@@ -415,7 +419,7 @@ class BoundaryCondition:
         # indicator that something upstream has latched.
         #
         # ADR 138: is_respawning alone left a gap. Measured live 2026-09-10
-        # 03:03:26 — the respawn screen clears (is_respawning -> False) up to
+        # — the respawn screen clears (is_respawning -> False) up to
         # ~1.5s BEFORE mission_j20 actually restarts (the ADR 059 respawn-clear
         # stability window), and THAT restart is what arms the ADR 132 turn
         # guard. This condition doesn't wait for mission_running, so it
@@ -449,7 +453,15 @@ class BoundaryCondition:
                 return False
             return self._active
         self._blind = 0
-        clear_at = self._release_frac if self._release_frac else self._turn_frac
+        scale = 1.0
+        if self._scale_fn is not None:
+            try:
+                scale = max(1.0, float(self._scale_fn() or 1.0))
+            except Exception:
+                scale = 1.0
+        turn_frac = self._turn_frac * scale
+        min_clear = self._min_clear_frac * scale
+        clear_at = (self._release_frac if self._release_frac else self._turn_frac) * scale
         # ADR 120: ENTER on the filtered reading, LEAVE on the nearest one.
         #
         # The two errors do not cost the same. A spurious near reading buys one
@@ -465,7 +477,7 @@ class BoundaryCondition:
         # 0.019 -> 0.516. A single reading above `clear_at` releases the turn
         # outright, so that path released turns with the aircraft at the edge.
         if (near if self._active else dist) >= (
-                clear_at if self._active else self._turn_frac):
+                clear_at if self._active else turn_frac):
             # Entering uses turn_frac; leaving uses the wider release_frac, so
             # the two thresholds cannot sit on top of each other and flap.
             self._reset()
@@ -495,7 +507,7 @@ class BoundaryCondition:
         # Recession is also a clearance claim, so it reads the nearest value
         # too — otherwise a filtered reading can manufacture a recession the
         # aircraft never flew.
-        if near >= self._min_clear_frac and near >= self._min_dist + self._recede_frac:
+        if near >= min_clear and near >= self._min_dist + self._recede_frac:
             self._reset()
             return False
         return True
@@ -507,13 +519,15 @@ def make_boundary_condition(turn_frac: "float | None",
                             release_frac: "float | None" = None,
                             min_clear_frac: float = 0.35,
                             blind_ticks: int = 3,
-                            entry_ratio: float = 0.25) -> BoundaryCondition:
+                            entry_ratio: float = 0.25,
+                            scale_fn=None) -> BoundaryCondition:
     """ADR 139 D3: thin factory kept so every existing call site — production
     and test — is unchanged. See ``BoundaryCondition`` for the logic."""
     return BoundaryCondition(turn_frac, recede_frac, yields_to_fn=yields_to_fn,
                              release_frac=release_frac,
                              min_clear_frac=min_clear_frac,
-                             blind_ticks=blind_ticks, entry_ratio=entry_ratio)
+                             blind_ticks=blind_ticks, entry_ratio=entry_ratio,
+                             scale_fn=scale_fn)
 
 
 class ClimbCondition:
@@ -755,7 +769,7 @@ class ClimbCondition:
             return False   # ADR 073: disabled until calibrated
 
         # ADR 086 d2: the emergency trigger is predicted TIME to ground, not
-        # altitude. On 2026-08-21 18:41 the aircraft dived 9203 m -> 2301 m in
+        # altitude. On 2026-08-21 the aircraft dived 9203 m -> 2301 m in
         # 27 s with 2 missiles aboard while the tree kept selecting Engage:
         # the altitude band never opened because the smoothed altitude lags
         # ~1500 m in a 560 m/s dive and the aircraft hit the ground first.
@@ -765,7 +779,7 @@ class ClimbCondition:
         # ADR 086 d2: a respawn is an altitude DISCONTINUITY, not a descent.
         # The smoothed value carries the dead aircraft's numbers across it, so
         # the first post-respawn samples describe a fall that already ended.
-        # Observed 2026-08-21 21:28:49 — fired "2s to ground" at a smoothed
+        # Observed 2026-08-21 — fired "2s to ground" at a smoothed
         # 324m while the new aircraft was at 10m and climbing away at +513m/s.
         if snapshot.is_respawning:
             self._post_respawn = 0
@@ -1099,6 +1113,8 @@ class _BuildContext:
     # altitude floor too). Only BoundaryTurn reads this one. See
     # _build_boundary_slot's docstring for why.
     climb_hard_emergency_fn: "Callable[[], bool] | None" = None
+    # ADR 171: the mission in play's speed scale on BoundaryTurn's distances.
+    boundary_scale_fn: "Callable[[], float] | None" = None
     # ADR 143: RespawnHandler reads this to classify a died-armed death as a
     # likely terrain crash — was the hard emergency active recently, not
     # just this instant (a death detected a tick or two after the dive
@@ -1363,7 +1379,8 @@ def _build_boundary_slot(ctx: "_BuildContext"):
                 min_clear_frac=float(
                     boundary_cfg.get("min_clear_frac", 0.35)),
                 blind_ticks=int(boundary_cfg.get("blind_ticks", 3)),
-                entry_ratio=float(boundary_cfg.get("entry_ratio", 0.25))),
+                entry_ratio=float(boundary_cfg.get("entry_ratio", 0.25)),
+                scale_fn=ctx.boundary_scale_fn),
             **boundary_kwargs),
         hold_s=float(boundary_cfg.get("hold_s", 3.0)), clock=ctx.clock,
     )
@@ -1425,6 +1442,7 @@ def build_tree(bt_cfg: dict, clock=time.time,
                regroup_enabled: bool = False,
                alt_floor_override_fn: "Callable[[], float | None] | None" = None,
                sustain_suppressed_fn: "Callable[[], bool] | None" = None,
+               boundary_scale_fn: "Callable[[], float] | None" = None,
                ) -> py_trees.trees.BehaviourTree:
     """Construct the ADR 024 selector. Pure construction — no analyzer refs.
 
@@ -1447,7 +1465,8 @@ def build_tree(bt_cfg: dict, clock=time.time,
     ctx = _BuildContext(bt_cfg=bt_cfg, clock=clock, actuators=actuators or {},
                         regroup_enabled=regroup_enabled,
                         alt_floor_override_fn=alt_floor_override_fn,
-                        sustain_suppressed_fn=sustain_suppressed_fn)
+                        sustain_suppressed_fn=sustain_suppressed_fn,
+                        boundary_scale_fn=boundary_scale_fn)
     built = _build_slots(ctx)
     children = [built[name] for name in _PRIORITY_ORDER if name in built]
 

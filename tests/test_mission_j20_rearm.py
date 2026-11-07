@@ -39,6 +39,7 @@ from wingman.controller import Controller
 from wingman.controller_config import ControllerConfig
 from wingman.engage_nav import Intent
 from wingman.keybindings import (
+    AFTERBURNER_KEY,
     NOSE_DOWN_KEY,
     NOSE_UP_KEY,
     ROLL_LEFT_KEY,
@@ -74,6 +75,55 @@ def test_a_j20_flies_mission_j20_whatever_the_default_says(monkeypatch, caplog):
     assert _wait(lambda: launched == ["j20"])
     assert ctrl._last_mission == "j20"
     assert "Controller: jet J-20 MIGHTY DRAGON flies mission j20 (ADR 171)" in _messages(caplog)
+
+
+def test_the_mission_trial_draws_a_j20_round_onto_acs_and_says_so(monkeypatch, caplog):
+    """The operator's goal, 2026-11-02: score per round. Drawn once a round at battle
+    entry; the round is tagged with the mission it flew."""
+    caplog.set_level("INFO", logger="wingman.controller")
+    ctrl, launched = _restart_ctrl(monkeypatch, default_mission="acs",
+                                   jet_profiles=_J20_PROFILES)
+    ctrl.set_jet_source(lambda: "J-20 MIGHTY DRAGON")
+    ctrl._j20_acs_share = 1.0
+    notes = []
+    ctrl.set_round_note(lambda name, ts: notes.append(name))
+
+    ctrl._start_default_mission()
+
+    assert _wait(lambda: launched == ["acs"])
+    assert ctrl._last_mission == "acs"
+    assert notes == ["mission_arm_acs"]
+    assert ("Controller: jet J-20 MIGHTY DRAGON flies mission acs (ADR 171, the mission "
+            "trial's arm)") in _messages(caplog)
+
+
+def test_the_mission_trial_arm_can_be_j20(monkeypatch):
+    ctrl, launched = _restart_ctrl(monkeypatch, default_mission="acs",
+                                   jet_profiles=_J20_PROFILES)
+    ctrl.set_jet_source(lambda: "J-20 MIGHTY DRAGON")
+    ctrl._j20_acs_share = 0.5
+    ctrl._mission_rng = type("R", (), {"random": lambda self: 0.9})()
+    notes = []
+    ctrl.set_round_note(lambda name, ts: notes.append(name))
+
+    ctrl._start_default_mission()
+
+    assert _wait(lambda: launched == ["j20"])
+    assert notes == ["mission_arm_j20"]
+
+
+def test_another_jet_is_not_in_the_mission_trial(monkeypatch):
+    ctrl, launched = _restart_ctrl(monkeypatch, default_mission="acs",
+                                   jet_profiles=_J20_PROFILES)
+    ctrl.set_jet_source(lambda: "F-14 TOMCAT")
+    ctrl._j20_acs_share = 1.0
+    notes = []
+    ctrl.set_round_note(lambda name, ts: notes.append(name))
+
+    ctrl._start_default_mission()
+
+    assert _wait(lambda: launched == ["acs"])
+    assert notes == []
 
 
 def test_any_other_jet_flies_the_default(monkeypatch, caplog):
@@ -243,7 +293,7 @@ def _target_steering(messages):
 
 
 def test_a_target_below_the_nose_is_not_chased_down_from_altitude(monkeypatch, caplog):
-    """2026-11-01 16:55:49: pursuit at 7,075 m, a target below, and 12 s later -791
+    """2026-11-01: pursuit at 7,075 m, a target below, and 12 s later -791
     m/s at 2,978 KPH with the pull-out predicted to end at -9,688 m."""
     ctrl = _pursuit(monkeypatch, caplog, _Flying(alt=6000))
     keys = _fly_for(ctrl)
@@ -256,7 +306,7 @@ def test_a_target_below_the_nose_is_not_chased_down_from_altitude(monkeypatch, c
 
 
 def test_the_descent_turns_toward_a_target_off_the_nose(monkeypatch, caplog):
-    """Operator, 2026-11-02, on the 04:51:52 screenshot: out of the arena, an enemy
+    """Operator, 2026-11-02, on the screenshot: out of the arena, an enemy
     on the ring, and nothing steering. "it should have been in normal acs mode where
     it uses the ring icons to steer towards target". The roll is ACS's; only the
     pitch is the descent's."""
@@ -274,7 +324,7 @@ def test_the_descent_banks_toward_a_ring_icon(monkeypatch, caplog):
     """No target in view, an enemy's icon on the ring to the left: the icon law's
     bank, as in any ACS pursuit."""
     from tests.test_pursuit_mode import _upper_left
-    ctrl = _pursuit(monkeypatch, caplog, _Flying(alt=6000), capture=_upper_left(),
+    ctrl = _pursuit(monkeypatch, caplog, _Flying(alt=6000, angle=-22.0), capture=_upper_left(),
                     tracker=_ScriptedTracker([_MISS]),
                     icon_steering={"enabled": True, "wings_level": True,
                                    "actuate_pitch": True, "actuate_turn": True})
@@ -288,17 +338,18 @@ _ICON_LAW = {"enabled": True, "wings_level": True, "actuate_pitch": True,
 
 
 def _icon_below_left_pursuit(monkeypatch, caplog, mission):
-    """No target in view, an enemy's icon at 130 deg: below and to the left."""
+    """No target in view, an enemy's icon at 130 deg: below and to the left, with the
+    path at the descent's angle."""
     from tests.test_pursuit_mode import _SyntheticIconCapture
-    return _pursuit(monkeypatch, caplog, _Flying(alt=6000), mission=mission,
+    return _pursuit(monkeypatch, caplog, _Flying(alt=6000, angle=-22.0), mission=mission,
                     capture=_SyntheticIconCapture(130.0),
                     tracker=_ScriptedTracker([_MISS]), icon_steering=_ICON_LAW)
 
 
 def test_the_descent_turns_toward_an_icon_below_and_to_the_side(monkeypatch, caplog):
-    """2026-11-02 05:26:32 to 05:27:47: an enemy's icon at 130 deg for the whole
+    """2026-11-02: an enemy's icon at 130 deg for the whole
     descent, and the aircraft flew straight out of the arena (RETURN TO BATTLE in
-    the 05:27:41 screenshot). Below the horizon the law pushes with the wings level,
+    the screenshot). Below the horizon the law pushes with the wings level,
     and the push is the descent's: all 332 icon ticks held the wings level. The
     refused push turns toward the icon's side, as it does under the dive guard."""
     ctrl = _icon_below_left_pursuit(monkeypatch, caplog, "j20")
@@ -316,23 +367,23 @@ def _descent_turn(monkeypatch, caplog, angle):
     return _fly_for(ctrl, 1.2)
 
 
-def test_the_descent_turn_lets_its_pull_go_at_the_level_off_angle(monkeypatch, caplog):
-    """2026-11-02 05:54:58: a held pull took the path from -20 to +51 deg in 5 s and
-    the aircraft 1,250 m up, and the descent ran out of time at 5,548 m. Level, the
-    turn keeps its bank and lets the pull go."""
+def test_level_in_the_descent_the_turn_banks_and_the_descent_pushes(monkeypatch, caplog):
+    """Bank alone, and the pitch the descent's: with nothing pushing, the bank circled
+    the aircraft level at 5,400 m over a target below it for 90 s."""
     keys = _descent_turn(monkeypatch, caplog, angle=0.0)
 
     assert ("key_press", ROLL_LEFT_KEY) in keys
     assert ("key_press", NOSE_UP_KEY) not in keys
-    assert any("pull let go in the descent" in m for m in _messages(caplog))
+    assert ("key_press", NOSE_DOWN_KEY) in keys
 
 
-def test_the_descent_turn_pulls_on_the_way_down(monkeypatch, caplog):
-    """The twin: at the descent's angle the turn banks and pulls."""
+def test_the_descent_turn_never_pulls(monkeypatch, caplog):
+    """Any pull zoomed the J-20: held, -20 to +51 deg in 5 s; 3 s of it at
+    -22 deg, the nose on to +68 and 5,396 to 7,067 m."""
     keys = _descent_turn(monkeypatch, caplog, angle=-22.0)
 
     assert ("key_press", ROLL_LEFT_KEY) in keys
-    assert ("key_press", NOSE_UP_KEY) in keys
+    assert ("key_press", NOSE_UP_KEY) not in keys
 
 
 def test_without_a_descent_the_same_icon_gets_the_push_with_the_wings_level(monkeypatch,
@@ -424,7 +475,7 @@ def test_a_nose_past_the_limit_is_brought_back_up(monkeypatch, caplog):
 
 def test_a_slow_aircraft_past_the_limit_is_not_pulled_up(monkeypatch, caplog):
     """In the real loop, on real telemetry: the -30 deg of the test above, at the
-    239 KPH of 2026-11-01 17:49:32."""
+    239 KPH of 2026-11-01."""
     ctrl = _pursuit(monkeypatch, caplog, _Flying(alt=6000, angle=-30, speed=239.0))
     keys = _fly_for(ctrl)
 
@@ -458,7 +509,7 @@ def test_a_descent_out_of_time_hands_to_the_pursuit(monkeypatch, caplog):
 
 
 def test_a_marker_below_the_nose_waits_for_the_descent_too(monkeypatch, caplog):
-    """2026-11-01 16:57:37: 2,069 KPH on the approach to a crown below. An
+    """2026-11-01: 2,069 KPH on the approach to a crown below. An
     objective's marker draws the nose down as a target does."""
     marker = ResupplyMarker(960, 1100, 70, 70, 1500, 0)
     ctrl = _pursuit(monkeypatch, caplog, _Flying(alt=6000, ammo=0), marker=marker)
@@ -493,7 +544,7 @@ def test_the_crash_recovery_is_not_held_off_by_a_target_it_is_not_chasing(monkey
 
 
 def test_a_recovery_is_not_ended_by_a_target_in_view_during_the_descent(monkeypatch, caplog):
-    """2026-11-01 17:49:48 to :52: the recovery fired three times and each lasted
+    """2026-11-01, over 4 s: the recovery fired three times and each lasted
     0.5 s, `climb complete (objective_in_view)`. During a yield the descent does not
     run, and the chase came back and reported its target."""
     ctrl = _pursuit(monkeypatch, caplog, _Flying(alt=6000), start=False)
@@ -840,7 +891,7 @@ def test_a_rising_j20_over_the_ceiling_gets_a_pulse_down(monkeypatch, caplog):
 
 
 def test_it_never_holds_the_key(monkeypatch):
-    """All four holds overshot on the lagging path: 20:12:12, 4.5 s from +8 deg, then
+    """All four holds overshot on the lagging path: 4.5 s from +8 deg, then
     -58 deg at 1,614 KPH."""
     ctrl = _ceiling_ctrl(monkeypatch, [(5800, 8)])
     _nose_downs(ctrl, monkeypatch)
@@ -932,7 +983,7 @@ def test_it_stands_aside_for_whatever_owns_the_axis(monkeypatch, owner):
 
 
 def test_a_routine_climb_is_ended_at_the_ceiling(monkeypatch, caplog):
-    """18:37: the altitude reading froze at 3,006 m for 5 s, the hold pulled on to
+    """The altitude reading froze at 3,006 m for 5 s, the hold pulled on to
     8,100 m, and the aircraft was at 79 KPH 6 s later. The ceiling waited for it."""
     caplog.set_level("INFO", logger="wingman.controller")
     ctrl = _ceiling_ctrl(monkeypatch, [(6300, 60)])
@@ -1018,7 +1069,7 @@ def _climb(monkeypatch, *, mission, angle, rate=100.0, emergency=False, pulse_s=
 
 
 def test_a_routine_climb_on_the_j20_is_held_to_its_pitch(monkeypatch):
-    """19:06:07: the cut-off fired on time at 5,666 m and it still coasted to 8,519 m.
+    """The cut-off fired on time at 5,666 m and it still coasted to 8,519 m.
     The climb has to be shallower, not stopped harder."""
     assert _climb(monkeypatch, mission="j20", angle=45.0)
 
@@ -1060,7 +1111,7 @@ def _longest_pulse(monkeypatch, **kwargs):
 
 
 def test_a_routine_pulse_on_the_j20_is_its_own_length(monkeypatch):
-    """20:08:18: one 1.5 s pulse took this jet to +66 deg. The hold polls every 0.25 s,
+    """One 1.5 s pulse took this jet to +66 deg. The hold polls every 0.25 s,
     so these lengths are chosen to tell apart on that clock."""
     assert _longest_pulse(monkeypatch, mission="j20", angle=45.0, pulse_s=0.8) > 0.6
 
@@ -1105,7 +1156,7 @@ def _boundary_turn(monkeypatch, *, mission, angle):
 
 
 def test_the_j20s_boundary_turn_lets_the_pull_go_at_its_pitch_limit(monkeypatch, caplog):
-    """04:06:01: the held pull went to +90 deg in a 9.1 s turn and the aircraft was
+    """The held pull went to +90 deg in a 9.1 s turn and the aircraft was
     lost 5 s after it."""
     caplog.set_level("INFO", logger="wingman.controller")
     assert _boundary_turn(monkeypatch, mission="j20", angle=50.0)
@@ -1136,9 +1187,12 @@ def test_acs_keeps_its_full_pull(monkeypatch):
     assert _boundary_turn(monkeypatch, mission="acs", angle=50.0) == []
 
 
-def _climb_on(monkeypatch, *, mission, rates):
-    """The real climb on telemetry that walks `rates` (m/s), one per new sample, at
-    a fixed +20 deg path. Returns the pitch pulses it logged, in order."""
+def _climb_on(monkeypatch, *, mission, rates, angles=(20.0,), speed=1200.0, burner=None,
+              capped=False):
+    """The real climb on telemetry that walks `rates` (m/s) and `angles` (deg), one
+    per new sample, the last repeated, at `speed` KPH (under the J-20's burner cap
+    unless a test says otherwise). Returns the pitch pulses it logged, in order;
+    `burner`, a list, collects the afterburner's presses and releases."""
     monkeypatch.setattr(controller_module, "keyboard_module", None)
     stamp = [1000.0]
     seq = list(rates)
@@ -1149,11 +1203,12 @@ def _climb_on(monkeypatch, *, mission, rates):
             rate = seq[min(int(stamp[0] - 1001), len(seq) - 1)]
             now = time.time()
             return TelemetrySnapshot(
-                speed=TelemetrySignal(value=1500.0, stable_value=1500.0, ts=stamp[0], rate=0.0),
+                speed=TelemetrySignal(value=speed, stable_value=speed, ts=stamp[0], rate=0.0),
                 altitude=TelemetrySignal(value=3000, stable_value=3000.0, ts=stamp[0], rate=rate),
                 taken_at_s=now, stale_after_s=6.0)
 
-    monkeypatch.setattr(TelemetrySnapshot, "pitch_angle_deg", lambda self: 20.0)
+    monkeypatch.setattr(TelemetrySnapshot, "pitch_angle_deg",
+                        lambda self: angles[min(int(self.altitude.ts - 1001), len(angles) - 1)])
     monkeypatch.setattr(TelemetrySnapshot, "altitude_fresh", lambda self: True)
     ctrl = Controller((0, 0, 1920, 1200), analyzer=_Life([(3000, 0)]),
                       exit_event=threading.Event(),
@@ -1163,6 +1218,7 @@ def _climb_on(monkeypatch, *, mission, rates):
                                                      "max_pitch_deg": 80.0, "max_climb_rate": 450.0,
                                                      "pitch_lead_s": 0.0}))
     ctrl._last_mission = mission
+    ctrl._burner_speed_capped = capped   # the verdict cruise's tick keeps
     if mission == "j20":
         ctrl._own_climb_limits["j20"] = (35.0, 250.0, 0.05)
     pulses = []
@@ -1171,6 +1227,8 @@ def _climb_on(monkeypatch, *, mission, rates):
     def watch(self, key, press, action="climb"):
         if press and key in (NOSE_UP_KEY, NOSE_DOWN_KEY):
             pulses.append("up" if key == NOSE_UP_KEY else "down")
+        if burner is not None and key == AFTERBURNER_KEY:
+            burner.append("on" if press else "off")
         return real(self, key, press, action)
 
     monkeypatch.setattr(Controller, "_climb_key", watch)
@@ -1182,11 +1240,157 @@ def _climb_on(monkeypatch, *, mission, rates):
 
 
 def test_a_stalled_reading_is_not_taken_for_a_stalled_climb(monkeypatch, caplog):
-    """04:22:52: "up, rate=0.0, angle=0.0" in a climb at 300 m/s, and it went vertical."""
+    """A reading of "up, rate=0.0, angle=0.0" in a climb at 300 m/s, and it went vertical."""
     caplog.set_level("DEBUG", logger="wingman.controller")
     pulses = _climb_on(monkeypatch, mission="j20", rates=[200.0, 0.0, 0.0, 0.0])
     assert "up" not in pulses[1:], pulses
     assert any("is a stalled reading, held" in m for m in _messages(caplog))
+
+
+def test_a_steep_misread_in_a_routine_climb_counts_as_the_limit(monkeypatch, caplog):
+    """Three +90 deg readings in a floor climb were thrown away as misreads,
+    the 35 deg limit sent two pulses in 12 s, and it zoomed to 9,079 m. Of the day's
+    crossings of 6,500 m, 7 of 13 after such a reading passed 9,000 m, 0 of 12
+    without one."""
+    caplog.set_level("DEBUG", logger="wingman.controller")
+    pulses = _climb_on(monkeypatch, mission="j20", rates=[100.0], angles=[10.0, 90.0])
+    assert "down" in pulses, pulses
+    assert any("misread, taken as the limit" in m for m in _messages(caplog))
+
+
+def test_a_steep_misread_is_still_skipped_without_limits_of_its_own(monkeypatch):
+    """The twin: acs keeps Code Review 019 cycle 35's skip, the law it has flown."""
+    pulses = _climb_on(monkeypatch, mission="acs", rates=[100.0], angles=[10.0, 90.0])
+    assert "down" not in pulses, pulses
+
+
+def test_a_routine_climb_cuts_the_burner_at_its_pitch_limit(monkeypatch, caplog):
+    """11 of 31 routine J-20 climbs read past 45 deg through the pushes with the burner
+    lit, and 7 of those passed 6,500 m (2026-11-02)."""
+    caplog.set_level("INFO", logger="wingman.controller")
+    _climb_on(monkeypatch, mission="j20", rates=[100.0], angles=[10.0, 50.0])
+    assert any("at the pitch limit, afterburner cut (ADR 171)" in m for m in _messages(caplog))
+
+
+def test_a_climb_over_the_burner_speed_cap_cuts_it_on_its_first_reading(monkeypatch,
+                                                                         caplog):
+    """Half the day's routine J-20 climbs reached 1,800 to 2,500 KPH, and those passed
+    6,500 m 48% of the time against 29% (2026-11-02, the operator's delegation)."""
+    caplog.set_level("INFO", logger="wingman.controller")
+    _climb_on(monkeypatch, mission="j20", rates=[100.0], angles=[10.0], speed=1600.0)
+    assert any("1600 KPH over the burner's speed cap, afterburner cut (ADR 171)" in m
+               for m in _messages(caplog))
+
+
+def test_a_climb_started_over_the_cap_does_not_light_it(monkeypatch, caplog):
+    """Cruise's tick already holds the verdict; the climb does not light the burner for
+    the moment before its own first reading."""
+    caplog.set_level("INFO", logger="wingman.controller")
+    burner = []
+    _climb_on(monkeypatch, mission="j20", rates=[100.0], angles=[10.0], speed=1600.0,
+              burner=burner, capped=True)
+    assert "on" not in burner, burner
+    assert any("over the burner's speed cap, starting without afterburner" in m
+               for m in _messages(caplog))
+
+
+def test_under_the_cap_the_climb_lights_its_burner(monkeypatch):
+    """The twin: the same climb at 1,200 KPH."""
+    burner = []
+    _climb_on(monkeypatch, mission="j20", rates=[100.0], angles=[10.0], speed=1200.0,
+              burner=burner)
+    assert "on" in burner, burner
+
+
+def test_acs_has_no_burner_speed_cap(monkeypatch):
+    """No cap of its own: the climb it has always flown, at any speed."""
+    burner = []
+    _climb_on(monkeypatch, mission="acs", rates=[100.0], angles=[10.0], speed=2400.0,
+              burner=burner)
+    assert "on" in burner, burner
+
+
+def _speed_snapshot(kph):
+    now = time.time()
+    return TelemetrySnapshot(
+        speed=TelemetrySignal(value=kph, stable_value=kph, ts=now, rate=0.0),
+        altitude=TelemetrySignal(value=5000, stable_value=5000.0, ts=now, rate=0.0),
+        taken_at_s=now, stale_after_s=6.0)
+
+
+def test_cruise_lets_go_over_the_cap_and_takes_it_back_under_the_rearm_speed():
+    """After the climb ended, cruise held the burner at 2,000+ KPH and the
+    J-20 zoomed from 5,536 to 7,197 m. Over 1,500 KPH cruise pauses; between 1,300
+    and 1,500 it stays paused; at 1,300 it takes the burner back."""
+    from unittest import mock
+    from tests.test_approach_brake import _burner_presses, _cruise
+    from wingman.state import GameState
+    c = _cruise(fuel=95)
+    c._own_burner_caps = {"j20": (1500.0, 1300.0)}
+    c._burner_speed_capped = False
+    c._last_mission = "j20"
+    c._last_mission_lock = threading.Lock()
+    c._incoming_now = mock.MagicMock(return_value=False)
+    c._analyzer = mock.MagicMock()
+    for kph, presses in ((1600.0, 0), (1400.0, 0), (1250.0, 1)):
+        c._analyzer.get_telemetry.return_value = _speed_snapshot(kph)
+        c.note_afterburner_cruise(GameState.GAME_BATTLE, True)
+        assert _burner_presses(c) == presses, kph
+    assert c._cruise_ab_active
+
+
+def test_an_incoming_missile_keeps_cruise_over_the_cap():
+    """ADR 088: outrunning a missile outranks the cap."""
+    from unittest import mock
+    from tests.test_approach_brake import _burner_presses, _cruise
+    from wingman.state import GameState
+    c = _cruise(fuel=95)
+    c._own_burner_caps = {"j20": (1500.0, 1300.0)}
+    c._burner_speed_capped = False
+    c._last_mission = "j20"
+    c._last_mission_lock = threading.Lock()
+    c._incoming_now = mock.MagicMock(return_value=True)
+    c._analyzer = mock.MagicMock()
+    c._analyzer.get_telemetry.return_value = _speed_snapshot(2000.0)
+    c.note_afterburner_cruise(GameState.GAME_BATTLE, True)
+    assert _burner_presses(c) == 1
+
+
+def test_cruise_lets_go_while_the_climb_has_the_burner_out():
+    """Cruise relit the burner 8 s after the climb's cut at the 35 deg limit
+    and the climb went on to 6,281 m at 1,299 KPH. Operator, 2026-11-02: cruise yields
+    here, the one exception to its D9, and takes the burner back the tick after."""
+    from tests.test_approach_brake import _burner_presses, _cruise
+    from wingman.controller import AFTERBURNER_KEY
+    from wingman.state import GameState
+    c = _cruise(fuel=95)
+    c._climb_burner_cut = True
+    c.note_afterburner_cruise(GameState.GAME_BATTLE, True)
+    assert _burner_presses(c) == 0 and c._cruise_ab_active
+    assert any(k.args and k.args[0] == AFTERBURNER_KEY and k.kwargs.get("press") is False
+               for k in c._climb_key.call_args_list)
+    c._climb_burner_cut = False
+    c.note_afterburner_cruise(GameState.GAME_BATTLE, True)
+    assert _burner_presses(c) == 1
+
+
+def test_cruise_yields_to_the_climbs_cut_in_the_policy_table():
+    """So the actuator lifts the key at the cut, not on cruise's next tick: 1.5 s at
+    up to 300 m/s of climb."""
+    from tests.test_approach_brake import _cruise
+    from wingman.controller import AFTERBURNER_KEY
+    c = _cruise()
+    assert c._may_hold_key(AFTERBURNER_KEY, "cruise")
+    c._climb_burner_cut = True
+    assert not c._may_hold_key(AFTERBURNER_KEY, "cruise")
+    assert c._may_hold_key(AFTERBURNER_KEY, "climb")
+
+
+def test_acs_keeps_its_burner_over_the_angle(monkeypatch, caplog):
+    """The twin: no limits of its own, the climb it has always flown."""
+    caplog.set_level("INFO", logger="wingman.controller")
+    _climb_on(monkeypatch, mission="acs", rates=[100.0], angles=[10.0, 45.0, 82.0])
+    assert not any("afterburner cut (ADR 171)" in m for m in _messages(caplog))
 
 
 def test_acs_still_pulls_up_on_a_zero(monkeypatch):
@@ -1196,14 +1400,14 @@ def test_acs_still_pulls_up_on_a_zero(monkeypatch):
 
 
 def test_a_nose_far_past_the_limit_gets_a_longer_pulse_down():
-    """04:17:19: 0.5 s pulses left it at +72 deg, coasting to a stall."""
+    """0.5 s pulses left it at +72 deg, coasting to a stall."""
     from wingman.controller import _down_pulse_s
     assert _down_pulse_s(72.0, 35.0, 0.5, 1.5) == pytest.approx(1.5)
     assert _down_pulse_s(50.0, 35.0, 0.5, 1.5) == pytest.approx(1.0)
 
 
 def test_a_nose_at_the_limit_gets_the_short_pulse():
-    """20:06:55: 1.5 s pulses stacked from +33 to -24 deg."""
+    """1.5 s pulses stacked from +33 to -24 deg."""
     from wingman.controller import _down_pulse_s
     assert _down_pulse_s(36.0, 35.0, 0.5, 1.5) == pytest.approx(0.5 + 0.5 / 15)
     assert _down_pulse_s(20.0, 35.0, 0.5, 1.5) == 0.5

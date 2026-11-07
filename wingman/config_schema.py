@@ -117,6 +117,10 @@ _JET_PROFILE = Section(children={
     "has_padlock": BOOL,
     "match": STR,
     "mission": Leaf(types=(str,), choices=_MISSIONS),
+    # The flare count at or under which the jet's special ability reloads them, in
+    # battle or in a pursuit (operator, 2026-11-02); absent keeps the low-flares
+    # reload at exactly 2, in battle only.
+    "flare_reload_at": _int(0),
 })
 
 # capture_budget: 0 = unlimited for that dimension.
@@ -161,7 +165,7 @@ SCHEMA = Section(
         # of the screen with the own icon at its true place (wingman/full_map.py).
         # Sizes are fractions of the frame height (radius_frac) or of the disc's
         # radius; areas are fractions of the radius squared. Measured on two
-        # pictures at 1920 by 1200, 2026-10-04 03:19 and 16:43.
+        # pictures at 1920 by 1200, two of 2026-10-04.
         "full_map": Section(children={
             "enabled": Leaf(types=(bool,), default=True),
             "radius_frac": Leaf(types=NUMBER, minimum=0.1, maximum=0.5, default=0.3944),
@@ -390,6 +394,9 @@ SCHEMA = Section(
             "climb_max_rate": Leaf(types=NUMBER, minimum=0, default=250),
             "climb_pulse_s": Leaf(types=NUMBER, minimum=0, default=0.5),
             "ceiling_pulse_s": Leaf(types=NUMBER, minimum=0, default=0.4),
+            "burner_max_kph": Leaf(types=NUMBER, minimum=0, default=1500),
+            "burner_rearm_kph": Leaf(types=NUMBER, minimum=0, default=1300),
+            "acs_share": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.0),
         }),
 
         # ADR 144: mission_acs, ACS_MISSION (mission_su30 until ADR 160)
@@ -459,6 +466,10 @@ SCHEMA = Section(
                 "min_clear_frac": FRACTION,
                 "blind_ticks": _int(0),
                 "entry_ratio": FRACTION,
+                # ADR 171: the distances above times the speed over speed_ref_kph,
+                # to max_speed_scale; 0 turns it off.
+                "speed_ref_kph": Leaf(types=NUMBER, minimum=0, default=0),
+                "max_speed_scale": Leaf(types=NUMBER, minimum=1, default=1.6),
             }),
             "climb": Section(children={
                 "enabled": BOOL,
@@ -527,6 +538,10 @@ SCHEMA = Section(
                     "shadow": Leaf(types=(bool,), default=True),
                     "window_s": Leaf(types=NUMBER, minimum=0, maximum=10, default=1.0),
                     "hold_s": Leaf(types=NUMBER, minimum=0, maximum=30, default=3.0),
+                    # ADR 172: the share of rounds in which the agreement does not
+                    # break off a resupply approach; 0 is cycle 25 as it was.
+                    "resupply_holdoff_share": Leaf(types=NUMBER, minimum=0, maximum=1,
+                                                   default=0.0),
                 }),
                 # Code Review 019 cycle 32 (HLDD 001 part 2): the emergency climb
                 # starts when a pull-out started reaction_s from now would bottom
@@ -588,7 +603,7 @@ SCHEMA = Section(
                 # Pieces of the markers that sit on the rim are orange too and
                 # measure 0.0006 to 0.0015: with the floor at 0.0006 they
                 # counted as second candidates and the heading went unread,
-                # for 56 s on 2026-10-04 18:15. The floor is above them now.
+                # for 56 s on 2026-10-04. The floor is above them now.
                 "letter_min_area_frac": Leaf(types=NUMBER, minimum=0, default=0.002),
                 "letter_max_area_frac": Leaf(types=NUMBER, minimum=0, default=0.005),
             }),
@@ -1042,6 +1057,11 @@ SCHEMA = Section(
                 # still says. null: the score alone decides.
                 "level_band_deg": Leaf(types=NUMBER, minimum=0, maximum=45,
                                        allow_none=True, default=None),
+                # Operator, 2026-11-03: an icon below the horizon pushes only
+                # within this many degrees of straight down; further to the side
+                # it turns toward its side. null: every such icon pushes.
+                "push_cone_deg": Leaf(types=NUMBER, minimum=0, maximum=90,
+                                      allow_none=True, default=None),
             }),
         }),
 

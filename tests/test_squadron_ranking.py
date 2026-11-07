@@ -112,6 +112,8 @@ class _Game:
              "players": {sr.BOARD_TITLE: "LEADERBOARDS"},
              "squadrons": {sr.BOARD_TITLE: "LEADERBOARDS"},
              "other": {}}
+    # Where the open menu shows LEADERBOARDS: the 2026-11-06 layout's box.
+    ENTRY = CropCoords(0.823, 0.188, 0.926, 0.213)
 
     def __init__(self, screen="lobby", ignore=(), slow=None, row=SquadronReading(659, 358032),
                  tab_lag=0):
@@ -121,10 +123,12 @@ class _Game:
         self.row = row
         self.tab_lag = tab_lag      # frames the old tab's rows stay up after the click
         self.clicks = []
+        self.coords = []
         self.pending = None
 
-    def click(self, name):
+    def click(self, name, coords=None):
         self.clicks.append(name)
+        self.coords.append(coords)
         if name in self.ignore:
             return
         nxt = self.MOVES.get((self.screen, name))
@@ -146,6 +150,9 @@ class _Game:
         if fn is sr.shows:
             crop, word = args
             return word in self.SHOWS[frame].get(crop.text[0], "")
+        if fn is sr.word_box:
+            crop, word = args
+            return self.ENTRY if word in self.SHOWS[frame].get(crop.text[0], "") else None
         if fn is sr.read_row:
             if frame == "squadrons" and self.tab_lag <= 0:
                 return RowRead(self.row, "CURRENT TOP SQUADRONS")
@@ -177,6 +184,14 @@ def test_the_leaderboard_is_read_and_left_by_its_own_back_arrow():
     assert (reading, why) == (SquadronReading(659, 358032), "read")
     assert game.clicks == [sr.MENU, sr.MENU_LEADERBOARDS, sr.TAB_SQUADRONS, sr.BACK]
     assert game.screen == "lobby"
+
+
+def test_the_menu_entry_is_clicked_where_ocr_found_it():
+    """2026-11-06: the menu came up smaller and LEADERBOARDS left the crop's
+    middle; a click on the crop's middle would miss it. Only that click moves."""
+    game = _Game()
+    _navigate(game)
+    assert game.coords == [None, _Game.ENTRY, None, None]
 
 
 def test_a_slow_page_is_waited_for():
@@ -236,8 +251,8 @@ def test_a_stop_ends_the_navigation_at_once():
     stop = threading.Event()
     original = game.click
 
-    def click(name):
-        original(name)
+    def click(name, coords=None):
+        original(name, coords)
         if name == sr.MENU_LEADERBOARDS:
             stop.set()
     game.click = click
@@ -296,7 +311,7 @@ def test_the_reading_queues_at_the_time_of_day_and_waits_for_a_lobby():
 
 
 def test_one_reading_a_day():
-    """2026-10-31 02:17 also read back to back in one lobby, and no round would
+    """2026-10-31 also read back to back in one lobby, and no round would
     have started: PLAY must go ahead after a reading."""
     clock = _Steps(_morning(9, 38, 30))
     schedule = SquadronRanking(True, QUEUE_AT, _Steps(_morning(4, 39)))
@@ -338,7 +353,7 @@ def test_the_schedule_while_a_navigation_runs():
 
 
 def test_play_stays_held_from_due_through_the_start_of_the_navigation():
-    """2026-10-31 02:17:56: the quick-scan clicked PLAY while a navigation was
+    """2026-10-31: the quick-scan clicked PLAY while a navigation was
     starting. The hold must not drop between due and active."""
     seen = []
 
@@ -403,7 +418,7 @@ def _session(started, path):
 
 @pytest.mark.parametrize("started", [_morning(9, 38, 30), _morning(9, 42, 57), _morning(23, 59, 59)])
 def test_a_session_started_after_the_time_owes_the_day_its_reading(last_read, started):
-    """2026-11-01: no session ran at 09:38:30, the next began at 09:42:57 and
+    """2026-11-01: no session ran at the queue time, the next began 4.5 min later and
     booked the next day's, and the day had no reading."""
     sr.save_last_read(str(last_read), date(2026, 10, 30))
     assert _session(started, last_read).due()
@@ -513,9 +528,9 @@ def test_a_failed_navigation_is_tried_again_in_the_same_lobby_with_play_held(cap
 
 
 def test_a_click_the_game_dropped_is_made_good_by_the_next_try(last_read):
-    """2026-11-01 11:02:56: the click on LEADERBOARDS did nothing, the navigation
+    """2026-11-01: the click on LEADERBOARDS did nothing, the navigation
     shut the menu and gave up, and PLAY went a second later. The same account
-    read at 11:04:18."""
+    read 82 s later."""
     game = _Game(ignore={sr.MENU_LEADERBOARDS})
     answers = []
     schedule = _session(_morning(11, 2, 55), last_read)
@@ -632,7 +647,7 @@ def test_a_due_reading_holds_play_but_not_ready():
 
 def test_play_and_ready_are_not_clicked_once_a_navigation_runs():
     """The hold at the top of the cycle is not enough: a navigation can start
-    while the cycle's OCR is out (2026-10-31 02:17:56)."""
+    while the cycle's OCR is out (2026-10-31)."""
     guard = ANALYZER_SRC.index("                        elif self.lobby_errand_active():")
     click = ANALYZER_SRC.index("self.emit(GameEvent.LOBBY_PLAY_CLICK, crop, frame)", guard)
     branch = ANALYZER_SRC[guard:ANALYZER_SRC.index("\n                        elif", guard + 10)]
@@ -786,6 +801,9 @@ _SCREENS = [
     # (file, in the lobby, the menu open, the leaderboard up, the reading)
     ("lobby.png", True, False, False, None),
     ("menu.png", False, True, False, None),
+    # 2026-11-06: the menu drawn smaller, on another account; every reading failed.
+    ("lobby_2026-11-06.png", True, False, False, None),
+    ("menu_2026-11-06.png", False, True, False, None),
     ("total_trophies.png", False, False, True, None),
     ("squadrons_659_358032.png", False, False, True, SquadronReading(659, 358032)),
 ]
@@ -802,6 +820,19 @@ def test_the_screens_read_as_labelled(reader, name, lobby, menu, board, reading)
     assert on[sr.MENU_LEADERBOARDS] == menu
     assert on[sr.BOARD_TITLE] == board
     assert read_row(reader, frame, crops, "Mobius Squadron").reading == reading
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("name, word_px", [
+    # LEADERBOARDS in the menu, in pixels of the 1920x1200 frame, read by eye.
+    ("menu.png", (1448, 320, 1720, 355)),
+    ("menu_2026-11-06.png", (1583, 228, 1773, 252))])
+def test_the_menu_entry_box_lands_on_the_word(reader, name, word_px):
+    box = sr.word_box(reader, _load(name), _config_crops()[sr.MENU_LEADERBOARDS], "LEADERBOARDS")
+    assert box is not None
+    cx, cy = (box.x1 + box.x2) / 2 * 1920, (box.y1 + box.y2) / 2 * 1200
+    x1, y1, x2, y2 = word_px
+    assert x1 < cx < x2 and y1 < cy < y2
 
 
 @pytest.mark.slow

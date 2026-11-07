@@ -4,6 +4,7 @@ import functools
 import logging
 import math
 import queue
+import random
 import sys
 import threading
 import time
@@ -20,6 +21,7 @@ from .telemetry import STEEP_DIVE_MIN_SIN_DEFAULT, path_is_misread
 from .config_schema import schema_default
 from . import keybindings as _keybindings
 from .actuator import Actuator
+from .agreement_trial import AgreementTrial
 from .evade_trial import EvadeTrial
 from .hold_model import HoldModel, PictureClock
 from .hold_tactic import HoldTactic
@@ -29,7 +31,7 @@ from .suppressed import log_suppressed
 from .clear_path import PathGoal
 from .crop_region import CropCoords, crop_centre
 from .icon_steering import IconPoints, IconSteeringConfig, find_ring_icons
-from .jet_name import mission_for_jet
+from .jet_name import mission_for_jet, profile_for_jet
 from .air_superiority import find_control_point_marker, find_control_point_ring_icons
 from .objective_tally import AIR_SUPERIORITY as TALLY_AIR_SUPERIORITY
 from .objective_tally import RESUPPLY as TALLY_RESUPPLY
@@ -119,8 +121,8 @@ def _may_inject(what: str = "key") -> bool:
 # Phase 2 (2026-09-27): the throttle is leased; see Actuator and _THROTTLE_YIELDS.
 # The pitch keys too (2026-10-24): on 2026-10-23 another owner's release lifted
 # the climb's nose-up 713 times (533 the pursuit's ADR 148 yield, 180 the spawn
-# guard's hand-off), each costing the climb the rest of its 1.5 s pulse. At
-# 00:54:22 one of them left a terrain pull-out 84 ms of its first pulse, and the
+# guard's hand-off), each costing the climb the rest of its 1.5 s pulse. Once
+# one of them left a terrain pull-out 84 ms of its first pulse, and the
 # aircraft hit the hillside about 4 s later, still 16 deg nose-down.
 # The roll keys too (ADR 163): the missile evade holds roll-right through a pursuit,
 # and the pursuit's yield releases its own tracking roll, which may be the same key.
@@ -296,8 +298,8 @@ def _down_pulse_s(angle: "float | None", limit: "float | None", routine_s: float
     """A routine climb's nose-down pulse, sized to how far past the pitch limit
     the path is (ADR 171): `routine_s` at the limit, one more `routine_s` per 15
     deg past it, never past the configured pulse. Under its own limits the J-20
-    needed both ends: 1.5 s pulses stacked from +33 to -24 deg (20:06:55), and 0.5
-    s ones left it at +72 deg and coasting to a stall (04:17:19). Unknown angle or
+    needed both ends: 1.5 s pulses stacked from +33 to -24 deg, and 0.5
+    s ones left it at +72 deg and coasting to a stall. Unknown angle or
     limit: `routine_s`. Where routine and configured are the same, so is this."""
     if angle is None or limit is None or angle <= limit:
         return routine_s
@@ -568,7 +570,7 @@ class Controller:
         # detected) started, or None while any leg is false.
         self._padlock_dot_streak_since: "float | None" = None
         self._padlock_dot_confirm_s = float(padlock_center_cfg.get("confirm_seconds", 2.0))
-        # Operator directive, 2026-09-20: a real dive (16:03:56-16:04:19)
+        # Operator directive, 2026-09-20: a real dive
         # pressed this correction 13 times in a row, once per tick, for the
         # whole rest of the dive — the toggle is a fixed-cost action (either
         # it worked or camera state is genuinely stuck some other way), not
@@ -610,7 +612,7 @@ class Controller:
         # A hold is let go when the error, extrapolated this far ahead at its
         # measured rate, is inside the deadband or past centre — the nose
         # coasts the rest of the way instead of overshooting. Measured before
-        # (2026-09-25 00:49 session): 63% of HOLD[pitch] endings were a direct
+        # (2026-09-25 session): 63% of HOLD[pitch] endings were a direct
         # up/down reversal. 0 restores release-only-inside-the-deadband.
         # Named guess: about one pursuit steering tick plus the key's lag.
         self._pitch_lead_s = max(0.0, float((_c.tracking or {}).get("pitch_lead_s", 0.15)))
@@ -689,6 +691,9 @@ class Controller:
         self._approach_brake_until = 0.0
         self._approach_brake_read_ts: "float | None" = None
         self._descent_flying = False   # ADR 171: a controlled descent has the pitch
+        # ADR 171: a routine climb under a jet's own limits has put the burner out,
+        # at the pitch limit or over its speed cap; cruise lets go until this clears.
+        self._climb_burner_cut = False
         # ADR 136: True once switch_weapon() has fired for the current eject —
         # the shared AMMO_MISSILE crop then reads the secondary loadout, not
         # the primary rack, so ADR 088's rearm-abort check must stop trusting
@@ -793,7 +798,7 @@ class Controller:
         # flying the airframe inside a pursuit. The pursuit lives in
         # GAME_BATTLE_EJECT, where a climb hold used to release itself after 0.25 s, so
         # the recovery was a 0.3 s nudge every 1.5 s and both chases in the 2026-09-25
-        # 00:03 session flew into the ground. Read by _run_climb_hold's state check and
+        # session flew into the ground. Read by _run_climb_hold's state check and
         # by the pursuit loop, which yields pitch and roll while it is set.
         self._pursuit_recovery = threading.Event()
         # Handle to the current disengage_roll_right maneuver thread
@@ -906,7 +911,7 @@ class Controller:
         self._pursuit_ammo_grace_s = float(_pm.get("ammo_zero_grace_s", 12.0))
         # Action item 001 (2026-09-24): how long a miss tick after a valid
         # lock holds the roll axis neutral before the ROLL_LEFT search default
-        # resumes. Measured (wingman.log 2026-09-24 06:03:38-39): a lock
+        # resumes. Measured (wingman.log 2026-09-24, over 1 s): a lock
         # acquired at 38.251 was rejected on the next two ROI scans, and each
         # of those miss ticks re-pressed ROLL_LEFT, so the aircraft kept
         # rotating left while the target crossed screen centre (frame 16,
@@ -914,7 +919,7 @@ class Controller:
         # Named guess, not measured beyond that one 1.07s reacquisition gap.
         # Shared by the eject dive's heatdive roll loop since 2026-09-24
         # (operator request; the same immediate-resume showed there: all 13
-        # target holds in the 06:51-07:06 session ended `-> left/search`).
+        # target holds in a 15 min session ended `-> left/search`).
         self._pursuit_search_resume_delay_s = float(_pm.get("search_resume_delay_s", 2.0))
         # Near-centre extension of the above (operator, 2026-09-24): when the
         # last visible target error was within centre_err the aircraft is
@@ -939,7 +944,7 @@ class Controller:
         # CR-018-01: the pursuit loop steers every steer_interval_s and reads
         # ammo / fires / renders the HUD every engage_interval_s. Before, one
         # 0.2 s wait plus a blocking 0.1 s fire press set both, and steering
-        # ran at about 2.7 Hz (median TRACKPICK interval 0.353 s, 00:49
+        # ran at about 2.7 Hz (median TRACKPICK interval 0.353 s, one
         # session). The engage cadence keeps the old ~0.3 s so
         # empty_confirm_reads above still spans about a second — the switch
         # key is a toggle, and a faster read would confirm a misread sooner.
@@ -949,7 +954,7 @@ class Controller:
         # Review 018 / action item 001 dive guard (operator, 2026-09-25): the
         # chase may not command nose-down below the doctrine floor plus this
         # margin, or while time to ground is under dive_guard_ttg_s. Six of
-        # eight unplanned deaths in the 00:49-01:41 session followed a chase
+        # eight unplanned deaths in a 52 min session followed a chase
         # dive through the 3000 m floor. Roll, fire and the search roll are
         # untouched. 0 turns each term off.
         self._pursuit_dive_guard_margin_m = float(_pm.get("dive_guard_margin_m", 500.0))
@@ -958,7 +963,7 @@ class Controller:
         # The floor when no mission flies its own (ADR 147/149 override that).
         self._tree_alt_floor_m = None if _tree_floor is None else float(_tree_floor)
         self._dive_guard_reason: "str | None" = None   # last verdict, for change logging
-        # Dive guard pull-out (operator, 2026-09-25 after the 20:26:37 dive):
+        # Dive guard pull-out (operator, 2026-09-25 after the dive):
         # withholding nose-down did not stop that dive (-103 m/s at the guard,
         # -175 m/s 3 s later, rolling only), so the tree's hard emergency took
         # the airframe at ttg 20 s and its nose-up threw the target out of the
@@ -1057,7 +1062,7 @@ class Controller:
         # The resupply point is flown through, so its marker is held closer to
         # the centre than a target is: at the target's 0.05 the marker was
         # parked at the edge of a 48 by 30 px box, about its own ring's size
-        # (2026-10-13 03:57:08). Both axes, marker steering only.
+        # (2026-10-13). Both axes, marker steering only.
         self._resupply_deadband = float(_resupply_cfg.get(
             "deadband", schema_default("pursuit_mode.resupply_priority.deadband")))
         # Operator, 2026-10-09: steer to the priority target, the crown objective
@@ -1213,7 +1218,7 @@ class Controller:
         _fuel_cfg = fuel_cfg or {}
         self._fuel_rearm_margin = float(_fuel_cfg.get("rearm_margin_pct", 5.0))
         # Pulse-and-observe pitch control (3.2c live finding 2026-08-15
-        # 20:24: 60 s of HELD nose-up looped the aircraft, alt oscillating
+        # 60 s of HELD nose-up looped the aircraft, alt oscillating
         # 1650-2400 with zero net gain). NOSE_UP is applied in bounded pulses
         # and re-applied only when the telemetry climb RATE decays — the
         # eject dive controller's pattern, inverted. AFTERBURNER stays held.
@@ -1226,6 +1231,13 @@ class Controller:
         # source is wired by main; a lane without one flies the default.
         self._jet_profiles = dict(getattr(config, "jet_profiles", None) or {})
         self._jet_source = None
+        # ADR 171 mission trial: the round's arm goes to the session summary's
+        # event intake, wired by main (set_round_note).
+        self._round_note = None
+        self._mission_rng = random.Random()
+        # ADR 172: off until main wires the shipped share (set_agreement_trial).
+        self._agreement_trial = AgreementTrial(0.0)
+        self._agreement_trial_log_ts = 0.0
         # ADR 171: mission_j20's rearm cycle.
         _j20 = getattr(config, "j20", None) or {}
 
@@ -1251,7 +1263,14 @@ class Controller:
         self._own_climb_limits = {"j20": (float(_j20_get("climb_max_pitch_deg")),
                                           float(_j20_get("climb_max_rate")),
                                           float(_j20_get("climb_pulse_s")))}
+        # ADR 171: the burner's speed limit while the mission flies (max, rearm).
+        self._own_burner_caps = {"j20": (float(_j20_get("burner_max_kph")),
+                                         float(_j20_get("burner_rearm_kph")))}
+        self._burner_speed_capped = False
         self._j20_climb_back_max_s = float(_j20_get("climb_back_max_s"))
+        # ADR 171 mission trial: the share of J-20 rounds drawn to fly acs.
+        self._j20_acs_share = float(_j20_get("acs_share"))
+
         _acs = getattr(config, "acs", None) or {}
         self._acs_climb_alt_m = float(_acs.get("climb_alt_m", 3000))
         self._acs_climb_max_s = float(_acs.get("climb_max_s", 90.0))
@@ -1264,9 +1283,9 @@ class Controller:
         self._acs_lock_timeout_s = float(_acs.get("lock_timeout_s", 5.0))
         # Operator, 2026-09-26: a tracker lock or a ring icon during the climb or
         # the nose-angle step ends the script and starts the pursuit at once.
-        # Measured before it: after the 17:37 respawn the script climbed to 3000 m
-        # and held -10 deg (nose-up pulses at 17:37:21 and :24) while the tracker
-        # had acquired targets at 17:37:10.9 and 17:37:22.9.
+        # Measured before it: after the respawn the script climbed to 3000 m
+        # and held -10 deg (nose-up pulses 3 s apart) while the tracker
+        # had acquired targets twice, 12 s apart.
         self._acs_yield_to_target = bool(_acs.get("yield_to_target", False))
         # ADR 147: the altitude doctrine mission_acs flies. The tree's hard
         # floor (behavior_tree.climb.alt_floor_m) sits above this mission's
@@ -1357,7 +1376,7 @@ class Controller:
         self._sg_max_hold_s = float(_sg_cfg.get("max_hold_s", 90.0))
         self._sg_release_overlap_s = float(_sg_cfg.get("release_overlap_s", 2.5))
         # ADR 078: pulsed application — a continuous hold looped the live
-        # aircraft at spawn (2026-08-17 14:22, 180-and-out-of-map).
+        # aircraft at spawn (2026-08-17, 180-and-out-of-map).
         self._sg_pulse_s = float(_sg_cfg.get("pulse_s", 1.5))
         self._sg_observe_s = float(_sg_cfg.get("observe_s", 1.0))
         self._spawn_guarding = threading.Event()
@@ -1386,7 +1405,7 @@ class Controller:
         # (see _eject_key / _arm_release_grace).
         #
         # 1.0 s, not "a few ms": XRecord delivery lag scales with X-server load,
-        # not with our release timing. In the 2026-08-14 02:35 soak session a
+        # not with our release timing. In the 2026-08-14 soak session a
         # wingman roll_left release took 1.1 s to execute and a queued 'j'
         # repeat was delivered 391 ms AFTER the release — past the old 0.15 s
         # window — cancelling the mission into GAME_BATTLE_MANUAL mid-flight
@@ -1496,7 +1515,7 @@ class Controller:
         accident mid-flight (it was 'm', the game's own map key, until
         2026-10-04), and forcing the FSM to GAME_LOBBY from a live
         battle clicks PLAY into the battlefield and sets the lobby quick-scan
-        pressing ESC against the running game (2026-08-17 04:15 incident). A
+        pressing ESC against the running game (2026-08-17 incident). A
         second press within 2 s still forces it — the deliberate stuck-state
         recovery stays available.
         """
@@ -1930,6 +1949,20 @@ class Controller:
         Controller. One record, so the launch and the round's tag cannot disagree."""
         self._jet_source = source
 
+    def flare_reload_at(self) -> "int | None":
+        """The flare count at or under which the jet on record reloads them with its
+        special ability (its profile's `flare_reload_at`), or None for a jet with no
+        such point (operator, 2026-11-02, for the J-20)."""
+        profile = profile_for_jet(self._jet_on_record(), self._jet_profiles) or {}
+        at = profile.get("flare_reload_at")
+        return None if at is None else int(at)
+
+    def set_round_note(self, note) -> None:
+        """Wire in the session summary's event intake, (event_name, ts) -> None, so a
+        round is tagged with the mission its trial drew (ADR 171). Late-bound, as
+        set_jet_source."""
+        self._round_note = note
+
     def set_hud_renderer(self, hud_renderer) -> None:
         """Wire in the HudRenderer instance (HLDD 005 fix, 2026-09-21).
 
@@ -1954,6 +1987,43 @@ class Controller:
         """Code Review 019 cycle 25: the terrain-warning tracker; while it
         agrees, the crash recovery is not held off for a goal in view."""
         self._warning_agreement = agreement
+
+    def set_agreement_trial(self, trial: AgreementTrial) -> None:
+        """ADR 172: the trial that, in its `holdoff` rounds, keeps the agreement
+        from breaking off a resupply approach."""
+        self._agreement_trial = trial
+
+    def agreement_trial_new_round(self) -> None:
+        """A round has started (ADR 172), from the flare handler's state change, as
+        for ADR 165: draw its arm, log it, and tag the round for the summary."""
+        trial = getattr(self, "_agreement_trial", None)
+        arm = trial.new_round() if trial is not None else None
+        if arm is None:
+            return
+        logger.info("TERRAIN TRIAL: round %d — %s arm (ADR 172, share %.2f)",
+                    trial.rounds, arm, trial.share)
+        if self._round_note is not None:
+            try:
+                self._round_note("agree_arm_" + arm, time.time())
+            except Exception as exc:
+                log_suppressed(logger, "agreement_trial_note", exc)
+
+    def _agreement_breaks_holdoff(self, objective: "str | None") -> bool:
+        """Code Review 019 cycle 25: whether two agreeing terrain warnings set aside
+        the hold-off for `objective` now. ADR 172: not for the resupply marker in a
+        `holdoff` round."""
+        agreement = getattr(self, "_warning_agreement", None)
+        if agreement is None or not agreement.live():
+            return False
+        trial = getattr(self, "_agreement_trial", None)
+        if trial is None or trial.agreement_breaks_holdoff(objective):
+            return True
+        now = time.time()
+        if now - getattr(self, "_agreement_trial_log_ts", 0.0) >= 5.0:
+            self._agreement_trial_log_ts = now
+            logger.info("Controller: two terrain warnings agree with the %s in view — "
+                        "this round's trial arm keeps the hold-off (ADR 172)", objective)
+        return False
 
     def set_path_perception(self, perception) -> None:
         """Wire in the terrain perception the pursuit runs on its own frames
@@ -1996,7 +2066,7 @@ class Controller:
     def _path_own_state(self) -> "tuple[float | None, float | None]":
         """Airspeed (KPH, the fresh raw reading) and flight-path angle (degrees)
         from one telemetry snapshot, for the clear-path log (Code Review 019
-        cycle 8: the two climb-out deaths seen at 17:35 and 17:51 on 2026-10-15
+        cycle 8: the two climb-out deaths seen and on 2026-10-15
         passed the marker at 1,134 and 1,233 KPH). None for what is not read."""
         if self._analyzer is None:
             return None, None
@@ -2448,7 +2518,7 @@ class Controller:
         TargetTracker LOST_GRACE tick too, and the tracker's own grace window
         is only ~0.4s, so without this a one-tick detection dropout right
         after a lock re-pressed ROLL_LEFT immediately (measured: wingman.log
-        2026-09-24 06:03:38-39, target at screen centre in frame 16, at
+        2026-09-24, over 1 s, target at screen centre in frame 16, at
         err=+0.366 by frame 17). Neutral rather than "keep the last
         direction": a target that has vanished would otherwise be chased with
         open-loop roll for the whole delay.
@@ -2458,7 +2528,7 @@ class Controller:
         stopped left turn and focused on target"). When the last visible error
         was within `centre_err` the aircraft is already pointing at the target,
         so the wait is `centre_delay_s` (if longer) — spinning left after that
-        only turns it away again. Measured on the 07:34-08:24 session with the
+        only turns it away again. Measured on a 50 min session with the
         2.0 s delay in place: the search resumed with the target last seen
         within +-0.15 of centre in 6 of 10 pursuit cases and 23 of 41 dive
         cases. All three of last_err, centre_err and centre_delay_s must be
@@ -2506,7 +2576,7 @@ class Controller:
         so every press line has a matching end and a hold's length is the gap
         between the two. Before, only deadband and lead releases logged: a
         miss, dive-guard, yield or loop-exit release was silent, and 2 of 19
-        holds in the 2026-09-25 21:23 session had no recorded end (one
+        holds in the 2026-09-25 session had no recorded end (one
         nose-down hold ran into a dive recovery)."""
         self._cancel_hold_timer("pitch")
         if self._pitch_held is None:
@@ -2618,7 +2688,7 @@ class Controller:
 
         Cycle 27b: a dose started for a dive runs its course while the path
         still points below level, or while the readings are stale; its time,
-        a reading at the target and the vetoes still end it. Live at 08:26:30 on
+        a reading at the target and the vetoes still end it. Live on
         2026-10-18 a 3.0 s dose at 1,533 KPH let go after 1.5 s when the path
         read -10 deg, with the speed still 1,502 KPH: the path is an average
         over the OCR cadence and wanders across the threshold in a dive.
@@ -2939,10 +3009,13 @@ class Controller:
         self._execute_key_press(SWITCH_WEAPON, hold_seconds=hold_seconds, block=block,
                                  action_name='switch_weapon', ignore_cancel=ignore_cancel)
 
-    def reload_flares(self, block: bool = False):
-        """Press SPECIAL_ABILITY to reload flares (triggered when flare count == 2)."""
+    def reload_flares(self, block: bool = False, ignore_cancel: bool = False):
+        """Press SPECIAL_ABILITY to reload flares. `ignore_cancel`, as deploy_flares
+        takes it: in a pursuit the mission is cancelled, and the press was dropped
+        ("reload_flares cancelled", 2026-11-02, the J-20 at 1 flare)."""
         logger.info("\033[93m🔥 Reloading flares via SPECIAL_ABILITY key\033[0m")
-        self._execute_key_press(SPECIAL_ABILITY, hold_seconds=0.1, block=block, action_name='reload_flares')
+        self._execute_key_press(SPECIAL_ABILITY, hold_seconds=0.1, block=block,
+                                action_name='reload_flares', ignore_cancel=ignore_cancel)
 
     def activate_special_weapon(self, block: bool = True):
         """Press SPECIAL_ABILITY once (ADR 145, written for the JAS39's cloak).
@@ -2983,7 +3056,7 @@ class Controller:
         zero for the whole duration of keyboard_module.release(), which opens a
         fresh X Display connection per call (_linux_key_event) -- a multi-ms
         window against a 40 ms repeat period, and the observed cause of three
-        spurious "manual takeover" self-cancels in the 2026-07-30 16:27 session
+        spurious "manual takeover" self-cancels in the 2026-07-30 session
         (log 1464/2739/7711, each 2-5 ms after a phase-end release).
         Physical release first, then a short drain before the guard drops, so
         repeats already queued in the XRecord pipeline cannot be misread as the
@@ -3033,7 +3106,7 @@ class Controller:
         finally:
             # Arm the suppression window BEFORE dropping the count so there is no
             # instant where neither guard is active. Scaled by release latency —
-            # queued repeats drain for seconds under X load (2026-08-14 03:35).
+            # queued repeats drain for seconds under X load (2026-08-14).
             self._arm_release_grace(key, span_s=time.time() - _release_started)
             self._dec_programmatic_key(key)
 
@@ -3074,7 +3147,7 @@ class Controller:
 
         The X server stops auto-repeating the moment the release lands, but
         DELIVERY of repeats already queued in the XRecord pipeline scales with
-        X-server load, not with our timing. The 2026-08-14 03:35 soak session
+        X-server load, not with our timing. The 2026-08-14 soak session
         is the sizing case: a 0.15 s roll_left hold took 2.7 s to release, and
         its queued 'j' repeats were still being delivered 3.2 s AFTER the
         release — three of them fired manual takeover in a row.
@@ -3173,7 +3246,7 @@ class Controller:
 
             # ADR 088: the eject fires on an EMPTY rack, but the game rearms on
             # a timer and the dive outlives that timer. Observed 2026-08-22
-            # 01:51:33 — missiles went 0 -> 1 thirteen seconds into a dive
+            # — missiles went 0 -> 1 thirteen seconds into a dive
             # started because the count was 0, and the aircraft flew a usable
             # missile into the ground. Re-check the premise while acting on it.
             # ADR 136: once heatdive has switched weapons, AMMO_MISSILE reads
@@ -3236,7 +3309,7 @@ class Controller:
             # as a fallback only when the angle is unavailable.
             #
             # Rate alone is satisfied by SPEED, not by attitude: measured
-            # 2026-08-10 18:36, a -47 degree dive accelerating to 1576 KPH held
+            # 2026-08-10, a -47 degree dive accelerating to 1576 KPH held
             # -187 to -309 m/s — three times the 100 m/s target — while the
             # flight path stayed shallow. That descends fast and flies 7 km
             # ACROSS the arena doing it; the same altitude at -75 degrees costs
@@ -3636,7 +3709,7 @@ class Controller:
                         # 2026-09-24, operator: "it had more than enough time
                         # locked onto target but kept forcing left turn, it
                         # should have stopped left turn and focused on target".
-                        # Measured (wingman.log 06:51-07:06, this loop): all 13
+                        # Measured (wingman.log over 15 min, this loop): all 13
                         # target holds ended with `-> left/search` the instant
                         # the lock dropped — even with the target last seen on
                         # the RIGHT (err +0.2 to +0.5), i.e. turning away from
@@ -3759,7 +3832,7 @@ class Controller:
 
         defer_switch_until_empty: mission_acs's pursuit hit its cap with the
         original weapon still loaded (ADR 144 D4, revised 2026-09-24 after a
-        'v' screenshot at 08:20:14 showed the dive running on the 2/2
+        'v' screenshot showed the dive running on the 2/2
         secondary with the 6/6 primary untouched). Presses no SWITCH_WEAPON at
         the start and leaves `_eject_weapon_switched` alone; the heatdive loop
         fires the selected weapon and switches once when it is empty. The dive
@@ -3921,7 +3994,7 @@ class Controller:
                     # ADR 088 d1: the hold outlives the rearm timer just as the
                     # descent does, so it needs the same re-check. Polled rather
                     # than a single wait — with one wait, 4 of 85 dives still
-                    # completed carrying missiles (2026-08-22 02:18 session),
+                    # completed carrying missiles (2026-08-22 session),
                     # because the rack refilled AFTER descent control ended.
                     _hold_deadline = time.time() + self._eject_cl_max_s
                     _telemetry_confirm_streak = 0
@@ -4008,7 +4081,7 @@ class Controller:
     def _pursuit_dive_guard(self, target_visible: bool = False) -> "str | None":
         """Why the chase may not command nose-down right now, or None.
 
-        Review 018 / action item 001 (2026-09-25 01:06 and 01:43 entries).
+        Review 018 / action item 001 (2026-09-25 and entries).
         Trips below the floor in play (the mission's own under ADR 147/149,
         else behavior_tree.climb.alt_floor_m) plus `dive_guard_margin_m`, or
         when altitude over descent rate is under `dive_guard_ttg_s`. Fails open
@@ -4022,11 +4095,11 @@ class Controller:
         `_dive_guard_pullout`, even when the altitude term also holds.
 
         target_visible (operator, 2026-09-26: "when target is detected turn off
-        altitude floor"; then, after the 02:39 capture: "it shouldnt have nosed
+        altitude floor"; then, after the capture: "it shouldnt have nosed
         up"): both terms are skipped while the tracker sees a target, so the chase
         neither withholds nose-down nor pulls out. The ttg term counts altitude
-        above 0 m, so at 2,400 m any descent past 40 m/s tripped it: measured
-        02:39:26.8, 32 s to ground at 2,373 m, six pull-out pulses, nose to +90 deg
+        above 0 m, so at 2,400 m any descent past 40 m/s tripped it: measured once,
+       32 s to ground at 2,373 m, six pull-out pulses, nose to +90 deg
         and the target lost for 12 s. ADR 086's recovery (30 s, flying through the
         pursuit under ADR 148) stays the backstop.
         """
@@ -4111,9 +4184,9 @@ class Controller:
 
         At most one tap per new altitude sample (the `mission_acs` angle step's
         rule). Tapping every interval put about 3 taps into each 3 s reading, and
-        the first live pursuit (2026-09-26 01:58) overshot to -36 deg against a
+        the first live pursuit (2026-09-26) overshot to -36 deg against a
         -20 deg limit, then the ttg pull-out threw it to +57 deg. Two taps on one
-        +12 deg sample are logged at 02:05:52 and 53.
+        +12 deg sample are logged 1 s apart.
         """
         if self._search_look_down_pulse_s <= 0 or self._analyzer is None:
             return False
@@ -4184,7 +4257,7 @@ class Controller:
             # delay (2026-09-27, cycle 11). Over 30 logs, 696 of 798 lost locks
             # came back within the base 2 s; the extension to 6 s ran 864 times
             # and got 97 back, while 378 went on to the icon anyway and 216
-            # ended in a death. The 18:51:45 kill waited out all 6 s with the
+            # ended in a death. The kill waited out all 6 s with the
             # next enemy's icon on the ring.
             if since is not None and since < wait_s and not (
                     active and since >= self._pursuit_search_resume_delay_s):
@@ -4280,7 +4353,7 @@ class Controller:
         # ADR 171: the push is the descent's, so the law turns toward the icon's
         # side instead. Left with "down", it held the wings level for a push it
         # never got: all 332 icon ticks, an enemy at 130 deg, and the aircraft
-        # flew straight out of the arena (2026-11-02 05:26:32 to 05:27:47).
+        # flew straight out of the arena (2026-11-02).
         if self._descent_flying:
             return "descent"
         floor = self._icon_cfg.push_floor_m
@@ -4538,7 +4611,7 @@ class Controller:
         running when the pursuit started, and wait for its finally to release its
         keys BEFORE the pursuit presses any. Otherwise it flies on against the
         pursuit (NOSE_UP against the icon push) and its closing releases drop the
-        pursuit's own held keys: at 18:14:46 a boundary turn begun 1 s before the
+        pursuit's own held keys: a boundary turn begun 1 s before the
         acs yield released NOSE_DOWN, and the aircraft flew level for 54 s with
         the push still logged as held."""
         for name, stop, thread in (
@@ -4668,7 +4741,6 @@ class Controller:
             # in play for this pursuit.
             j20_cycle = self._j20_cycle_in_play()
             descent: "ControlledDescent | None" = None
-            descent_pull_off = False   # the descent's turn has let its pull go
             handback_due = False   # rearmed, waiting out the climb-out
             handback = False       # the rearm ended the pursuit
             try:
@@ -4699,10 +4771,13 @@ class Controller:
                 icon_points = IconPoints(self._icon_cfg) if self._icon_cfg.enabled else None
                 # Resupply mode steers by the yellow resupply pin with points of
                 # its own, so an enemy's direction never leaks into the search.
-                resupply_points = IconPoints(self._icon_cfg) if self._icon_cfg.enabled else None
+                # The pins keep the push below the horizon: push_cone_deg is for
+                # an enemy's icon (operator, 2026-11-03).
+                pin_cfg = replace(self._icon_cfg, push_cone_deg=None)
+                resupply_points = IconPoints(pin_cfg) if self._icon_cfg.enabled else None
                 # So does the priority target's pin (operator, 2026-10-09).
-                priority_points = IconPoints(self._icon_cfg) if self._icon_cfg.enabled else None
-                # 2026-10-20 02:40:48.8: A, 20 px off the centre and steered at,
+                priority_points = IconPoints(pin_cfg) if self._icon_cfg.enabled else None
+                # 2026-10-20: A, 20 px off the centre and steered at,
                 # was missed by the scan for about 0.6 s; the resupply's 0.5 s of
                 # memory ran out, the resupply marker took the steering, and A,
                 # found again a cycle later, never got it back. In the logs of
@@ -4734,7 +4809,7 @@ class Controller:
                 # deferred start presumes it, as it always has. A resupply refills
                 # both racks (a saved frame of 2026-10-02 shows 2/2 and 2/2), and
                 # the HUD shows only the selected one, so the other rack can be
-                # full again with nothing to say so: 11:18:45-11:19:18, a resupply
+                # full again with nothing to say so: over 33 s, a resupply
                 # with the full secondary selected changed no count, and when the
                 # secondary ran out the reloaded primary was never selected.
                 rack_loaded = rack_id == 0
@@ -4767,7 +4842,7 @@ class Controller:
                 # pictures, and the HUD drawn from the picture it was taken on.
                 # The measurement runs on the perception's own worker thread: on
                 # this one its median 46 ms slowed the steering cycle from 0.165 s
-                # to 0.210 s (2026-10-15 07:42). Written by the worker, read here.
+                # to 0.210 s (2026-10-15). Written by the worker, read here.
                 path_perception = self._path_perception
                 if path_perception is not None and not path_perception.enabled:
                     path_perception = None
@@ -4822,10 +4897,10 @@ class Controller:
                             yielding = owner is not None
                         # ADR 171: above where ACS flies, the descent has the pitch.
                         # A target or a marker below the nose is what took this
-                        # aircraft to 2,978 KPH (2026-11-01 16:56:01), so nothing may
+                        # aircraft to 2,978 KPH (2026-11-01), so nothing may
                         # pull it down until it is level. The roll stays ACS's, at
                         # the target and the ring icons: held level for 60 s the
-                        # aircraft flew out of the arena (2026-11-02 04:51:52). A
+                        # aircraft flew out of the arena (2026-11-02). A
                         # yield comes first: a recovery or an evade outranks it.
                         descent_action = None
                         if descent is not None and not yielding and not rearm_climb_until:
@@ -4838,7 +4913,7 @@ class Controller:
                         self._descent_flying = descent_action is not None
                         # Through a yield too: with the chase back in play during a
                         # recovery, a target in view ended the recovery after 0.5 s,
-                        # three times in 4 s (2026-11-01 17:49:48).
+                        # three times in 4 s (2026-11-01).
                         steering_held = descent is not None
                         detected_resupply_marker = None
                         if (self._resupply_priority_enabled
@@ -4913,7 +4988,7 @@ class Controller:
                         # already has the steering (below). With every rack
                         # empty the crown's marker in view is still flown at,
                         # and nothing else of the two is looked for: on
-                        # 2026-10-10 05:44:06 the racks were confirmed empty
+                        # 2026-10-10 the racks were confirmed empty
                         # with the crown dead ahead, 55 px across, the search
                         # took the roll and the aircraft went by it.
                         priority_marker = None
@@ -4981,7 +5056,7 @@ class Controller:
                         if target_nearer:
                             resupply_proposed = False
                         # Operator, 2026-10-15: "it should have prioritized the
-                        # objective that's already in view". At 12:58:34.9 the
+                        # objective that's already in view". The
                         # pursuit had flown at control point C for 4.4 s, its
                         # marker 35 px across and 280 px from the centre; the
                         # resupply marker came into view 26 px across at the
@@ -5080,7 +5155,7 @@ class Controller:
                         # What the crash recovery waits on: the thing this cycle
                         # steers at, when it can see it. A control point or the
                         # crown with the steering counts as the resupply marker
-                        # does: on 2026-10-12 14:36:56 the recovery took the
+                        # does: on 2026-10-12 the recovery took the
                         # airframe with A 12 px off the centre, one second after
                         # A took the steering from the target it had waited on.
                         # A held marker steers but is not in view: the recovery
@@ -5131,7 +5206,7 @@ class Controller:
                             target_visible=control_visible)
                         # The icon law's move, decided once for roll and pitch.
                         # A refused push turns toward the icon instead of flying
-                        # straight (2026-09-27 18:51:51, IconPoints.intent).
+                        # straight (2026-09-27, IconPoints.intent).
                         icon_withheld = "-"
                         icon_intent = ("none", ())
                         hud_steering_target = None
@@ -5142,6 +5217,14 @@ class Controller:
                                 icon_withheld = self._icon_down_withheld(guard)
                             icon_intent = steer_points.intent(
                                 down_allowed=icon_withheld == "-")
+                        # ADR 171: in the descent the turn is a bank alone, and the pitch
+                        # stays the descent's. Any pull zoomed the J-20: held, -20 to +51
+                        # deg in 5 s; 3 s of it from -22 deg, the nose on to
+                        # +68 and 5,396 to 7,067 m. A bank alone turned it at
+                        # about 20 deg/s with the path level.
+                        if descent_action is not None and icon_intent[0] == "turn":
+                            icon_intent = ("bank", tuple(k for k in icon_intent[1]
+                                                         if k.startswith("ROLL_")))
                         # The climb-out after a rearm owns both axes until it ends.
                         climbing_out = False
                         if rearm_climb_until:
@@ -5324,21 +5407,6 @@ class Controller:
                                     desired = "up"      # bank and pull (step 3)
                                 if desired == "down" and withheld != "-":
                                     desired = None
-                                # ADR 171: in the descent the turn's pull follows the
-                                # path, let go at the level-off angle and taken again
-                                # at the descent's; no reading, no pull. Held, it was
-                                # a zoom: -20 to +51 deg in 5 s and 1,250 m up, and
-                                # the descent ran out of time at 5,548 m (2026-11-02
-                                # 05:54:58).
-                                if desired == "up" and descent_action is not None:
-                                    angle = self._telemetry_path_angle_deg()
-                                    if angle is None or angle >= self._acs_nose_angle_deg:
-                                        descent_pull_off = True
-                                    elif angle <= self._j20_descent_angle_deg:
-                                        descent_pull_off = False
-                                    if descent_pull_off:
-                                        desired = None
-                                        why += ", pull let go in the descent"
                                 self.hold_pitch_for_icon(desired, why)
                                 icon_state["pitch"] = desired or "-"
                             elif search_climbing:
@@ -5381,7 +5449,7 @@ class Controller:
                         # Shadow: nothing steers on it, and its failure must not
                         # cost the cycle.
                         # Only while health is being read: the state lags the screen,
-                        # and on 2026-10-15 08:24 the view was taken of the round-end
+                        # and on 2026-10-15 the view was taken of the round-end
                         # MVP card (the main tick's detectors had this gate already).
                         path_health = True
                         if path_perception is not None and self._analyzer is not None:
@@ -5684,7 +5752,7 @@ class Controller:
                     # land while the original weapon is still selected. It used
                     # to hand eject_and_dive `False` there, so the dive pressed
                     # SWITCH_WEAPON with the primary still loaded (operator,
-                    # 2026-09-24, 'v' screenshot 08:20:14: 6/6 primary untouched,
+                    # 2026-09-24, 'v' screenshot: 6/6 primary untouched,
                     # R-74 secondary selected; five such presses in that log).
                     # Now the dive is told the switch is still deferred, and its
                     # heatdive loop makes it once the weapon is empty.
@@ -5793,7 +5861,7 @@ class Controller:
         """Stop the search-and-destroy padlock + weapon-fire loops.
 
         ADR 118: serialised against the start, and each join is guarded by
-        `is_alive()`. Measured 2026-09-05 01:05:11 — a stop landed between the
+        `is_alive()`. Measured 2026-09-05 — a stop landed between the
         start's thread ASSIGNMENT and its `.start()`, so the join raised
         `RuntimeError: cannot join thread before it is started` and took
         mission_j20 down with it.
@@ -5941,7 +6009,7 @@ class Controller:
                 # NOT _interruptible_sleep on _mission_cancel: cancel_mission()
                 # above set it, and reacting to it here would abort the roll
                 # after milliseconds and leave the aircraft flying straight
-                # out of the arena (observed 2026-07-28 20:40:03, an 8 ms
+                # out of the arena (observed 2026-07-28, an 8 ms
                 # "roll"). The roll must outlive the cancel it issued.
                 #
                 # SAF-001 (2026-09-09): that guard had no manual-takeover
@@ -6188,7 +6256,7 @@ class Controller:
                 # evade STARTING under a selected Eject, but ConditionTactic.
                 # terminate is a no-op and this thread self-terminates on its
                 # own clear timer, so an eject that starts AFTER the evade had
-                # nothing to stop it. Observed 2026-08-12 05:34:50: the evade
+                # nothing to stop it. Observed 2026-08-12: the evade
                 # held roll-right + yaw-left + burner for 4.8 s INTO an eject,
                 # which climbed to +55deg while its descent controller pulsed
                 # nose-down against it (alt 7596 -> 9347 m) and its burner gate,
@@ -6301,7 +6369,7 @@ class Controller:
             # Physical release first, THEN the grace + counter drop, so repeats
             # already queued in the XRecord pipeline cannot be misread as the
             # player (the _eject_key release-ordering finding). Grace scaled by
-            # release latency (2026-08-14 03:35 delayed-echo finding).
+            # release latency (2026-08-14 delayed-echo finding).
             for _key in guarded_keys:
                 self._arm_release_grace(_key, span_s=_release_span)
                 self._dec_programmatic_key(_key)
@@ -6702,8 +6770,8 @@ class Controller:
                 and not (emergency and self._pursuit_crash_recovery)):
             # Operator, 2026-09-26: the pursuit owns the airframe; a dive
             # recovery would take pitch and roll from the icons and the tracker.
-            # The floor climb too (HLDD 015, 2026-09-26 18:15): inside a pursuit
-            # it left at its first state check (173 of 173 in the 17:12 log)
+            # The floor climb too (HLDD 015, 2026-09-26): inside a pursuit
+            # it left at its first state check (173 of 173 in the log)
             # and only ran its exit push, whose NOSE_DOWN release dropped the
             # pursuit's own held key: 54 s of level flight while it logged a push.
             now = time.time()
@@ -6714,7 +6782,7 @@ class Controller:
                             "dive recovery" if emergency else "climb")
             return
         if self._pursuing.is_set() and not self._pursuit_dive_safety and emergency:
-            # The hand-back rule at the start too (2026-10-02 23:40): a fresh path at
+            # The hand-back rule at the start too (2026-10-02): a fresh path at
             # or above level overrides the tree's lagging mean, or every tick of that
             # lag would start a hold, tap the airbrake and hand straight back.
             _path = self._telemetry_path_angle_deg()
@@ -6731,9 +6799,9 @@ class Controller:
             # hand-back.
             _objective = self._pursuit_objective_in_view()
             # Code Review 019 cycle 25 (operator, 2026-10-18): two agreeing
-            # terrain warnings break off the chase or objective run anyway.
-            _agreement = getattr(self, "_warning_agreement", None)
-            if _objective is not None and _agreement is not None and _agreement.live():
+            # terrain warnings break off the chase or objective run anyway; in an
+            # ADR 172 `holdoff` round, not the resupply approach.
+            if _objective is not None and self._agreement_breaks_holdoff(_objective):
                 logger.info("Controller: crash recovery starts with the %s in view — "
                             "two terrain warnings agree", _objective)
                 _objective = None
@@ -6795,7 +6863,7 @@ class Controller:
         play.
 
         ADR 171: the configured 80 deg, 450 m/s and 1.5 s were set on lesser jets.
-        The J-20 goes vertical inside them, one pulse took it to +66 deg (20:08:18),
+        The J-20 goes vertical inside them, one pulse took it to +66 deg,
         and it coasts from there to 7,000 to 9,500 m and a stall. A hard emergency
         keeps the configured limits whatever the mission: a pull-up from terrain
         must not be capped at a cruise climb. The lock has a timeout, as for the
@@ -6809,11 +6877,46 @@ class Controller:
         finally:
             self._last_mission_lock.release()
 
+    def _burner_speed_cap_holds(self, speed: "float | str | None" = "poll") -> bool:
+        """ADR 171: True while the mission in play caps the burner on speed and the
+        aircraft is over it, from a read at or over its max until one at or under its
+        rearm speed; a stale or missing read keeps the last verdict. An incoming
+        missile lifts it (ADR 088). `speed` is a reading the caller already has (None:
+        none yet); by default this reads a fresh one, as the cruise tick does. The
+        climb passes its own sample, so its poll is not read twice. The lock has a
+        short timeout: this runs on the cruise tick and in the climb's poll."""
+        caps = getattr(self, "_own_burner_caps", None)
+        if not caps:
+            return False
+        if not self._last_mission_lock.acquire(timeout=0.05):
+            return self._burner_speed_capped
+        try:
+            cap = caps.get(self._last_mission)
+        finally:
+            self._last_mission_lock.release()
+        if cap is None:
+            self._burner_speed_capped = False
+            return False
+        if speed == "poll":
+            speed = None
+            try:
+                snap = self._analyzer.get_telemetry() if self._analyzer is not None else None
+                if snap is not None and snap.speed_fresh():
+                    speed = snap.speed.stable_value
+            except Exception:
+                speed = None
+        if speed is not None:
+            if speed >= cap[0]:
+                self._burner_speed_capped = True
+            elif speed <= cap[1]:
+                self._burner_speed_capped = False
+        return self._burner_speed_capped and not self._incoming_now()
+
     def _boundary_pull_limit(self) -> "float | None":
         """The pitch a boundary turn's pull may reach, for a mission with climb
         limits of its own (ADR 171), else None.
 
-        On the J-20 the held pull went vertical: 04:06:01, nose +0 to +90 deg in a
+        On the J-20 the held pull went vertical: nose +0 to +90 deg in a
         9.1 s turn, 3,364 m to 5,413 m, and the aircraft was lost 5 s after it.
         """
         if not self._last_mission_lock.acquire(timeout=1.0):
@@ -6832,7 +6935,7 @@ class Controller:
         After a respawn the tree's altitude floor (ADR 141, 3000 m for acs)
         selected Climb about 1.5 s before mission_acs restarted on the health
         return, on 66 of 66 respawns; the pursuit the mission then handed to
-        stopped it, but at 00:17:02 it had already put the nose at +90 deg.
+        stopped it, but it had already put the nose at +90 deg.
         Only while acs is the mission in play with ``yield_to_target`` on, no
         mission and no pursuit running, and never for a hard emergency (a
         predicted impact or terrain ahead): those climb whatever is in view.
@@ -7069,6 +7172,18 @@ class Controller:
         # instead of waiting for the fuel to refill to rearm_fuel_pct.
         if getattr(self, "_approach_brake_held", False):
             return
+        # ADR 171, operator 2026-11-02, the one exception to D9 for a jet with limits
+        # of its own: while its routine climb has the burner out at the pitch limit,
+        # cruise lets go too and takes it back on the first tick after. Re-pressed
+        # every tick, it relit the J-20's burner 8 s after the climb's cut, and the
+        # climb went on to 6,281 m at 1,299 KPH and a 233 KPH stall.
+        # ADR 171: and over the mission's burner speed cap, the operator's
+        # delegation of 2026-11-02: cruise held the J-20's burner at 2,000+ KPH after
+        # a climb ended and it zoomed from 5,536 to 7,197 m.
+        if getattr(self, "_climb_burner_cut", False) or self._burner_speed_cap_holds():
+            if self._cruise_ab_active:
+                self._climb_key(AFTERBURNER_KEY, press=False, action="cruise")
+            return
 
         may_hold = (
             # ADR 139 D4: the manual-takeover / climb-emergency arbitration
@@ -7223,7 +7338,10 @@ class Controller:
     _THROTTLE_YIELDS = {
         # ADR 134 D9, ADR 137; and Code Review 019 cycle 9, the approach brake,
         # which pauses cruise rather than ending it (note_afterburner_cruise).
-        "cruise": ("manual_takeover", "climb_emergency", "approach_brake"),
+        # ADR 171: and a routine climb's burner cut at a jet's own pitch limit,
+        # another pause (operator, 2026-11-02).
+        "cruise": ("manual_takeover", "climb_emergency", "approach_brake",
+                   "climb_burner_cut"),
         "evade": ("manual_takeover", "climb_emergency"),     # ADR 128 D7, D8
         "climb": (),                  # stops on its own stop event (registry)
         "missile_evade": (),          # own fuel gate; yields to eject by entry guard
@@ -7247,6 +7365,8 @@ class Controller:
             return bool(self._climb_emergency_active)
         if name == "approach_brake":
             return bool(getattr(self, "_approach_brake_held", False))
+        if name == "climb_burner_cut":
+            return bool(getattr(self, "_climb_burner_cut", False))
         raise ValueError(f"unknown yield condition {name!r}")
 
     def _owner_may_hold(self, key: str, owner: str) -> bool:
@@ -7343,7 +7463,7 @@ class Controller:
 
         Applies NOSE_UP in ``pulse_s``/``observe_s`` pulses under the
         programmatic bracket ('i' is a watched manual-takeover key) — a
-        continuous hold looped the live aircraft at spawn (2026-08-17 14:22:
+        continuous hold looped the live aircraft at spawn (2026-08-17:
         alive detection lags the spawn instant by seconds, and held nose-up
         at spawn speed rolled a 180 and flew out of the map). Pulses bound
         the rotation; on the inert respawn screen the duty cycle costs
@@ -7428,7 +7548,7 @@ class Controller:
             # Always end the lease (ADR 151 D6): the key stays down while a
             # climb still holds it. Skipping this release when a climb ran, as
             # the guard did before the pitch keys were leased, left its lease
-            # behind and latched nose-up (2026-10-24 02:10:25, the aircraft
+            # behind and latched nose-up (2026-10-24, the aircraft
             # looped from +16 to -90 deg).
             self._climb_key(NOSE_UP_KEY, press=False, action="spawn_guard")
             _release_span = time.time() - _release_started
@@ -7472,7 +7592,7 @@ class Controller:
         policy). NOSE_UP is applied in ``pitch_pulse_s`` pulses and re-applied
         only after ``pulse_observe_s`` AND only while the telemetry climb rate
         is below ``min_climb_rate`` or unknown — a continuously held nose-up
-        LOOPS the aircraft instead of climbing it (2026-08-15 20:24 evidence:
+        LOOPS the aircraft instead of climbing it (2026-08-15 evidence:
         60 s held, altitude oscillated 1650-2400 with zero net gain). The
         eject dive controller's pulse/observe pattern, inverted.
 
@@ -7540,7 +7660,7 @@ class Controller:
             rotates the airframe at ~11deg/s, so testing the CURRENT angle
             against the ceiling always reacts a full sample too late: a
             relight at +57deg was at +90deg before the next read (2026-08-21
-            09:40:53). Same lead-prediction pattern ADR 083 d1 applies to
+            ). Same lead-prediction pattern ADR 083 d1 applies to
             altitude, for the same reason.
 
             Falls back to the current angle when no rate is known yet.
@@ -7580,7 +7700,7 @@ class Controller:
             a median 21 deg/s at 400-599 KPH, 7 at 800-999, 5 at 1000-1199 and
             3 at 1200-1399, while the burner the nose-up carries in a dive
             shallower than the steep-dive limit added speed (1067 to 1459 KPH
-            at 20:23:37-41). Braking starts at or above
+           ). Braking starts at or above
             ``emergency_airbrake_above_kph`` and, once on, holds while the speed
             stays above ``emergency_airbrake_release_kph``: well clear of the
             stall the old any-dive rule caused (ADR 159: 1116 KPH to 266).
@@ -7619,6 +7739,12 @@ class Controller:
                 logger.info("Controller: climb — EMERGENCY: path %+.0f deg is a steep "
                             "dive: airbrake held, afterburner suppressed "
                             "(cruise-afterburner yields too)", _entry_angle)
+            elif own_limits and not emergency_now and self._burner_speed_cap_holds(None):
+                # ADR 171: over the jet's burner speed cap, no burner; the poll
+                # below lights it once the speed is back under the rearm speed.
+                self._climb_burner_cut = True
+                logger.info("Controller: climb — over the burner's speed cap, starting "
+                            "without afterburner (ADR 171)")
             elif fuel is None or fuel > fuel_floor_pct:
                 self._climb_key(AFTERBURNER_KEY, press=True)
                 ab_held = True
@@ -7634,7 +7760,7 @@ class Controller:
                 # iteration instead of only ever acting on the value frozen in
                 # at thread start — the "Third Live Trial" gap, where an
                 # already-running hold never learned its emergency status had
-                # changed mid-hold. Measured live twice, 2026-09-10 08:15/08:16.
+                # changed mid-hold. Measured live twice, 2026-09-10/.
                 _requested_emergency = self._climb_emergency_requested
                 if _requested_emergency != emergency_now:
                     # The pulse cadence follows `emergency_now` at once. The
@@ -7654,11 +7780,11 @@ class Controller:
                 # "when it applies nose up it should activate afterburner to
                 # prevent stall"). The rule before this one braked whenever the
                 # path pointed down (ADR 148 amendment, 2026-10-02), and that
-                # was the stall: 02:42:33-02:42:39, 1116 KPH at -22 deg, 624 at
+                # was the stall: over 6 s, 1116 KPH at -22 deg, 624 at
                 # -31, 266 at +3. Steeper than `emergency_airbrake_below_deg`
                 # the airbrake goes on and the burner off; shallower it comes
                 # off and the fuel logic below lights the burner.
-                # No angle keeps the current state: at 21:32:32.7 a `Nose: n/a`
+                # No angle keeps the current state: a `Nose: n/a`
                 # read at 18 kph near vertical put the airbrake back on.
                 if last_angle is None:
                     _braking = emergency_now and self._climb_emergency_active
@@ -7692,6 +7818,29 @@ class Controller:
                                     "afterburner allowed",
                                     _brake_release_why(last_angle, last_speed)
                                     if emergency_now else "emergency cleared")
+                # ADR 171: under a jet's own limits a routine climb's burner goes
+                # out at the pitch limit, and the relight below waits until the
+                # nose is back under it (ADR 086 d6). Lit, it carried 11 of 31
+                # routine J-20 climbs past 45 deg through the pushes, and 7 of
+                # them past 6,500 m (2026-11-02). Incoming keeps it (ADR 088).
+                if (own_limits and not emergency_now and ab_held
+                        and not self._climb_emergency_active and not self._incoming_now()):
+                    if _at_pitch_ceiling():
+                        cut_why = "path %s at the pitch limit" % (
+                            "n/a" if last_angle is None else "%+.0f deg" % last_angle)
+                    elif self._burner_speed_cap_holds(last_speed):
+                        cut_why = "%s over the burner's speed cap" % (
+                            "n/a" if last_speed is None else "%.0f KPH" % last_speed)
+                    else:
+                        cut_why = None
+                    if cut_why:
+                        self._climb_key(AFTERBURNER_KEY, press=False)
+                        ab_held = False
+                        self._climb_burner_cut = True
+                        # Cruise's lease yields to the cut (its policy): lift the key
+                        # now, not on cruise's next tick (1.5 s).
+                        _actuator.reevaluate(AFTERBURNER_KEY)
+                        logger.info("Controller: climb — %s, afterburner cut (ADR 171)", cut_why)
                 # ADR 075 burner gate: release at the floor (a held key at 0%
                 # blocks recharge; the sustain floor keeps the evade reserve),
                 # re-press only after the rearm margin refills. ADR 137:
@@ -7731,14 +7880,18 @@ class Controller:
                             # gate only closes that for the above-target case.
                             # Below target and over the ceiling is the same
                             # trap: relighting at +64deg drove 64->90deg and a
-                            # speed collapse 1241->392 (2026-08-21 08:44:50).
+                            # speed collapse 1241->392 (2026-08-21).
                             and not _at_pitch_ceiling()   # ADR 086 d7
+                            and not (own_limits and not emergency_now
+                                     and self._burner_speed_cap_holds(last_speed))   # ADR 171
                             and fuel >= fuel_floor_pct + self._fuel_rearm_margin):
                         self._climb_key(AFTERBURNER_KEY, press=True)
                         ab_held = True
                         logger.info(
-                            "Controller: climb — fuel recovered to %d%% — "
-                            "afterburner re-engaged", fuel)
+                            "Controller: climb — %s — afterburner re-engaged",
+                            "back under its limits" if self._climb_burner_cut
+                            else "fuel recovered to %d%%" % fuel)
+                        self._climb_burner_cut = False
                 # Yield the airframe to higher-priority tactics that started
                 # after this hold (the ADR 070 d11 time-asymmetry).
                 if self._ejecting.is_set():
@@ -7772,7 +7925,7 @@ class Controller:
                                             or self._pursuit_crash_recovery)
                                        and self._pursuit_recovery_max_s > 0
                                        and (recovery_since is not None or emergency_now))
-                        # Operator, 2026-10-02 23:40: a fresh path at or above level
+                        # Operator, 2026-10-02: a fresh path at or above level
                         # hands back whatever the tree's 3-read mean still says; that
                         # lag kept holds pulling to +90 deg at 132-245 kph. With no
                         # angle, the cleared emergency and a climbing rate still do.
@@ -7787,11 +7940,11 @@ class Controller:
                                       if _recovering and recovery_since is not None
                                       and not self._pursuit_dive_safety else None)
                         # Code Review 019 cycle 25: not while two terrain warnings
-                        # agree (live 02:48:33: the agreement's recovery was handed
+                        # agree (live: the agreement's recovery was handed
                         # back after 0.3 s for the resupply marker, and restarted).
-                        _agreement = getattr(self, "_warning_agreement", None)
-                        if (_objective is not None and _agreement is not None
-                                and _agreement.live()):
+                        # ADR 172: in a `holdoff` round the resupply marker takes it.
+                        if (_objective is not None
+                                and self._agreement_breaks_holdoff(_objective)):
                             _objective = None
                         # Code Review 019 cycle 36: nor while a severe pull-out
                         # alarm stands.
@@ -7857,7 +8010,7 @@ class Controller:
                     # ADR 137: no idle gap between pulses — the next loop
                     # tick re-checks rate/ceiling and re-pulses at once.
                     #
-                    # Operator-caught live (crash 16:15:56, nose oscillating
+                    # Operator-caught live (crash, nose oscillating
                     # +90/-90/+90 until impact): that rule assumes the
                     # re-check has real telemetry to act on. Right after a
                     # fresh respawn, `last_angle` is still None for the
@@ -7966,16 +8119,29 @@ class Controller:
                         _new_angle, prev_angle,
                         None if prev_angle_ts is None else sig_ts - prev_angle_ts,
                         getattr(getattr(snap, "speed", None), "stable_value", None)):
+                    # ADR 171: under a jet's own limits, a routine climb's steep
+                    # misread is the altitude catching up after a freeze, at the
+                    # climb's steepest. Skipped, it blinded the limit: of 25
+                    # crossings of 6,500 m on 2026-11-02, the 13 after one peaked
+                    # at a median 8,611 m and 7 passed 9,000 m; the 12 without,
+                    # 7,396 m and none. It counts as the limit, so the routine
+                    # pulse pushes. Emergencies keep the skip (above).
+                    steep = (own_limits and not emergency_now
+                             and routine_max_pitch is not None
+                             and _new_angle >= float(routine_max_pitch))
+                    if steep:
+                        last_angle = float(routine_max_pitch)
                     logger.debug(
                         "Controller: climb — path %+.0f deg (rate %s) after %s is a "
-                        "misread, held", _new_angle,
+                        "misread, %s", _new_angle,
                         getattr(alt_signal, "rate", None),
-                        "n/a" if prev_angle is None else f"{prev_angle:+.0f} deg")
+                        "n/a" if prev_angle is None else f"{prev_angle:+.0f} deg",
+                        "taken as the limit (ADR 171)" if steep else "held")
                     continue
                 # ADR 171: a stalled altitude reading gives a rate of exactly 0, and
                 # the law takes that for "not climbing" and pulls up. On the J-20,
                 # which climbs at 300 m/s, that pull went vertical twice
-                # (20:07:11, 04:22:52, "up, rate=0.0, angle=0.0"). A zero straight
+                # ("up, rate=0.0, angle=0.0"). A zero straight
                 # after a climbing read is skipped like a misread.
                 if (own_limits and getattr(alt_signal, "rate", None) == 0.0
                         and last_rate is not None and last_rate > self._climb_min_rate):
@@ -8003,7 +8169,7 @@ class Controller:
                     above_target = True
                     if ab_held and self._incoming_now():
                         # ADR 088: this is the cut observed stranding an evade
-                        # (2026-08-22 01:47:39, burner cut 1.7s after the
+                        # (2026-08-22, burner cut 1.7s after the
                         # manoeuvre limit released with incoming still present).
                         logger.info(
                             "Controller: climb — reached target alt %.0f but "
@@ -8041,6 +8207,7 @@ class Controller:
             # press of 'l' is mistaken for an echo.
             self._climb_key(NOSE_UP_KEY, press=False)
             self._climb_key(AFTERBURNER_KEY, press=False)
+            self._climb_burner_cut = False
             # Only a hold that braked lets the airbrake go: most emergency
             # holds never press it now (ADR 159), and the key is not leased.
             if self._climb_emergency_active:
@@ -8050,7 +8217,7 @@ class Controller:
             # going neutral. Burner off first (above), so the push is not
             # fighting thrust — the ADR 083 d3 finding.
             #
-            # Operator-caught live (crash at 14:36:02, nose oscillating
+            # Operator-caught live (crash, nose oscillating
             # +90/-90/+90 until impact): this hold's own exit_above_alt can
             # be reached while a broader emergency floor (Phase 1's altitude
             # floor) is still below — the tree re-selects Climb and a fresh
@@ -8190,8 +8357,7 @@ class Controller:
         dives by hundreds of metres. Scored on every icon push logged in three
         sessions against the HUD altitude interpolated between readings, it
         missed all 72 push ticks below the floor, where this misses none; four
-        terrain deaths followed such a push (19:42:13, 19:43:21, 20:19:36,
-        20:31:43)."""
+        terrain deaths followed such a push."""
         if self._analyzer is None:
             return None
         try:
@@ -8374,7 +8540,7 @@ class Controller:
         falls. This ends a routine climb there, and pulses the nose down: one
         ``ceiling_pulse_s`` per new sample, never a hold. All four holds of the first
         version overshot on the lagging path, one of them 4.5 s from +8 deg, and each
-        ended in a dive, -269 to -435 m/s (20:12:12: -58 deg at 1,614 KPH). Nothing is
+        ended in a dive, -269 to -435 m/s (: -58 deg at 1,614 KPH). Nothing is
         pressed while another tactic owns the axis or on a stale reading (rules 6
         and 7).
         """
@@ -8383,7 +8549,7 @@ class Controller:
         angle = None if snap is None else snap.pitch_angle_deg()
         over = (alt is not None and angle is not None
                 and alt > self._j20_ceiling_alt_m and angle > self._j20_ceiling_path_deg)
-        # The climb is the zoom: at 18:37 the altitude reading froze at 3,006 m for
+        # The climb is the zoom: the altitude reading froze at 3,006 m for
         # 5 s, the hold pulled on to 8,100 m, and the aircraft was at 79 KPH 6 s
         # later. Above the ceiling it has done its work. Never a hard emergency.
         if over and self.is_climbing() and not self._climb_emergency_requested:
@@ -8546,7 +8712,7 @@ class Controller:
         """
         # No climb with a target already in view (operator, 2026-10-16: "it
         # should not climb if targets are in view"). The yield in step 3 first
-        # looked after the climb had begun: at 23:52:42 the crown was in view
+        # looked after the climb had begun: the crown was in view
         # from the spawn, the climb held the nose up for 1.6 s, the crown went
         # under the airframe and the pursuit reached it 19 s later.
         reason = self._target_in_view() if self._acs_yield_to_target else None
@@ -9133,7 +9299,7 @@ class Controller:
         hotkeys alive so the operator can restart the mission by hand while
         MetalStorm keeps running, and 'u'/'y' start a fresh mission thread
         that immediately saw the stale flag and self-cancelled within one
-        poll tick (measured 2026-09-06 04:25-04:27: every hotkey-started
+        poll tick (measured 2026-09-06, over 2 min: every hotkey-started
         mission_j20 during standby logged "exit requested, aborting mission
         wait" ~50ms after "adaptive mission running", so it never actually
         ran). `_operator_stop_event` is the same signal `__init__` already
@@ -9432,7 +9598,7 @@ class Controller:
                         # recognizable as programmatic. The 'u' hotkey used to
                         # dismiss echoes by FSM state (== GAME_STARTING), which
                         # also ate GENUINE resume presses whenever the FSM was
-                        # wedged in GAME_STARTING (2026-08-01 02:55: five human
+                        # wedged in GAME_STARTING (2026-08-01: five human
                         # presses in 3s all logged as "XTest echo ... ignoring").
                         self._inc_programmatic_key(MISSION_J20_KEY)
                         try:
@@ -9471,7 +9637,7 @@ class Controller:
                         # stalled — but not on program exit: shutdown cancels the
                         # mission too, and firing starting_timeout then only stamps a
                         # spurious STALLED warning into the log tail (observed
-                        # 2026-08-17 12:52, Backspace during matchmaking).
+                        # 2026-08-17, Backspace during matchmaking).
                         if (self._mission_cancel.is_set()
                                 and not (self._exit_event is not None
                                          and self._exit_event.is_set())
@@ -9559,8 +9725,21 @@ class Controller:
         missions = {"j20": self.mission_j20, "acs": self.mission_acs}
         name = self.launch_mission_name()
         name = name if name in missions else "j20"
-        logger.info("Controller: jet %s flies mission %s (ADR 171)",
-                    self._jet_on_record() or "not read", name)
+        # ADR 171 mission trial: a J-20 round drawn to fly acs, so the two missions'
+        # round scores can be set against each other. Drawn here, once a round: a
+        # respawn restarts the last mission and keeps the round's arm.
+        arm = None
+        if name == "j20" and self._j20_acs_share > 0.0:
+            arm = "acs" if self._mission_rng.random() < self._j20_acs_share else "j20"
+            name = arm
+        logger.info("Controller: jet %s flies mission %s (ADR 171%s)",
+                    self._jet_on_record() or "not read", name,
+                    "" if arm is None else ", the mission trial's arm")
+        if arm is not None and self._round_note is not None:
+            try:
+                self._round_note("mission_arm_" + arm, time.time())
+            except Exception as exc:
+                log_suppressed(logger, "mission_trial_note", exc)
         self._set_last_mission(name)
         # CR-018-19: taken before the thread starts, so a cancel that lands
         # before the mission reaches its entry is not swallowed there.

@@ -282,7 +282,7 @@ class TestEventCounting:
         """GAME_BATTLE_EJECT is a mid-mission excursion, not a mission boundary.
 
         Omitting it from _BATTLE_STATES made every missiles-empty eject end a
-        mission and the return from it start a new one: the 2026-07-30 16:27
+        mission and the return from it start a new one: the 2026-07-30
         session reported 7 missions for 3 real rounds, with a bogus 1m30s
         average.
         """
@@ -301,7 +301,7 @@ class TestEventCounting:
     def test_takeover_from_eject_state_is_counted(self, tmp_path):
         """Takeover entered from GAME_BATTLE_EJECT must still count.
 
-        3 of the 4 takeovers in the 2026-07-30 16:27 session arrived as
+        3 of the 4 takeovers in the 2026-07-30 session arrived as
         EJECT -> MANUAL and were dropped, because the counter checked
         _in_mission before the mission-start handling ran.
         """
@@ -341,7 +341,7 @@ class TestEventCounting:
 
         Since GAME_BATTLE_EJECT became an in-mission state, "missiles_empty" is
         a mid-mission signal that survives to the end of the round. Checking it
-        before trigger_name made the 2026-07-30 18:51 session report
+        before trigger_name made the 2026-07-30 session report
         "Missiles empty 10 (100%), Click-to finish 0" despite 10 logged
         CLICK TO CONTINUE finishes.
         """
@@ -627,7 +627,7 @@ class TestMissileEngagements:
 
 class TestObjectivesFlownThrough:
     def test_the_summary_prints_the_sessions_totals(self, tmp_path, caplog):
-        """The 2026-10-09 10:49 session's own totals."""
+        """The 2026-10-09 session's own totals."""
         t = _tracker(tmp_path)
         _enter_battle(t)
         t.finalize()
@@ -841,7 +841,7 @@ class TestRoundPerformance:
                 result["round_performance"]["score"]) == (1, 163)
 
     def test_a_second_click_through_books_no_unread_round(self, tmp_path):
-        """2026-10-28 00:56: one round, two click-throughs, two unread lines; the
+        """2026-10-28: one round, two click-throughs, two unread lines; the
         summary counted 28 rounds for 24."""
         t = _tracker(tmp_path)
         t._startup_done = True
@@ -1035,7 +1035,7 @@ def test_a_round_carries_the_jet_read_in_its_lobby(tmp_path):
 
 
 def test_a_mission_restarted_without_a_click_keeps_its_jet(tmp_path):
-    """2026-10-31 07:09:39: the operator's double `n` forced GAME_LOBBY in a battle.
+    """2026-10-31: the operator's double `n` forced GAME_LOBBY in a battle.
     The round went on as a second mission, the one that gets its score, and no PLAY
     click came between them to read the jet again."""
     t = _tracker(tmp_path)
@@ -1085,3 +1085,64 @@ def test_a_failed_read_drops_the_last_jet(tmp_path):
     _enter_battle(t, ts=1.0)
     _leave_battle(t, ts=2.0)
     assert _finish(t)[0]["tags"] == {}
+
+
+# ---------------------------------------------------------------------------
+# ADR 171 mission trial: the round's mission, as a tag
+# ---------------------------------------------------------------------------
+
+class TestMissionTrialTag:
+    def test_an_arm_drawn_in_the_round_tags_it(self, tmp_path):
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        t.record_jet("J-20 MIGHTY DRAGON")
+        _enter_battle(t, ts=100.0)
+        t.on_event("mission_arm_acs", 100.4)
+        _leave_battle(t, ts=400.0)
+        tags = t.finalize()["missions"][0]["tags"]
+        assert tags == {"jet": "J-20 MIGHTY DRAGON", "mission": "acs"}
+
+    def test_an_arm_drawn_just_before_the_round_opens_tags_it(self, tmp_path):
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        t.on_event("mission_arm_j20", 99.0)
+        _enter_battle(t, ts=100.0)
+        _leave_battle(t, ts=400.0)
+        assert t.finalize()["missions"][0]["tags"].get("mission") == "j20"
+
+    def test_the_terrain_trial_arm_tags_the_round_beside_the_mission(self, tmp_path):
+        """ADR 172: both trials draw at the same round start, before or after it opens."""
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        t.on_event("agree_arm_holdoff", 99.5)
+        _enter_battle(t, ts=100.0)
+        t.on_event("mission_arm_acs", 100.4)
+        _leave_battle(t, ts=400.0)
+        _enter_battle(t, ts=500.0)
+        t.on_event("agree_arm_override", 500.2)
+        _leave_battle(t, ts=800.0)
+        first, second = t.finalize()["missions"]
+        assert first["tags"] == {"agree_resupply": "holdoff", "mission": "acs"}
+        assert second["tags"] == {"agree_resupply": "override"}
+
+    def test_no_card_deaths_are_counted_by_round(self, tmp_path):
+        """ADR 172: the kill card's verdict per round, the trial's crash count."""
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        t.on_event("death_card_no_card", 50.0)        # before any round: not counted
+        _enter_battle(t, ts=100.0)
+        t.on_event("death_card_no_card", 150.0)
+        t.on_event("death_card_enemy", 200.0)
+        t.on_event("death_card_no_card", 250.0)
+        _leave_battle(t, ts=400.0)
+        assert t.finalize()["missions"][0]["no_card_deaths"] == 2
+
+    def test_a_stale_arm_does_not_tag_a_later_round(self, tmp_path):
+        """A draw with no round after it (a launch that never reached battle) must not
+        put its arm on the next round, which may be another jet's."""
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        t.on_event("mission_arm_acs", 50.0)
+        _enter_battle(t, ts=100.0)
+        _leave_battle(t, ts=400.0)
+        assert "mission" not in t.finalize()["missions"][0]["tags"]

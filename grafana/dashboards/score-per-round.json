@@ -13,7 +13,7 @@
   "refresh": "",
   "editable": false,
   "graphTooltip": 1,
-  "schemaVersion": 39,
+  "schemaVersion": 42,
   "version": 1,
   "annotations": {
     "list": [
@@ -498,6 +498,142 @@
       "options": {}
     },
     {
+      "id": 11,
+      "title": "Score range by jet (tick at the mean)",
+      "type": "barchart",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "wingman-pg"
+      },
+      "description": "Wingman's own rounds by the jet on record (ADR 167 and 168), the jet with the most read rounds on the left. Each bar runs from the jet's lowest score to its highest, and the tick marks its mean. Hover a bar for its figures and its count of read rounds: a jet with few rounds can have a short bar for that reason alone. Rounds with no jet recorded and rounds with a manual takeover are left out.",
+      "gridPos": {
+        "x": 0,
+        "y": 13,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wingman-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "WITH jets AS (\n  SELECT tags->>'jet' AS jet,\n         count(*) AS rounds,\n         min(score) AS lowest,\n         avg(score) AS mean,\n         max(score) AS highest\n  FROM rounds\n  WHERE score IS NOT NULL AND manual_takeovers = 0 AND tags->>'jet' IS NOT NULL\n    AND $__timeFilter(ended_at)\n    AND tags @> ${tags:sqlstring}::jsonb\n  GROUP BY 1\n), ticks AS (\n  SELECT *, greatest(mean - 0.01 * max(highest) OVER (), 0) AS tick_from,\n            0.02 * max(highest) OVER () AS tick\n  FROM jets\n)\nSELECT jet AS \"Jet\",\n       least(lowest, tick_from) AS \"below the lowest\",\n       tick_from - least(lowest, tick_from) AS \"lowest to mean\",\n       tick AS \"mean tick\",\n       greatest(highest - tick_from - tick, 0) AS \"mean to highest\",\n       highest AS \"Highest\",\n       round(mean) AS \"Mean score\",\n       lowest AS \"Lowest\",\n       rounds AS \"Rounds read\"\nFROM ticks\nORDER BY rounds DESC, mean DESC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          },
+          "custom": {
+            "axisLabel": "score",
+            "fillOpacity": 60,
+            "lineWidth": 0
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/^(below the lowest|lowest to mean|mean tick|mean to highest)$/"
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": true,
+                  "viz": false
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "below the lowest"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "transparent"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "mean tick"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "text"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/^(Highest|Mean score|Lowest|Rounds read)$/"
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": true
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "orientation": "vertical",
+        "xField": "Jet",
+        "stacking": "normal",
+        "showValue": "never",
+        "barWidth": 0.35,
+        "xTickLabelRotation": -45,
+        "xTickLabelSpacing": 0,
+        "legend": {
+          "showLegend": false,
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    },
+    {
       "id": 7,
       "title": "Squadron rank per reading (lower is better)",
       "type": "timeseries",
@@ -508,7 +644,7 @@
       "description": "Mobius Squadron's place on the game's squadron leaderboard at each reading. Wingman reads it in the lobby between rounds (ADR 166). A lower number is a better place. It is the squadron's own figure, so it does not depend on the account that read it, and the tags box does not apply.",
       "gridPos": {
         "x": 0,
-        "y": 13,
+        "y": 22,
         "w": 12,
         "h": 9
       },
@@ -556,7 +692,7 @@
       "description": "Mobius Squadron's trophy count at each reading: the whole squadron's, every member included, not wingman's alone. It does not depend on the account that read it, and the tags box does not apply (ADR 166).",
       "gridPos": {
         "x": 12,
-        "y": 13,
+        "y": 22,
         "w": 12,
         "h": 9
       },
@@ -604,7 +740,7 @@
       "description": "Wingman's own rounds by the jet on the lobby as PLAY was clicked (ADR 167), the best mean score first. Kills, deaths and assists are per round. ± 95% is the margin on the mean: trust a gap between two jets only when their ranges do not overlap. A jet with under 10 read rounds comes after the rest, because so few prove little. A jet can fly on several accounts; narrow to one with the tags box. Rounds flown before 2026-10-31 have no jet recorded.",
       "gridPos": {
         "x": 0,
-        "y": 22,
+        "y": 31,
         "w": 24,
         "h": 8
       },
@@ -668,7 +804,7 @@
       "description": "The chosen aggregate over every read round that ended in each period (America/New_York). An unread round adds nothing; Rounds per period counts it.",
       "gridPos": {
         "x": 0,
-        "y": 30,
+        "y": 39,
         "w": 12,
         "h": 9
       },
@@ -709,7 +845,7 @@
       "description": "Rounds read and not read in each period; together, the rounds flown.",
       "gridPos": {
         "x": 12,
-        "y": 30,
+        "y": 39,
         "w": 12,
         "h": 9
       },
@@ -754,7 +890,7 @@
       "description": "One row per $granularity: rounds flown and read, and the sum, mean, median, minimum and maximum of $metric over the read rounds.",
       "gridPos": {
         "x": 0,
-        "y": 39,
+        "y": 48,
         "w": 16,
         "h": 10
       },
@@ -788,7 +924,7 @@
       "description": "Each tag key and value among the rounds in range, with its count of rounds. Filter with the tags box, for example {\"account\": \"mobius0\"}.",
       "gridPos": {
         "x": 16,
-        "y": 39,
+        "y": 48,
         "w": 8,
         "h": 10
       },

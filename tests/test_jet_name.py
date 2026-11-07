@@ -452,3 +452,11 @@ def test_a_profile_without_a_match_or_a_mission_picks_nothing():
     assert mission_for_jet("F-14 TOMCAT", _PROFILES) is None
     assert mission_for_jet("J-20", {"bad": None}) is None
     assert mission_for_jet("J-20", {}) is None
+
+
+def test_profile_for_jet_returns_the_matching_profile():
+    from wingman.jet_name import profile_for_jet
+    profiles = {"j20": {"match": "J-20", "mission": "j20", "flare_reload_at": 1}}
+    assert profile_for_jet("J-20 MIGHTY DRAGON", profiles)["flare_reload_at"] == 1
+    assert profile_for_jet("F-14 TOMCAT", profiles) is None
+    assert profile_for_jet(None, profiles) is None

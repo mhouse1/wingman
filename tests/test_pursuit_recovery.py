@@ -1,6 +1,6 @@
 """ADR 148: a dive recovery must be able to fly a pursuit.
 
-Measured 2026-09-25 00:03 (the operator's session, two lives): both chases ended by flying
+Measured 2026-09-25 (the operator's session, two lives): both chases ended by flying
 into the ground. The tree's emergency selected Climb at 29 s to ground and again every
 1.5 s to the impact, and every hold ended `climb complete (state_exit, 0.3s)`: the hold
 releases on any game state other than GAME_BATTLE (the SAF-001 backstop) and a pursuit
@@ -15,6 +15,7 @@ What is pinned here, with a REAL Controller, a real hold thread and the real Gam
 """
 
 import logging
+import random
 import threading
 import time
 
@@ -267,7 +268,7 @@ def test_the_predicate_needs_the_pursuit_too(monkeypatch):
 
 
 # --- pursuit_mode.crash_recovery (operator, 2026-10-02) ---------------------------
-# 20:19:47-20:20:03: with dive_safety off the tree requested the emergency climb from
+# Over 16 s: with dive_safety off the tree requested the emergency climb from
 # 30 s to ground down to the impact, and every request was refused because the pursuit
 # owned the airframe ("dive recovery suppressed"); the resupply search kept pushing the
 # nose down. The hard emergency now flies through with dive_safety off and gives the
@@ -281,7 +282,7 @@ def _crash_ctrl(monkeypatch, analyzer, **extra):
 
 def test_a_predicted_crash_pulls_up_on_the_afterburner_inside_a_pursuit_with_dive_safety_off(
         monkeypatch):
-    """02:42:32, 03:29:01 and 45 more that night: a chase diving at about -20 deg was
+    """47 times that night: a chase diving at about -20 deg was
     braked from 1100 kph to 250 kph while the hold pulled up, and stalled."""
     ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-19.0))
     ctrl._pursuing.set()
@@ -296,7 +297,7 @@ def test_a_predicted_crash_pulls_up_on_the_afterburner_inside_a_pursuit_with_div
 
 
 def test_a_predicted_crash_in_a_steep_dive_still_brakes_inside_a_pursuit(monkeypatch):
-    """03:27:31-03:27:40: -70 deg at 166 m and 910 kph, out at 59 m. The airbrake stays
+    """Over 9 s: -70 deg at 166 m and 910 kph, out at 59 m. The airbrake stays
     for that dive."""
     ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-70.0))
     ctrl._pursuing.set()
@@ -321,7 +322,7 @@ def test_crash_recovery_off_restores_the_suppression(monkeypatch, caplog):
 
 
 def test_crash_recovery_does_not_let_the_floor_climb_through(monkeypatch):
-    """Only the hard emergency: the floor climb stays out of the chase (2026-09-26 18:15)."""
+    """Only the hard emergency: the floor climb stays out of the chase (2026-09-26)."""
     ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-19.0))
     ctrl._pursuing.set()
     ctrl.climb_mode(emergency=False)
@@ -362,7 +363,7 @@ def test_a_cleared_emergency_climbing_hands_the_chase_back(monkeypatch, caplog):
 
 def test_the_airbrake_comes_off_as_the_dive_shallows_while_the_emergency_lasts(
         monkeypatch, caplog):
-    """20:44:32-20:44:41: the tree's 3-read mean kept the emergency on after the path
+    """Over 9 s: the tree's 3-read mean kept the emergency on after the path
     turned up, the airbrake stayed held at +24 deg and the aircraft stalled at 45 kph and
     143 m. ADR 159 moved the line from level to the steep-dive limit: brake in a steep
     dive only, let go while the path is still below level, and brake again if it steepens."""
@@ -394,7 +395,7 @@ def test_the_airbrake_comes_off_as_the_dive_shallows_while_the_emergency_lasts(
 
 
 def test_a_missing_angle_does_not_put_the_airbrake_back_on(monkeypatch):
-    """21:32:32.7: the HUD read `Nose: n/a` at 18 kph just after +90 deg, and the
+    """The HUD read `Nose: n/a` at 18 kph just after +90 deg, and the
     hold took no angle for below level and braked again."""
     analyzer = _Analyzer(altitude=300.0, angle=-60.0)   # below the 1000 m exit
     ctrl = _ctrl(monkeypatch, analyzer)                    # latched: see above
@@ -415,7 +416,7 @@ def test_a_missing_angle_does_not_put_the_airbrake_back_on(monkeypatch):
 
 def test_a_fresh_path_above_level_hands_back_while_the_mean_still_says_emergency(
         monkeypatch, caplog):
-    """23:06:07: -39 deg, then +12 at 700 kph, then +90 at 224 kph: the tree's
+    """A reading of -39 deg, then +12 at 700 kph, then +90 at 224 kph: the tree's
     3-read mean kept the emergency on and the hold kept pulling."""
     analyzer = _Analyzer(altitude=900.0, angle=-30.0)
     ctrl = _crash_ctrl(monkeypatch, analyzer)
@@ -452,8 +453,8 @@ def test_the_shipped_config_enables_crash_recovery():
 
 # --- pursuit_mode.crash_recovery_clear_view_s (operator, 2026-10-08) ---------------
 # "the climb we added last week is causing missed resupply and pursuit, change the climb
-# to execute only after target or resupply disappears". 2026-10-05 12:13 to 2026-10-08
-# 08:00: 657 recoveries flew 97 min of pursuit. 460 of them started with a target (316)
+# to execute only after target or resupply disappears". 2026-10-05 to 2026-10-08
+# 657 recoveries flew 97 min of pursuit. 460 of them started with a target (316)
 # or the resupply marker (144) in view, at a median 2070 m and 20 s to ground; 310 of
 # the 316 handed back with the target gone, and a marker approach of 4 s or more ended
 # in a rearm 8% of the time when the climb took over, 22% when it did not.
@@ -755,7 +756,7 @@ def test_without_an_agreement_the_target_still_holds_it_off(monkeypatch, caplog)
 
 
 def test_agreeing_warnings_keep_the_recovery_when_a_goal_comes_into_view(monkeypatch):
-    """Live 02:48:33: the agreement's recovery was handed back after 0.3 s for the
+    """Live: the agreement's recovery was handed back after 0.3 s for the
     resupply marker in view, and the tree restarted it a second later."""
     from wingman.warning_agreement import WarningAgreement
     ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-25.0))
@@ -775,7 +776,7 @@ def test_agreeing_warnings_keep_the_recovery_when_a_goal_comes_into_view(monkeyp
 
 
 def test_a_shadow_agreement_leaves_the_hold_off_in_place(monkeypatch, caplog):
-    """Live 2026-10-18 07:13:40: the shadow trigger still broke off the chase."""
+    """Live 2026-10-18: the shadow trigger still broke off the chase."""
     from wingman.warning_agreement import WarningAgreement
     ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-25.0))
     agreement = WarningAgreement(shadow=True)
@@ -788,6 +789,98 @@ def test_a_shadow_agreement_leaves_the_hold_off_in_place(monkeypatch, caplog):
         ctrl.climb_mode(emergency=True)
     assert not ctrl.is_climbing()
     assert _held_off(caplog)
+
+
+# --- ADR 172 --------------------------------------------------------------------
+# In a `holdoff` round the agreement does not break off a resupply approach: the
+# operator's screenshot, a clear path to the marker, nosed up and missed.
+
+def _agreeing_ctrl(monkeypatch, arm):
+    from wingman.agreement_trial import AgreementTrial
+    from wingman.warning_agreement import WarningAgreement
+    ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-25.0))
+    agreement = WarningAgreement(hold_s=3.0)
+    agreement.note("LOOM")
+    agreement.note("ESCAPE")
+    ctrl.set_warning_agreement(agreement)
+    trial = AgreementTrial(1.0 if arm == "holdoff" else 0.5, rng=random.Random(0))
+    while trial.new_round() != arm:
+        pass
+    ctrl.set_agreement_trial(trial)
+    return ctrl
+
+
+def test_a_holdoff_round_keeps_the_resupply_approach(monkeypatch, caplog):
+    ctrl = _agreeing_ctrl(monkeypatch, "holdoff")
+    ctrl._pursuing.set()
+    ctrl._note_pursuit_objective("resupply marker")
+    with caplog.at_level(logging.INFO, logger="wingman.controller"):
+        ctrl.climb_mode(emergency=True)
+    assert not ctrl.is_climbing()
+    assert _held_off(caplog)
+    assert any("this round's trial arm keeps the hold-off (ADR 172)" in r.getMessage()
+               for r in caplog.records)
+
+
+def test_an_override_round_breaks_off_the_resupply_approach(monkeypatch, caplog):
+    ctrl = _agreeing_ctrl(monkeypatch, "override")
+    ctrl._pursuing.set()
+    ctrl._note_pursuit_objective("resupply marker")
+    with caplog.at_level(logging.INFO, logger="wingman.controller"):
+        ctrl.climb_mode(emergency=True)
+    try:
+        assert ctrl.is_climbing()
+        assert any("crash recovery starts with the resupply marker in view — two terrain "
+                   "warnings agree" in r.getMessage() for r in caplog.records)
+    finally:
+        _stop(ctrl)
+
+
+def test_a_holdoff_round_still_breaks_off_the_chase(monkeypatch):
+    """Only the resupply approach is in the trial: a target in view breaks off as before."""
+    ctrl = _agreeing_ctrl(monkeypatch, "holdoff")
+    ctrl._pursuing.set()
+    ctrl._note_pursuit_objective("target")
+    ctrl.climb_mode(emergency=True)
+    try:
+        assert ctrl.is_climbing()
+    finally:
+        _stop(ctrl)
+
+
+def test_a_holdoff_round_hands_the_recovery_back_to_the_resupply_marker(monkeypatch):
+    """The other side of that case: in a holdoff round the marker coming into view
+    takes the airframe back while the warnings agree."""
+    ctrl = _agreeing_ctrl(monkeypatch, "holdoff")
+    ctrl._pursuing.set()
+    ctrl.climb_mode(emergency=True)
+    try:
+        assert _wait(ctrl.pursuit_recovery_active)
+        ctrl._note_pursuit_objective("resupply marker")
+        assert _wait(lambda: not ctrl.is_climbing()), "kept climbing for the agreement"
+    finally:
+        _stop(ctrl)
+
+
+def test_the_round_start_draws_and_tags_the_arm(monkeypatch, caplog):
+    from wingman.agreement_trial import AgreementTrial
+    ctrl = _crash_ctrl(monkeypatch, _Analyzer())
+    notes = []
+    ctrl.set_round_note(lambda name, ts: notes.append(name))
+    ctrl.set_agreement_trial(AgreementTrial(1.0))
+    with caplog.at_level(logging.INFO, logger="wingman.controller"):
+        ctrl.agreement_trial_new_round()
+    assert notes == ["agree_arm_holdoff"]
+    assert "TERRAIN TRIAL: round 1 — holdoff arm (ADR 172, share 1.00)" in [
+        r.getMessage() for r in caplog.records]
+
+
+def test_with_the_trial_off_the_round_start_notes_nothing(monkeypatch):
+    ctrl = _crash_ctrl(monkeypatch, _Analyzer())
+    notes = []
+    ctrl.set_round_note(lambda name, ts: notes.append(name))
+    ctrl.agreement_trial_new_round()            # the default trial, share 0
+    assert notes == []
 
 
 # --- Code Review 019 cycle 36 ---------------------------------------------------

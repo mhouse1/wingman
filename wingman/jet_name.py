@@ -119,19 +119,25 @@ def same_jet(one: str, other: str) -> bool:
     return _letters_and_digits(one) == _letters_and_digits(other)
 
 
-def mission_for_jet(name: "str | None", profiles: dict) -> "str | None":
-    """The mission of the first profile in `jet_profile.profiles` whose `match`
-    the jet's name starts with, or None. A start, not the whole name: a profile
-    names the mark (J-20) and the label goes on to the jet's nickname. Only letters
-    and digits count, as in `same_jet`."""
+def profile_for_jet(name: "str | None", profiles: dict) -> "dict | None":
+    """The first profile in `jet_profile.profiles` whose `match` the jet's name
+    starts with, or None. A start, not the whole name: a profile names the mark
+    (J-20) and the label goes on to the jet's nickname. Only letters and digits
+    count, as in `same_jet`."""
     if not name:
         return None
     jet = _letters_and_digits(name)
     for profile in profiles.values():
         match = _letters_and_digits((profile or {}).get("match") or "")
-        if match and jet.startswith(match) and profile.get("mission"):
-            return profile["mission"]
+        if match and jet.startswith(match):
+            return profile
     return None
+
+
+def mission_for_jet(name: "str | None", profiles: dict) -> "str | None":
+    """The mission of the jet's profile (`profile_for_jet`), or None."""
+    profile = profile_for_jet(name, profiles)
+    return (profile or {}).get("mission") or None
 
 
 class JetRecheck:

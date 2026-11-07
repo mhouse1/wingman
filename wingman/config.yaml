@@ -25,7 +25,7 @@ nested:
   release_stuck_modifiers: true
   # ADR 099 V3: the nested display is a window on the desktop, and while the
   # desktop is not drawing it (covered, minimised, another workspace) the game
-  # falls to one frame a second: measured 2026-10-04 11:27, covered by a
+  # falls to one frame a second: measured 2026-10-04, covered by a
   # browser, FPS 1 and three deaths. true holds one black pixel on top of the
   # game at the top-left corner of the nested display, which should keep its
   # frames on Xwayland's fast path whatever the desktop does. Off until a
@@ -33,7 +33,7 @@ nested:
   block_page_flips: false
   # ADR 162: resizing the nested window on the desktop resizes the nested
   # screen with it (Xwayland 24.1.10, -decorate). Smaller than `size`, every
-  # grab fails: 2026-10-25 16:21, 3 pixels lost, ten minutes blind (Anomaly
+  # grab fails: 2026-10-25, 3 pixels lost, ten minutes blind (Anomaly
   # 015). true sets the screen back to `size` within a second of it shrinking.
   restore_size: true
 
@@ -55,6 +55,12 @@ jet_profile:
       has_padlock: true
       match: J-20
       mission: j20
+      # Operator, 2026-11-02: "when theres only 1 flares left it should activate the
+      # flare reload by pressing 'q'". The low-flares reload fires on a reading of
+      # exactly 2 and only in GAME_BATTLE: J-20 bursts step past 2, and its pursuit
+      # runs in GAME_BATTLE_EJECT, so on 2026-11-02 the count read 1 about 120 times
+      # and 0 about 30 for about three reloads.
+      flare_reload_at: 1
 
 unattended_mode: true
 # Party invites: false clicks REJECT, true clicks ACCEPT then readies up.
@@ -127,14 +133,17 @@ crops:
   # bottom (rank, name, trophies). Measured 2026-10-31 on the operator's four
   # screenshots (tests/test-output/screenshot_20261031_0144*.png, 1920x1200).
   # SQ_MENU is the house icon on the leaderboard page: clicked from the lobby only.
+  # SQ_MENU_LEADERBOARDS spans the open menu's column at both sizes the game draws
+  # it (2026-10-31: LEADERBOARDS at y 0.27-0.30; 2026-11-06: y 0.19-0.21); the
+  # click goes where OCR finds the word (squadron_ranking.word_box).
   SQ_MENU:
     coords:
     - [0.9714, 0.008]
     - [0.9922, 0.046]
   SQ_MENU_LEADERBOARDS:
     coords:
-    - [0.75, 0.255]
-    - [0.905, 0.305]
+    - [0.72, 0.15]
+    - [0.96, 0.32]
   SQ_BOARD_TITLE:
     coords:
     - [0.04, 0.005]
@@ -189,7 +198,7 @@ crops:
   # ADR 102 rev 2: the squad lobby's READY button. The April crop covered only
   # its upper-left corner, so READY was never read and three lobby dwells of 127
   # to 194 s ran before the operator clicked by hand. The October layout moved
-  # the word left of a rank badge: on the 2026-10-18 01:11:42 frame the white
+  # the word left of a rank badge: on the 2026-10-18 frame the white
   # button is 1592,1062 to 1829,1140 px and the letters 1630,1079 to 1794,1121.
   # This crop clears them by 4 px or more; the 2026-10-11 crop ended 1 px into
   # the Y. The same crop reads the WAITING / CLICK TO UNREADY state. Not in
@@ -246,7 +255,7 @@ crops:
     - [0.5174, 0.4078]
     - [0.7, 0.4767]
     text: [SILVER]
-  # Code Review 019 (2026-10-19 09:14): "That party has ended." with one OK
+  # Code Review 019 (2026-10-19): "That party has ended." with one OK
   # button, over the lobby at a start; it held the start in GAME_UNKNOWN until OK
   # was clicked. PARTY_ENDED reads the message, PARTY_ENDED_OK is what is clicked
   # (test_screenshots/PARTY_ENDED.png).
@@ -310,12 +319,16 @@ crops:
     - [0.1484, 0.045]
     text: [INVITEPLAYERS, INVITEPLAY, VITEPLAYERS]
   STALL_MULTI_PLAYER:
-    # Code Review 019 cycle 24: moved right to where the party bar's red X is
-    # (x about 853 px). At 0.3826-0.4076 it read nothing on the 2026-10-18 01:05
-    # party lobby, and wingman stalled 900 s unable to leave a squad.
+    # 2026-11-02: the game moved the red X from the bottom party bar to the
+    # PARTY panel at the right, the grey bar under INVITE TO PARTY
+    # (screenshot_20261102_231819, X at 1731,300 px with two in the party).
+    # Each further member pushes the bar one row (about 52 px) down, out of
+    # this crop. OCR of the lone X is size-sensitive: on that frame a crop of
+    # this size read it at 22 of 25 offsets up to 4 px, while no crop 120 px
+    # or wider read it and most crops 34 px or taller did not.
     coords:
-    - [0.43, 0.91]
-    - [0.46, 0.9444]
+    - [0.8867, 0.2379]
+    - [0.9169, 0.2629]
     text: [X]
   STALL_RETRY:
     coords:
@@ -470,7 +483,7 @@ unknown_anomaly: {screenshot_after_s: 30.0, recapture_interval_s: 120.0, max_per
   dismiss_grace_s: 20.0, dir: test_screenshots/unknown_anomalies,
   # max_per_episode: 5 again (2026-10-03, operator request). It was 0 from
   # 2026-09-21 to save disk during long target-tracking sessions, and the
-  # 07:41 stall on the Invite Players screen that day left no frame at all:
+  # stall on the Invite Players screen that day left no frame at all:
   # the recorder logged "screenshot cap 0 reached". Disk growth is now bounded
   # by the capture budget (oldest files pruned per directory, nothing written
   # under the free-space floor), so a stuck episode costs at most 5 PNGs.
@@ -663,7 +676,7 @@ j20_mission: {target_painting_mode: false, attack_mode_dry_run: false, min_safe_
   # measured to come up 21 deg/s.
   descent_min_pull_kph: 450,
   # No pulse sooner than this after the last. The path reading lags the nose by 6 s
-  # and more at speed: at 05:21:31 on 2026-11-02, at 2,035 KPH, five 0.6 s pulses in
+  # and more at speed: on 2026-11-02, at 2,035 KPH, five 0.6 s pulses in
   # 6 s all read +17 to +24 deg, and the aircraft lost 4,000 m in the next 10 s with
   # its altitude reading frozen. Named guess, under the lag measured there.
   descent_observe_s: 5.0,
@@ -678,19 +691,35 @@ j20_mission: {target_painting_mode: false, attack_mode_dry_run: false, min_safe_
   # ceiling_pulse_s per new sample. Never a hold: all four holds of the first version
   # overshot on the lagging path and ended in a dive of -269 to -435 m/s. 5500 is the
   # top of the sustain band plus the 500 m a climb that lets go on time still coasts
-  # (5,012 m to 5,577 m at 17:51). The path is a named guess: level enough to stop
+  # (5,012 m to 5,577 m). The path is a named guess: level enough to stop
   # gaining height, not so tight that noise presses it.
   ceiling_alt_m: 5500, ceiling_path_deg: 5, ceiling_pulse_s: 0.4,
   # A routine climb's limits while this mission flies, in place of climb.max_pitch_deg
   # (80) and max_climb_rate (450), set on lesser jets. The ceiling above fired on time
-  # at 5,666 m at 19:06:07 and the aircraft still coasted to 8,519 m, because it
+  # at 5,666 m and the aircraft still coasted to 8,519 m, because it
   # crossed 5500 at +574 m/s: the climb has to be shallower, not stopped harder. 35 deg
   # at 1,500 KPH is about 240 m/s, which climb.exit_lead_s (3 s) releases 750 m early,
   # about what such a climb coasts. climb_pulse_s replaces pitch_pulse_s (1.5): one
-  # such pulse took this jet to +66 deg at 20:08:18 and three stacked to -24 deg at
-  # 20:06:55, so the limits were overrun by the pulse itself. Named guesses. A hard
+  # such pulse took this jet to +66 deg and three stacked to -24 deg in
+  # succession, so the limits were overrun by the pulse itself. Named guesses. A hard
   # emergency keeps 80, 450 and 1.5.
-  climb_max_pitch_deg: 35, climb_max_rate: 250, climb_pulse_s: 0.5}
+  climb_max_pitch_deg: 35, climb_max_rate: 250, climb_pulse_s: 0.5,
+  # The burner's speed limit while this mission flies: the climb and cruise let go of
+  # it above burner_max_kph and take it back under burner_rearm_kph (ADR 171). Half of
+  # the day's 60 routine J-20 climbs reached 1,800 to 2,500 KPH, and those passed
+  # 6,500 m 48% of the time against 29% for the slower half; one climb at 2,517 KPH at
+  # 4,629 m, and cruise's burner after the climb carried it to 7,197 m. An incoming
+  # missile keeps the burner. Named guesses, the gap so it does not flap.
+  burner_max_kph: 1500, burner_rearm_kph: 1300,
+  # The mission trial (operator's goal, 2026-11-02: "do whatever it takes to bring the
+  # Score per round average higher"): this share of J-20 rounds is drawn, once a round
+  # at battle entry, to fly acs in place of j20, and the round is tagged with the
+  # mission it flew, so the two set against each other by round score, the only fair
+  # test with a round's score swinging 200 on unchanged code. 0 turns it off.
+  # 1.0 from 2026-11-02: at 10 rounds an arm acs averaged 464 and j20 269, acs
+  # ahead by 195 (se 104), 2.6 kills a round against 1.2; the operator's goal is score
+  # per round. 0.5 runs the trial again.
+  acs_share: 1.0}
 # mission_acs, ACS_MISSION ('o', docs/missions/acs.md, ADR 144; mission_su30
 # until ADR 160 renamed it): a four-step script run
 # once per life — nose up, switch to the secondary weapon, level off at
@@ -704,7 +733,7 @@ j20_mission: {target_painting_mode: false, attack_mode_dry_run: false, min_safe_
 # alt_floor_m (ADR 147, operator, 2026-09-24): the hard altitude floor while this
 # mission is in play, instead of behavior_tree.climb.alt_floor_m (4000, ADR 141),
 # which every other mission keeps. It also stands the tree's armed sustain climb
-# (4000 to 5000 m, ADR 075) aside for this mission. Measured 2026-09-24 18:59:
+# (4000 to 5000 m, ADR 075) aside for this mission. Measured 2026-09-24:
 # the script stopped its climb at 3192 m and the tree restarted one to 5000 m
 # 1.3 s later, the -10 degree step waited behind that climb for its full 20 s,
 # and the chase began at 4750 m and then rolled for minutes at the 4000 m floor
@@ -726,7 +755,7 @@ acs_mission: {climb_alt_m: 3000, alt_floor_m: 3000, climb_max_s: 90.0,
   yield_to_target: true}
 # yield_to_target (operator, 2026-09-26): a tracker lock or a ring icon during the
 # climb or the nose-angle step ends the script and starts the pursuit at once (after
-# the 17:37 respawn the script climbed and held -10 deg past targets it had acquired).
+# the respawn the script climbed and held -10 deg past targets it had acquired).
 # It is also looked for before the climb, and a crown or control point marker in view
 # counts (operator, 2026-10-16: "it should not climb if targets are in view").
 behavior_tree:
@@ -751,7 +780,16 @@ behavior_tree:
     # Minimum forward/dist to ENTER a turn — the cosine of the bearing to
     # the nearest edge point. Genuine approaches run a median 0.82 (p10
     # 0.24) over 184 pre-crossing ticks; a boundary abeam reads near 0.
-    entry_ratio: 0.25}
+    entry_ratio: 0.25,
+    # ADR 171: every distance above times the speed over speed_ref_kph, up to
+    # max_speed_scale, so a fast jet turns sooner: 0.50R becomes 0.75R at 1,500 KPH
+    # and 1.00R from 2,000. Under speed_ref_kph nothing changes. The J-20 crossed 25
+    # times in about 36 missions on 2026-11-02, 16 of them with the turn already
+    # running, against none in the SU-22's 14 on the same code. Operator: "during
+    # primary weapon it should be mostly in the center of the map". 0 turns it off.
+    # 2.0, not 1.6: at 1.6 it still crossed, entering at 0.49R at 2,476
+    # KPH and out 6 s later.
+    speed_ref_kph: 1000, max_speed_scale: 2.0}
   # ADR 128 / FR-008: hold the afterburner while a missile is inbound, until
   # incoming has not been seen for afterburner_clear_s. Flares change what the
   # missile is tracking; speed changes whether it can still reach the aircraft.
@@ -762,13 +800,16 @@ behavior_tree:
   # arm is now drawn once per ROUND, so the session summary can set each arm's
   # score and K/D/A per round beside its engagement survival ("pursuit trial");
   # after share 0, assists per round fell on both accounts measured. 0.5 runs
-  # that trial; 0 is no evade inside a pursuit.
+  # that trial; 0 is no evade inside a pursuit. 0 from 2026-11-04 (ADR 165
+  # V3): over 848 read rounds the evade arm scored 382 a round against 398 and
+  # trailed on kills, deaths and assists, and survived 64% of engagements
+  # against 69% (z 3.5).
   # FR-011 / ADR 164: every alert also holds roll-right, a barrel roll that leaves
   # the flight path alone, until flare_roll_after_s after the burst's last flare
   # (the operator's 2 s); a fault cap at flare_roll_max_s. Independent of enabled.
   missile_evade: {afterburner_clear_s: 4.0, afterburner_max_s: 20.0,
     enabled: true, clear_seconds: 3.0, min_clear_samples: 2, max_manoeuvre_s: 6.0,
-    max_hold_s: 15.0, pitch_down: false, pursuit_share: 0.5,
+    max_hold_s: 15.0, pitch_down: false, pursuit_share: 0.0,
     flare_roll_after_s: 2.0, flare_roll_max_s: 15.0}
   # ADR 134 D8: a real hysteresis band, not one shared threshold. Burn from
   # wherever fuel is down to min_fuel_pct, then let it recharge (ADR 075) up
@@ -823,8 +864,8 @@ behavior_tree:
     # ADR 086 d2/d3/d4 — dive recovery on predicted time-to-ground. 20s rather
     # than the ADR's proposed 12s: the smoothed altitude the tree reads lags
     # ~1500m in a 560 m/s dive, so 12s of PREDICTED margin was only ~4s of real
-    # margin in the 2026-08-21 18:41 crash. See "Deviation" in the ADR.
-    # ADR 137 D4: raised 20 -> 30. Measured 2026-09-10 07:24:42 — emergency
+    # margin in the 2026-08-21 crash. See "Deviation" in the ADR.
+    # ADR 137 D4: raised 20 -> 30. Measured 2026-09-10 — emergency
     # fired correctly at the first 19s-to-ground read (airbrake + nose-up
     # engaged within 1.5s), and the descent rate still WORSENED afterward
     # (-333 -> -526 -> -602 m/s over the next 4.5s) before the aircraft hit
@@ -853,7 +894,7 @@ behavior_tree:
     # ADR 159 (operator, 2026-10-05: "when it applies nose up it should activate
     # afterburner to prevent stall"). The emergency climb holds the airbrake only
     # while the flight path is steeper than this many degrees; shallower than
-    # that, its nose-up carries the afterburner. Measured 2026-10-05 02:36-03:39:
+    # that, its nose-up carries the afterburner. Measured 2026-10-05, over 63 min:
     # 47 of 54 stall-prevention trips followed an emergency climb that braked a
     # shallow dive, 1100 KPH at -20 deg down to 250 KPH in 6 s. -40 sits between
     # those (73 of 84 holds started at -40 or shallower) and the two dives the
@@ -916,19 +957,19 @@ behavior_tree:
     # change). Raise it again for a future live-actuation trial.
     #
     # RE-GRADUATED 2026-10-02 (operator, /proceed on the ADR 148 recommendation):
-    # shadow: false. On the canyon map 5 of the first 6 deaths of the 21:45 session
-    # followed a shadow TERRAIN AHEAD with no missile (21:58:44.975: sky 0.00 while
+    # shadow: false. On the canyon map 5 of the first 6 deaths of the session
+    # followed a shadow TERRAIN AHEAD with no missile (: sky 0.00 while
     # the icon held NOSE_DOWN, death 4 s later), and frames show the chase following
     # targets low over mesas. The padlock concern above stands unresolved; two
     # likely false positives were seen, both climbing during a missile hit. A firing
     # now flies ADR 148's crash recovery (airbrake while the path is below level,
     # hand back at the first fresh path at or above level).
     #
-    # BACK TO SHADOW the same night (2026-10-03 00:10): on a night map the sky is
+    # BACK TO SHADOW the same night (2026-10-03): on a night map the sky is
     # far darker than sky_hsv's value floor (180), so the live sky fraction read
     # 0.000-0.001 while climbing at +40 deg into open sky, terrain ahead held
     # true continuously, and the crash recovery took the airframe every time the
-    # path dipped below level (00:08:47, 00:09:02, 00:09:17). Needs a detector that
+    # path dipped below level. Needs a detector that
     # handles night maps before it actuates again.
     terrain_avoidance: {enabled: true, shadow: true, sky_min_frac: 0.55,
       confirm_reads: 2, capture_max: 0, capture_cooldown_s: 20.0}
@@ -937,7 +978,12 @@ behavior_tree:
     # start the emergency climb, held hold_s for the tree's tick. On 2026-10-17
     # (130 missions, 145 kill-card crashes) that agreement came 1 to 6 s before
     # 34% of the crashes, about twice a mission, a crash following 16% of them.
-    warning_agreement: {enabled: true, shadow: false, window_s: 1.0, hold_s: 3.0}
+    # ADR 172: in resupply_holdoff_share of rounds, drawn once a round, the agreement
+    # does not break off a resupply approach (the pull-out's break under 300 m still
+    # does). Over 340 such overrides (2026-10-26 to 11-04) a crash followed within
+    # 12 s 13.5% of the time and 48% rearmed anyway. 0 turns the trial off.
+    warning_agreement: {enabled: true, shadow: false, window_s: 1.0, hold_s: 3.0,
+      resupply_holdoff_share: 0.5}
     # Code Review 019 cycle 32 (HLDD 001 part 2): the emergency climb starts when a
     # pull-out started reaction_s from now would bottom out under floor_m, from the
     # raw altitude, speed and path and the nose-up rates measured in cycle 21. Over
@@ -989,7 +1035,7 @@ behavior_tree:
 # like — every frame in the corpus so far is one where detection succeeded.
 #
 # 2026-09-06: widened from max 40 at 45 s, which is THIRTY MINUTES of coverage.
-# All 40 frames of the 4h36m 2026-09-05 session landed between 22:00 and 22:51 —
+# All 40 frames of the 4h36m 2026-09-05 session landed within 51 min —
 # one map, one lighting condition — while 158 later blind ticks hit the cap. D3
 # asked what blindness looks like "across maps and situations" and the budget
 # could not reach past the first map. 300 s x 120 spans a 10 h session; the cap
@@ -1214,7 +1260,7 @@ clear_path:
             wall_radius_px: 150, wall_min_dots: 8}
 # Code Review 019 cycle 19 (shadow): each death's cause from the game's kill card.
 # After an enemy kill the respawn screen names the killer and the weapon; after a
-# terrain crash (2026-10-17 00:44:18) it had no card. One DEATH CARD line per death
+# terrain crash (2026-10-17) it had no card. One DEATH CARD line per death
 # and a DEATH CARDS summary at the end; read on the analyzer's OCR pool. Live only.
 kill_card:
   enabled: true
@@ -1481,7 +1527,7 @@ tracking:
   # until more encounters validate the numbers, same shape as
   # sustained_hold_enabled below. Set true here 2026-09-23 by explicit
   # operator instruction for a live trial, specifically to get evidence from
-  # a real pursuit/eject encounter (the 2026-09-23 20:52-20:58 session found
+  # a real pursuit/eject encounter (a 6 min 2026-09-23 session found
   # no evidence either way — the flag was still false and no pursuit
   # triggered) — min_glyphs/glyph_area/glyph_max_dim below are still the
   # untuned, 3-frame values, not yet corrected by live data.
@@ -1511,7 +1557,7 @@ tracking:
   # error, extrapolated this many seconds ahead at its measured rate, is
   # inside the deadband or past centre. Before: 63% of HOLD[pitch] endings
   # were a direct reversal and 18% of lock ticks sat inside the deadband
-  # (2026-09-25 00:49 session). The live check is both shares; the early
+  # (2026-09-25 session). The live check is both shares; the early
   # releases log as `HOLD[pitch]: <dir> -> None (lead ...)`. 0 turns it off.
   # Named guess: about one steering tick plus the key's lag.
   pitch_lead_s: 0.15
@@ -1530,7 +1576,7 @@ tracking:
   # is zero for the lag after a press and on a repeated picture (with a steering
   # key held, 23 to 26 percent of consecutive steering grabs showed the picture
   # of the grab before, unchanged for up to 0.34 to 0.44 s at the 90th
-  # percentile; at 14:39:15 nose-down was held 0.5 s on one picture and the
+  # percentile; nose-down was held 0.5 s on one picture and the
   # control point went from 34 px below the centre to 302 px above).
   # With this on, a target hold (the tracker's target, the resupply marker, the
   # crown, a control point) lasts error / rate, less the key time the picture
@@ -1542,7 +1588,7 @@ tracking:
   # arrives (simulated at 0.4 half-frames a second, 0 percent of ticks in the
   # deadband against 62 percent with it; tests/test_hold_model.py flies both).
   # No key is pressed while the picture shows the target inside the deadband.
-  # The first live session (16:34 to 17:58 that day, 1,366 s of lock) allowed
+  # The first live session (84 min that day, 1,366 s of lock) allowed
   # it, to lead a crossing target: locked ticks with the target inside the
   # deadband on both axes went from 13 to 39 percent, but 58 percent of pitch
   # presses and 65 percent of roll presses were made with the target already
@@ -1569,16 +1615,16 @@ tracking:
     # times the configured rate. Measured that day at 1,200 to 1,450 KPH: a
     # second of pitch key moved the target 0.15 to 0.23 half-frames and of roll
     # 0.13, against the 1.15 and 0.4 above, so every hold was sized five to seven
-    # times too short. On a resupply pass at 05:37:03 to 05:37:09, 16 nose-down
+    # times too short. On a resupply pass, 16 nose-down
     # holds in a row were let go after 0.08 to 0.33 s with the marker 40 to 60 px
     # below the bore sight, and the aircraft flew over it. The press lines now
     # end in `rate=` with the rate in use. Simulated, a jet answering at 0.2 is
     # learned as 0.21 to 0.40 and a falling marker is held at a median 0.100
     # instead of 0.175; a jet answering at 1.5 is learned low (0.97 to 1.21).
-    # Pitch only (2026-10-14 06:25 session): the roll key banks the aircraft and
+    # Pitch only (2026-10-14 session): the roll key banks the aircraft and
     # so turns the picture about the bore sight, and how far that moves the
-    # target across the screen depends on where the target is. From 06:27:40.7
-    # to 06:27:42.4 roll right was held with the target right of the bore and
+    # target across the screen depends on where the target is. For 1.7 s
+    # roll right was held with the target right of the bore and
     # below it, and it went from x 1078 to 1194, further right, as the bank
     # carried it round; the learned roll rate fell from 0.40 to the 0.04 floor
     # and the next roll holds were planned at 5 to 23 s. Pitch learned 0.11 to
@@ -1669,7 +1715,7 @@ pursuit_mode:
     # (0.025 is 24 px across and 15 px up or down at 1920 x 1200). A target
     # keeps tracking.deadband's 0.05. At 0.05 the hold parked the marker at the
     # edge of a 48 by 30 px box, about the size of the marker's own ring: on
-    # 2026-10-13 03:56:59 to 03:57:12 it sat about 50 px right of the bore sight
+    # 2026-10-13 it sat about 50 px right of the bore sight
     # and 10 to 60 px below it for 13 s, then swept off to the lower right at
     # 1,280 KPH with no rearm. Over 83 close passes in five sessions (10-11 and
     # 10-13) a rearm followed 3 of 3 with the marker held under 30 px from the
@@ -1688,8 +1734,8 @@ pursuit_mode:
     # least min_outward_px outward in the second before (px at 1200 px of frame
     # height). The count that shows the rearm then starts no second climb-out,
     # and logs `count N read X s after the climb-out started at the pass`.
-    # The marker going missing is not enough. In the session of that day (08:00
-    # to 18:15) the steered marker went missing 0.9 s or more 162 times: 49 were
+    # The marker going missing is not enough. In the session of that day (10 h
+    # 15 min) the steered marker went missing 0.9 s or more 162 times: 49 were
     # pickups, and 73 times it was back within 4 s, having sat a median 20 px
     # from the centre and not moved (-2 px). At a pickup it was a median 60 px
     # out and had moved 28 px outward. At 35 and 5 the rule fires on 36 of the 49
@@ -1701,12 +1747,12 @@ pursuit_mode:
     # `pass seen, shadow` and presses nothing. A missed pass climbs out too; that
     # is the cost.
     # lined_up_px, added after the first flight: the marker must also have been
-    # within this of the centre a second before it was lost. At 19:51:52 the
+    # within this of the centre a second before it was lost. The
     # marker had just taken the steering 597 px from the centre, blinked out for
     # 0.6 s, and the climb-out broke the approach (the marker was back 0.9 s
     # later). On the baseline log this costs 1 of the 36 pickups signed.
     # min_size_px, 2026-10-15: the marker last seen at least this many px across
-    # (at 1200 px of frame height). At 12:58:24 a pass was signed with the
+    # (at 1200 px of frame height). A pass was signed with the
     # marker 40 px across, no rearm followed, and the climb-out broke the
     # approach. On the 10-14 and 10-15 logs the 9 passes a rearm followed had it
     # 53 to 67 px across; 16 of the 20 with no rearm had it under 50. 17 of the 19
@@ -1733,7 +1779,7 @@ pursuit_mode:
   # marker is flown at as the resupply marker is, unless the resupply has the
   # steering or a visible target is nearer the screen centre; the pin feeds the
   # icon law in place of the red icons while the tracker has no target. With
-  # every rack empty the marker in view is still flown at (2026-10-10 05:44:06:
+  # every rack empty the marker in view is still flown at (2026-10-10:
   # the resupply search took the roll with the crown dead ahead, 55 px across);
   # the pin is not, the resupply pin has the search. On 2,225
   # archived frames the marker was found in 22 and the pin in 95, and all 22
@@ -1775,7 +1821,7 @@ pursuit_mode:
   # 39 px at the nearest caught. Named guesses between the two, in px at 1200 px
   # of frame height: no frame of the moment of passing through was at hand.
   # centre_px: the crown's marker must also be within this of the screen centre
-  # when it is last seen. First live session, 2026-10-09 05:52: the crown the aircraft passed
+  # when it is last seen. First live session, 2026-10-09: the crown the aircraft passed
   # at 51 px across was last seen 562 px out and was counted before this was added.
   # The resupply point has no size here. It counts when the pursuit confirms a
   # rearm, and by nothing else: on 2026-10-09 a rearm followed a marker last seen
@@ -1799,7 +1845,7 @@ pursuit_mode:
   # ADR 148 (operator, 2026-09-25: after a kill and the switch to the secondary the
   # aircraft "crashed to the ground, it should have continued pursuit sequence"). The
   # longest a dive-recovery climb (a HARD emergency: time to ground or terrain) may fly
-  # the airframe inside a pursuit before the chase resumes. Measured 2026-09-25 00:03,
+  # the airframe inside a pursuit before the chase resumes. Measured 2026-09-25,
   # both lives: the tree's emergency selected Climb at 29 s to ground and again every
   # 1.5 s to the impact, and every hold ended `state_exit` after 0.25 s because the
   # hold released on any game state but GAME_BATTLE and a pursuit lives in
@@ -1825,7 +1871,7 @@ pursuit_mode:
   # the roll axis NEUTRAL before the ROLL_LEFT search default resumes. Every
   # LOST_GRACE tick reports visible=False, and the tracker's own grace window
   # is only ~0.4s, so before this a one-tick detection dropout re-pressed
-  # ROLL_LEFT at once. Measured (wingman.log 2026-09-24 06:03:38-39, frames
+  # ROLL_LEFT at once. Measured (wingman.log 2026-09-24, over 1 s, frames
   # pursuit_mode_20260924_060338_16.png and 060339_17.png): lock acquired at
   # 38.251, rejected on the next two ROI scans, ROLL_LEFT resumed on both, and
   # the target went from screen centre (err about 0) to err=+0.366 by the next
@@ -1833,8 +1879,8 @@ pursuit_mode:
   # measured beyond that one 1.07s reacquisition gap; the HOLD[roll] debug
   # lines added with it are what should correct it. Also used by the eject
   # dive's heatdive roll loop (2026-09-24, operator request): the same
-  # immediate resume showed there, all 13 target holds in the 06:51-07:06
-  # session ending `-> left/search`. Verified live 07:34-08:24: 0 of 51
+  # immediate resume showed there, all 13 target holds in a 15 min
+  # session ending `-> left/search`. Verified live over 50 min: 0 of 51
   # search resumes (10 pursuit, 41 dive) came sooner than 2.0 s after a
   # target hold.
   search_resume_delay_s: 2.0
@@ -1843,7 +1889,7 @@ pursuit_mode:
   # turn and focused on target"). When the last visible target error was within
   # search_resume_centre_err of screen centre the aircraft is already pointing
   # at the target, so the neutral hold is search_resume_centre_delay_s instead
-  # (when longer). Measured on that same 07:34-08:24 session, with the 2.0 s
+  # (when longer). Measured on that same 50 min session, with the 2.0 s
   # delay in place: the search still resumed with the target last seen within
   # +-0.15 of centre in 6 of 10 pursuit cases and 23 of 41 dive cases. Both are
   # named guesses; the HOLD[roll] "target was near centre" lines are what
@@ -1865,7 +1911,7 @@ pursuit_mode:
   # read 0 this many cycles in a row (about 0.35 s each). SWITCH_WEAPON is a
   # toggle, so a single misread 0 would swap away a rack that still has
   # missiles and the only undo is a second press. Since 2026-09-24 (operator,
-  # from a 'v' screenshot at 08:20:14 showing the 6/6 primary rack untouched)
+  # from a 'v' screenshot showing the 6/6 primary rack untouched)
   # the same deferral covers the eject dive that pursuit falls into at its
   # 20 s cap. The missiles-empty trigger keeps its own confirmation
   # (mission.no_missiles_consecutive_required). Named guess, not measured.
@@ -1873,26 +1919,26 @@ pursuit_mode:
   # CR-018-01 (review 018): the chase steers every steer_interval_s and reads
   # ammo, switches, fires and renders the HUD every engage_interval_s. Before,
   # one loop did both and steered at about 2.7 Hz (median TRACKPICK interval
-  # 0.353 s, 2026-09-25 00:49 session), and 63% of HOLD[pitch] endings were a
+  # 0.353 s, 2026-09-25 session), and 63% of HOLD[pitch] endings were a
   # direct up/down reversal. engage_interval_s keeps the old ~0.3 s period so
   # empty_confirm_reads above still spans about a second. Named guesses; the
   # live check is the TRACKPICK interval median (target below 0.2 s).
   steer_interval_s: 0.1
   engage_interval_s: 0.3
-  # Dive guard (review 018, action item 001 01:06 and 01:43 entries; operator,
+  # Dive guard (review 018, action item 001's two entries; operator,
   # 2026-09-25). The chase does not command nose-down below the floor in play
   # (a mission's own alt_floor_m, else behavior_tree.climb.alt_floor_m) plus
   # dive_guard_margin_m, or while altitude over descent rate is under
   # dive_guard_ttg_s; pitch goes neutral instead. Roll tracking, firing and the
   # search roll are unchanged. Measured basis: six of eight unplanned deaths in
-  # the 2026-09-25 00:49-01:41 session followed a chase dive through the 3000 m
+  # the 52 min 2026-09-25 session followed a chase dive through the 3000 m
   # floor. acs: 3000 + 500 = 3500 m. Logged as `DIVE GUARD`. The ttg
   # term assumes the ground at altitude 0 (terrain near 900 m exists), hence
   # the wide 60 s. Named guesses, from the action item. 0 turns a term off.
   dive_guard_margin_m: 500
   dive_guard_ttg_s: 60
   # Pull-out (operator, 2026-09-25): withholding nose-down alone did not stop the
-  # 20:26:37 dive (-103 m/s at the guard, -175 m/s 3 s later), so the tree's hard
+  # dive (-103 m/s at the guard, -175 m/s 3 s later), so the tree's hard
   # emergency took the airframe at ttg 20 s and its nose-up lost the target. While
   # the ttg term holds and the descent is steeper than dive_guard_level_rate_mps,
   # the chase taps nose-up (pulse_s every interval_s), roll and fire unchanged.
@@ -1902,7 +1948,7 @@ pursuit_mode:
   dive_guard_level_rate_mps: 30
   # Look-down search (operator, 2026-09-26: "most targets are at lower altitude
   # around 2000, most of the fight is flying left at 3000 to 4000 horizontally so
-  # it cant see the targets"). Measured on the 21:23-01:28 session, 93 pursuits:
+  # it cant see the targets"). Measured on a 4.1 h session, 93 pursuits:
   # 83% of in-pursuit altitude reads at or above 3000 m, the left search roll held
   # about 61% of pursuit time, 24% of scans locked, and 1,124 of 9,639 lock points
   # sat in the bottom strip of the view. While the search roll is running (no target
@@ -1945,14 +1991,14 @@ pursuit_mode:
   # never the floor) fly ADR 148's airbrake and
   # nose-up recovery inside a pursuit, resupply search included, while dive_safety
   # stays off; the recovery hands the chase back as soon as that emergency clears.
-  # Measured on the 19:26 session: 44 of 62 descents with under 20 s to ground ended
-  # in a death, and the 20:20 one had the emergency requested from 20:19:47 and
+  # Measured on one session: 44 of 62 descents with under 20 s to ground ended
+  # in a death, and one had the emergency requested and
   # suppressed to impact. false restores the suppression.
   crash_recovery: true
   # Operator, 2026-10-08: "change the climb to execute only after target or resupply
   # disappears". The recovery above starts, and keeps the airframe, only while the
   # pursuit has had neither its target nor the resupply marker it is flying to in
-  # view for this many seconds. Measured 2026-10-05 12:13 to 2026-10-08 08:00: 657
+  # view for this many seconds. Measured 2026-10-05: 657
   # recoveries flew 97 min of pursuit; 460 started with a target (316) or the marker
   # (144) in view, at a median 2070 m and 20 s to ground. 310 of the 316 handed back
   # with the target gone, and a 4 s or longer marker approach ended in a rearm 8% of
@@ -1960,10 +2006,10 @@ pursuit_mode:
   # enough to bridge missed scans, short at 130 m/s of descent. 0 or null: no wait.
   # 2026-10-12: a control point or the crown that has the steering counts as in view
   # too. In that day's session 19 of 269 recoveries started while a control point's
-  # marker was steering; at 14:36:56 A was 12 px off the centre.
+  # marker was steering; A was 12 px off the centre.
   crash_recovery_clear_view_s: 1.0
   # Operator, 2026-10-20: "why did it see target 'A' then steer away when it was
-  # clearly in view". At 02:40:48.8 the scan missed A, 20 px off the centre, for
+  # clearly in view". The scan missed A, 20 px off the centre, for
   # about 0.6 s; the 0.5 s memory ran out, the resupply marker took the steering,
   # and A, found again a cycle later, never got it back. In the logs of 10-15 to
   # 10-20 an objective with the steering went unseen 1,747 times and came back
@@ -2030,17 +2076,25 @@ pursuit_mode:
     # Cycle 12 (2026-09-27): the floor is checked against the last altitude
     # reading carried this far ahead at the measured descent rate, about one
     # reading interval, not the smoothed altitude, which trailed a fast dive by
-    # 470 m (HUD 1403 m, mean 1873 m at 20:19:28). Named guess.
+    # 470 m (HUD 1403 m, mean 1873 m). Named guess.
     push_floor_lookahead_s: 3.0
     blind_search_after_s: 3.0
     # Code Review 019 cycle 39 (the operator's resupply question, 2026-10-19): an
-    # icon within 5 deg of the horizon, or above it, gets no push. At 04:17:01.7
+    # icon within 5 deg of the horizon, or above it, gets no push. Once,
     # the ammo pin moved level (-1 to +5 deg) and the push went on 3 s on the
     # score a low-left sighting had left, into a -50 deg dive at 983 KPH, the
     # pull-up alarm, a stall and a crash. Over 271 missions, 21 crashes came
     # 1 to 15 s after a push with the icon level or above (9% of such pushes,
     # 4% of the others).
     level_band_deg: 5.0
+    # Operator, 2026-11-03: an enemy's icon below the horizon pushes only within
+    # this many degrees of straight down; further to the side it turns toward its
+    # side (bank and pull) until the target appears. At 2026-11-02 an
+    # icon at 121 deg (lower left, the enemies behind) pushed the nose from +2 to
+    # -52 deg and the jet flew out of the map. 20 keeps the operator's nose-down
+    # reference icon (97.6 deg) a push. Resupply and priority pins keep the push.
+    # Named guess. null = every icon below the horizon pushes.
+    push_cone_deg: 20.0
 hud:
   # Back on (2026-09-21): the roll_right convergence investigation exhausted
   # what wingman.log alone can show (episode trace confirmed roll_right

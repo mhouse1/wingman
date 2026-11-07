@@ -72,8 +72,8 @@ def test_the_account_comes_from_the_run_id_suffix():
 
 
 @pytest.mark.parametrize("run_id, pilot", [
-    ("20261031_023505_acct1", "mobius0"),     # its end screen at 03:16 reads MOBIUS0
-    ("20261030_162007", "mobius1"),           # its end screen at 16:25 reads MOBIUS1
+    ("20261031_023505_acct1", "mobius0"),     # its end screen reads MOBIUS0
+    ("20261030_162007", "mobius1"),           # its end screen reads MOBIUS1
     ("20261031_043634_acct2", "mobius2"),
     ("20261030_223038_acct3", "mobius3"),
     ("20261031_043634_acct4", "acct4")])      # not named yet: it keeps its tag
@@ -117,7 +117,7 @@ _LOG = [
     _line("03:09:16", "ROUND PERFORMANCE: not read — no KDA on any of 4 frames: kda ''"),
     _line("03:09:17", "ROUND PERFORMANCE: shadow — page 2: kda ''"),
     _line("03:09:20", "🎮 Game state: GAME_END_B → GAME_LOBBY"),
-    # 2026-10-28 00:56: a second click-through of the same end screens.
+    # 2026-10-28: a second click-through of the same end screens.
     _line("03:09:29", "ROUND PERFORMANCE: not read (4 frame(s), no two read alike)"),
 ]
 
@@ -131,7 +131,7 @@ def test_a_log_gives_one_row_per_round_read_or_not():
 
 
 def test_a_reading_with_no_end_screen_before_it_is_not_a_round():
-    assert len(rs.rows_from_log(_LOG, "x")) == 2, "the 03:09:29 second click-through"
+    assert len(rs.rows_from_log(_LOG, "x")) == 2, "the second click-through"
 
 
 def test_a_log_time_in_the_repeated_hour_is_read_as_daylight_time():
@@ -184,7 +184,7 @@ def test_a_lobby_that_failed_to_read_gives_a_log_round_no_jet():
 
 
 def test_a_log_takes_its_account_from_the_run_file_line():
-    """2026-10-30 07:25: a `make r2` session the shutdown watchdog ended wrote no
+    """2026-10-30: a `make r2` session the shutdown watchdog ended wrote no
     stats file, and its 12 rounds showed as "no account"."""
     named = _LOG + [_line("03:10:00", "PerformanceTracker: session data written to "
                                       "docs/performance/current/run_20261029_025030_acct2.json")]
@@ -305,11 +305,14 @@ def test_no_squadron_panel_depends_on_the_account():
     assert sqls and not any("tags" in sql or "account" in sql for sql in sqls)
 
 
-def test_the_squadron_charts_sit_right_under_score_per_round():
+def test_the_jet_ranges_then_the_squadron_charts_sit_right_under_score_per_round():
+    """Operator, 2026-11-03: the jet ranges go under Score per round."""
     dashboard = json.loads(Path("grafana/dashboards/score-per-round.json").read_text(encoding="utf-8"))
     place = {p["title"].split(" (")[0]: p["gridPos"] for p in dashboard["panels"]}
     score = place["Score per round: wingman and manual takeover"]
-    below = score["y"] + score["h"]
+    jets = place["Score range by jet"]
+    assert jets["y"] == score["y"] + score["h"]
+    below = jets["y"] + jets["h"]
     assert place["Squadron rank per reading"]["y"] == below
     assert place["Squadron trophies per reading"]["y"] == below
 
@@ -391,7 +394,7 @@ def test_an_overlay_that_does_not_validate_is_refused(tmp_path):
 # -- a manual takeover (operator, 2026-10-29) ---------------------------------------
 
 def test_a_round_with_a_manual_takeover_is_kept_with_its_count():
-    """The dashboard charts it apart from wingman's own: 2026-10-29 17:40, round 6,
+    """The dashboard charts it apart from wingman's own: 2026-10-29, round 6,
     four takeovers."""
     rows = rs.rows_from_stats(_stats([_mission(0, performance=_READ),
                                       _mission(1, performance=_READ, manual_takeover_count=4),
@@ -530,6 +533,62 @@ def test_the_jet_panels_bars_are_one_colour_not_good_and_bad():
     properties = {p["id"]: p["value"] for p in bars["properties"]}
     assert properties["custom.cellOptions"]["type"] == "gauge"
     assert properties["color"] == {"mode": "fixed", "fixedColor": "blue"}
+
+
+def _jet_ranges():
+    dashboard = json.loads(Path("grafana/dashboards/score-per-round.json").read_text(encoding="utf-8"))
+    return next(p for p in dashboard["panels"] if p["title"].startswith("Score range by jet"))
+
+
+def _hide_from(panel):
+    """The `custom.hideFrom` each override sets, by its matcher's options."""
+    return {o["matcher"]["options"]: q["value"] for o in panel["fieldConfig"]["overrides"]
+            for q in o["properties"] if q["id"] == "custom.hideFrom"}
+
+
+def test_the_jet_ranges_are_one_bar_per_jet_from_its_lowest_to_its_highest():
+    """Operator, 2026-11-03: a candlestick of score by jet, the wick from the lowest
+    score to the highest and a tick at the mean. Grafana's candlestick panel draws
+    time along the bottom, so the bars stack: an empty base up to the lowest, then
+    up to the tick, the tick, and on to the highest."""
+    panel = _jet_ranges()
+    assert panel["type"] == "barchart"
+    assert panel["options"]["xField"] == "Jet" and panel["options"]["stacking"] == "normal"
+    sql = panel["targets"][0]["rawSql"]
+    stack = ['"below the lowest"', '"lowest to mean"', '"mean tick"', '"mean to highest"']
+    assert [sql.index(name) for name in stack] == sorted(sql.index(name) for name in stack)
+    (base,) = [o for o in panel["fieldConfig"]["overrides"]
+               if o["matcher"] == {"id": "byName", "options": "below the lowest"}]
+    assert {"id": "custom.fillOpacity", "value": 0} in base["properties"]
+
+
+def test_the_jet_ranges_put_the_jet_with_the_most_rounds_on_the_left():
+    """Operator, 2026-11-03: the most rounds on the left, the fewest on the right."""
+    sql = _jet_ranges()["targets"][0]["rawSql"]
+    assert "ORDER BY rounds DESC, mean DESC" in sql
+
+
+def test_the_jet_ranges_leave_out_rounds_with_no_jet():
+    """Those rounds flew every jet, so their range would be no jet's."""
+    assert "tags->>'jet' IS NOT NULL" in _jet_ranges()["targets"][0]["rawSql"]
+
+
+def test_hovering_a_jets_bar_shows_its_figures_not_the_stack():
+    """The stacked segments' values are lengths, so they stay out of the tooltip; the
+    figures ride along hidden from the chart, and the tooltip lists them."""
+    hide = _hide_from(_jet_ranges())
+    assert hide["/^(below the lowest|lowest to mean|mean tick|mean to highest)$/"] == {
+        "legend": True, "tooltip": True, "viz": False}
+    assert hide["/^(Highest|Mean score|Lowest|Rounds read)$/"] == {
+        "legend": True, "tooltip": False, "viz": True}
+
+
+def test_the_dashboard_is_at_schema_42_so_hidden_figures_stay_in_the_tooltip():
+    """Grafana 12.2 migrates a dashboard below schema 42 by hiding from the tooltip
+    every field hidden from the chart (`migrateHideFromFunctionality`). At 39 the jet
+    ranges' tooltip showed the jet's name and nothing else."""
+    dashboard = json.loads(Path("grafana/dashboards/score-per-round.json").read_text(encoding="utf-8"))
+    assert dashboard["schemaVersion"] >= 42
 
 
 def _colours(name):

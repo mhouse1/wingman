@@ -23,6 +23,8 @@ from typing import NamedTuple
 
 import cv2
 
+from .crop_region import CropCoords
+
 logger = logging.getLogger(__name__)
 
 # The crops in wingman/config.yaml `crops:`.
@@ -155,6 +157,28 @@ def shows(reader, frame, crop, word: str) -> bool:
     return letters(word) in letters(crop_text(reader, frame, crop))
 
 
+def word_box(reader, frame, crop, word: str) -> "CropCoords | None":
+    """Where the word reads inside the crop, as fractions of the frame, or None.
+
+    The open menu is drawn at more than one size: on 2026-11-06 LEADERBOARDS sat
+    at y 0.19-0.21, above the crop measured on 2026-10-31 (0.255-0.305), and every
+    reading failed. The crop now spans the menu's column, and the click goes where
+    the word is, not to the crop's middle."""
+    gray = _crop(frame, crop)
+    if gray is None:
+        return None
+    h, w = frame.shape[:2]
+    factor = max(1.0, 1920.0 / max(1, w))      # _crop's own scale
+    left, top = int(crop.x1 * w), int(crop.y1 * h)
+    target = letters(word)
+    for box, text, _conf in reader.readtext(gray, detail=1, paragraph=False, workers=0):
+        if target in letters(str(text)):
+            xs, ys = [p[0] for p in box], [p[1] for p in box]
+            return CropCoords((left + min(xs) / factor) / w, (top + min(ys) / factor) / h,
+                              (left + max(xs) / factor) / w, (top + max(ys) / factor) / h)
+    return None
+
+
 def read_row(reader, frame, crops, squadron: str) -> RowRead:
     """One frame's read of our squadron's row: only on the SQUADRONS tab (the
     first tab, TOTAL TROPHIES, pins our own player's row in the same place) and
@@ -190,7 +214,8 @@ class Navigation:
 
     `grab_frame()` gives a fresh frame or None; `ocr(fn, *args)` runs
     `fn(reader, *args)` with an EasyOCR reader and returns its answer, or None;
-    `click(crop_name)` clicks a crop; `stop()` is true once wingman must leave.
+    `click(crop_name, coords=None)` clicks a crop, or `coords` inside it where
+    OCR found the word; `stop()` is true once wingman must leave.
     """
 
     def __init__(self, crops, grab_frame, ocr, click, stop, squadron: str,
@@ -233,6 +258,18 @@ class Navigation:
 
     def _wait_for(self, crop: str, word: str) -> bool:
         return self._wait_until(lambda frame: self._shows(frame, crop, word))
+
+    def _wait_for_box(self, crop: str, word: str) -> "CropCoords | None":
+        """Where the word shows once a fresh frame shows it; None when the step's
+        time runs out."""
+        found = []
+
+        def check(frame) -> bool:
+            box = self.ocr(word_box, frame, self.crops[crop], word)
+            if box is not None:
+                found.append(box)
+            return box is not None
+        return found[-1] if self._wait_until(check) else None
 
     def _read(self) -> "SquadronReading | None":
         previous = None
@@ -280,9 +317,10 @@ class Navigation:
             if not self._wait_until(self._in_lobby, timeout_s=0.0):
                 return None, "the lobby is not on screen"
             self.click(MENU)
-            if not self._wait_for(MENU_LEADERBOARDS, "LEADERBOARDS"):
+            entry = self._wait_for_box(MENU_LEADERBOARDS, "LEADERBOARDS")
+            if entry is None:
                 return None, self._back("the menu did not open")
-            self.click(MENU_LEADERBOARDS)
+            self.click(MENU_LEADERBOARDS, entry)
             if not self._wait_for(BOARD_TITLE, "LEADERBOARDS"):
                 return None, self._back("the leaderboards did not open")
             self.click(TAB_SQUADRONS)
@@ -362,7 +400,7 @@ class SquadronRanking:
         """Run the navigation on a thread of its own; `on_done(reading, why,
         navigation)` gets its answer. Active first: `holds_play` must not drop for
         an instant between a reading being due and its navigation running
-        (2026-10-31 02:17:56, the quick-scan clicked PLAY in that gap)."""
+        (2026-10-31, the quick-scan clicked PLAY in that gap)."""
         self._active.set()
         day = self.now().date()
 

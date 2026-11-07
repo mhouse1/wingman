@@ -112,6 +112,11 @@ class IconSteeringConfig:
     # gets no push whatever the pitch score says. None: the score alone decides.
     level_band_deg: "float | None" = schema_default(
         "pursuit_mode.icon_steering.level_band_deg")
+    # Operator, 2026-11-03: an icon below the horizon pushes only within this
+    # many degrees of straight down; further to the side it turns toward its
+    # side until the target appears. None: every icon below the horizon pushes.
+    push_cone_deg: "float | None" = schema_default(
+        "pursuit_mode.icon_steering.push_cone_deg")
 
     @classmethod
     def from_dict(cls, cfg: "dict | None") -> "IconSteeringConfig":
@@ -120,6 +125,7 @@ class IconSteeringConfig:
         min_path = cfg.get("icon_min_path_deg", d.icon_min_path_deg)
         floor = cfg.get("push_floor_m", d.push_floor_m)
         level_band = cfg.get("level_band_deg", d.level_band_deg)
+        push_cone = cfg.get("push_cone_deg", d.push_cone_deg)
         return cls(
             enabled=bool(cfg.get("enabled", d.enabled)),
             wings_level=bool(cfg.get("wings_level", d.wings_level)),
@@ -148,6 +154,7 @@ class IconSteeringConfig:
                                                  d.push_floor_lookahead_s)),
             blind_search_after_s=float(cfg.get("blind_search_after_s", d.blind_search_after_s)),
             level_band_deg=None if level_band is None else float(level_band),
+            push_cone_deg=None if push_cone is None else float(push_cone),
         )
 
 
@@ -308,7 +315,7 @@ class IconPoints:
             self.pitch_pts = self._add(self.pitch_pts, add[1])
             # Cap the length of the (turn, pitch) vector, not each axis: a per-axis
             # cap filled both axes to +-25 on a lower-left icon, so every angle read
-            # 135 deg (measured, 2026-09-26 05:27 pursuit). Scaling both together
+            # 135 deg (measured, 2026-09-26 pursuit). Scaling both together
             # keeps the held direction the icon's direction.
             length = math.hypot(self.turn_pts, self.pitch_pts)
             if length > self._cfg.points_cap > 0:
@@ -349,6 +356,20 @@ class IconPoints:
         below = a if -90.0 <= a <= 90.0 else (180.0 - a if a > 0 else -180.0 - a)
         return below <= band
 
+    def icon_side_of_push_cone(self) -> "str | None":
+        """"left" or "right" when the last chosen icon is below the horizon and
+        more than `push_cone_deg` from straight down (operator, 2026-11-03).
+        None inside the cone, on or above the horizon, with the cone off or no
+        icon seen since the last reset."""
+        cone = self._cfg.push_cone_deg
+        angle = self.last_icon_angle_deg
+        if cone is None or angle is None:
+            return None
+        a = ((float(angle) + 180.0) % 360.0) - 180.0
+        if not 0.0 < a < 180.0 or abs(a - 90.0) <= cone:
+            return None
+        return "left" if a > 90.0 else "right"
+
     def intent(self, down_allowed: bool = True) -> "tuple[str, tuple[str, ...]]":
         """What the dominant-intent law would hold now: ("down", ...), ("up",
         ...), ("turn", ...) or ("none", ()). It acts on the scores whether or not
@@ -366,18 +387,30 @@ class IconPoints:
         pull an icon on the horizon gets, and pulling is right when too low to
         push. Before this the refused push left the wings level and the pitch
         neutral, so the jet flew straight with the enemy off to one side: 686 of
-        916 icon ticks, 95 s over 9 stretches, in the 2026-09-27 18:42 session
-        (the 18:51:51 case: icon 158-171 deg, points -23/+9, at 822 m). With no
+        916 icon ticks, 95 s over 9 stretches, in the 2026-09-27 session
+        (the case: icon 158-171 deg, points -23/+9, at 822 m). With no
         side to turn to (turn not active) it is still "none".
 
         Below the horizon means the icon too, not only the score (Code Review
         019 cycle 39). The score fades with a 1 s half-life, so after a low
         sighting it points down for seconds after the icon has moved level: at
-        2026-10-19 04:17:01.7 the ammo pin sat at -1 to +5 deg and the push went
+        2026-10-19 the ammo pin sat at -1 to +5 deg and the push went
         on 3 s, into a -50 deg dive. An icon inside `level_band_deg` of the
-        horizon, or above it, gets the turn toward its side instead."""
+        horizon, or above it, gets the turn toward its side instead.
+
+        Below the horizon but off to one side (operator, 2026-11-03), outside
+        `push_cone_deg` of straight down, the icon gets the turn toward its side
+        too, from the first scan either axis is active, and keeps it until the
+        target appears. At 2026-11-02 an icon at 121 deg (lower left,
+        the enemies behind) scored (-3, +4) a scan; the push took the nose from
+        +2 to -52 deg, the terrain guards pulled it back up on the same heading,
+        and the jet flew out of the map and was ejected. A turn needs no
+        `down_allowed`: it is not a push."""
         roll = ROLL_LEFT if self.turn_active < 0 else ROLL_RIGHT
         icon_level = self.icon_level_or_above()
+        side = self.icon_side_of_push_cone()
+        if side is not None and not icon_level and (self.pitch_active or self.turn_active):
+            return "turn", (ROLL_LEFT if side == "left" else ROLL_RIGHT, NOSE_UP)
         if self.pitch_pts > 0 and not icon_level and (self.pitch_active or self.turn_active):
             if down_allowed:
                 return "down", (NOSE_DOWN,)

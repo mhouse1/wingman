@@ -42,6 +42,7 @@ from .clear_path import PathPerception
 from .depth_view import DepthPerception
 from .kill_card import KillCardReader, read_card
 from .warning_agreement import WarningAgreement
+from .agreement_trial import AgreementTrial
 from .terrain_loom import TerrainLoom
 from .mission_stats import MissionStatsTracker
 from .round_performance import (CAPTURE_DIR as ROUND_PERFORMANCE_DIR, KDA_CROP, SCORE_CROP,
@@ -156,7 +157,7 @@ def _note_round_performance(read_performance, grab_frame, sleep_fn, on_performan
                     reading.score, reading.kills, reading.deaths, reading.assists)
     if save_frame is not None:
         # A read round keeps the first frame that read its figures: frame 1 was
-        # still the podium page in 5 of the first 10 rounds of 2026-10-29 04:39.
+        # still the podium page in 5 of the first 10 rounds of 2026-10-29.
         keep = range(len(reads)) if reading is None else [next(
             (k for k, (_frame, panel) in enumerate(reads)
              if panel is not None and panel.reading == reading), 0)]
@@ -411,7 +412,7 @@ def _wait_for_tick_telemetry(analyzer, ammo_events, since_ts: float, wait_s: flo
     False at ``since_ts + wait_s``, or once no reading of a frame grabbed since
     ``since_ts`` is on its way ``start_grace_s`` into the tick. The grace is the
     background pass's own start: live, the tree got here 1 to 2 ms after the
-    pass was scheduled, before it had submitted the reading (04:31, cycle 38).
+    pass was scheduled, before it had submitted the reading (cycle 38).
     A new missile alert still deploys flares while it waits.
     """
     deadline = since_ts + wait_s
@@ -567,11 +568,11 @@ def _dump_stacks_and_force_exit(banner: str) -> None:
 def _arm_shutdown_watchdog(timeout_s: float = SHUTDOWN_WATCHDOG_S) -> None:
     """Force an exit if cleanup stalls, dumping every thread first. ADR 121.
 
-    Observed 2026-09-05 08:02:03: wingman took SIGTERM, stopped logging on the
+    Observed 2026-09-05: wingman took SIGTERM, stopped logging on the
     same second, never wrote "Exit requested, shutting down", and was still
     alive five minutes later. It had to be SIGKILLed, so no session summary and
     no stats JSON were written — and the next start rotated its log away. The
-    overnight 01:10 session left exactly that signature: no archive, no stats.
+    overnight session left exactly that signature: no archive, no stats.
 
     A hung shutdown is worse than a crash. A crash leaves a traceback; this
     leaves nothing at all, and silently destroys the soak data ADR 106 needs.
@@ -602,7 +603,7 @@ def _cancel_shutdown_watchdog() -> None:
     STANDBY parks the process for as long as the operator wants to fly, so it
     is an unbounded wait BY DESIGN — not a stalled cleanup. The watchdog was
     armed at the top of the same `finally` block and killed a live standby
-    after 90 s on 2026-09-05 10:45:17, taking the SAF-010 handback with it.
+    after 90 s on 2026-09-05, taking the SAF-010 handback with it.
     """
     t = globals().get("_SHUTDOWN_WATCHDOG_TIMER")
     if t is not None:
@@ -732,7 +733,7 @@ def main():
 
     if args.log_file:
         # Rotate, never truncate: mode="w" on a fixed filename destroyed two
-        # sessions' forensic records (the 2026-07-30 18:51 log — 21541 lines —
+        # sessions' forensic records (the 2026-07-30 log — 21541 lines —
         # was overwritten before its review could re-verify anything). Rename
         # the previous log into logs/<stem>_<last-write-time><suffix> before
         # opening; rename is atomic and a process still holding the old fd is
@@ -925,7 +926,7 @@ def main():
             logger.info("ADR 157: releasing modifier keys held on %s for more "
                         "than 1.5s", nested_display)
         # ADR 099 V3: the game falls to one frame a second while its window on
-        # the desktop is not shown (measured 2026-10-04 11:27). Off by default.
+        # the desktop is not shown (measured 2026-10-04). Off by default.
         if bool(_nested.get("block_page_flips", schema_default("nested.block_page_flips"))):
             from .present_copy_guard import PresentCopyGuard
             present_copy_guard = PresentCopyGuard(nested_display)
@@ -981,7 +982,7 @@ def main():
     # SIGHUP gets the same handler. Unhandled, its default action is immediate
     # termination — no exception, no "Exit requested" log, no session summary,
     # no nested-display teardown (ADR 099/105 never get to run). Observed
-    # 2026-09-08 04:31: the controlling terminal closing killed wingman this
+    # 2026-09-08: the controlling terminal closing killed wingman this
     # way mid-session, and the orphaned Xwayland :3 outlived it. This is a
     # SEPARATE gap from ADR 121's shutdown watchdog, which only arms once
     # exit_requested is already set — SIGHUP previously never set it.
@@ -1070,13 +1071,13 @@ def main():
         #   pinned there — auto-detecting the game window is actively wrong
         #   (when capture followed the game window it recorded live gameplay
         #   instead of the presented frames and every step failed — 2026-08-09
-        #   19:45 run).
+        #   run of that day).
         # - Real-game capture (make p1/p2/p3, no flag): the game window sits at
         #   its own desktop offset (observed +66+69), so capture must
         #   auto-detect exactly like a normal run. Pinning here shifts every
         #   crop by that offset, OCR classifies nothing, and the lane dies at
-        #   the 90 s startup gate with zero screenshots (2026-08-13 21:48 and
-        #   21:50 runs — the pin was unconditional from 2026-08-09 until now).
+        #   the 90 s startup gate with zero screenshots (two 2026-08-13
+        #   runs — the pin was unconditional from 2026-08-09 until now).
         if args.capture_pin_region:
             lane_offset = (int(region[0]), int(region[1]))
             cap = Capture(region, monitor_index, game_window_offset=lane_offset)
@@ -1502,7 +1503,7 @@ def main():
     # ADR 087 addendum 3: this beat NO LONGER presses ESC. In the lobby ESC
     # opens the Exit-to-Desktop modal, so the "recovery" was manufacturing the
     # blackout it was responding to — a 23s cycle of cancel-then-reopen
-    # (2026-08-21 10:48). Recovery for a lobby blackout is the stall-crop scan,
+    # (2026-08-21). Recovery for a lobby blackout is the stall-crop scan,
     # which cancels that dialog; the beat's remaining job is to arm the ADR 087
     # capture and the blackout clock.
     # ADR 087: the same beat arms the anomaly capture, so a lobby blackout
@@ -1596,6 +1597,7 @@ def main():
         # ADR 171: the same record picks the mission at battle entry. Live only, as
         # the read: a replay lane has no jet and flies its configured mission.
         ctrl.set_jet_source(lambda: stats_tracker.jet)
+        ctrl.set_round_note(stats_tracker.on_event)   # ADR 171 mission trial
 
     # Operator, 2026-10-26: each round's score and K/D/A, read off the
     # PERFORMANCE panel during the end-of-round click-through and totalled in
@@ -1629,8 +1631,8 @@ def main():
         return SquadronNavigation(
             analyzer.crops, cap.grab_from_thread,
             lambda fn, *a: analyzer.run_ocr(fn, *a),
-            lambda name: ctrl.click_crop(analyzer.crops[name], block=True, count=1,
-                                         region_name=name),
+            lambda name, coords=None: ctrl.click_crop(
+                coords or analyzer.crops[name], block=True, count=1, region_name=name),
             lambda: (exit_requested.is_set() or ctrl.operator_stop_requested()
                      or ctrl.finish_round_requested()),
             str((cfg.get("squadron_ranking") or {}).get(
@@ -1714,6 +1716,10 @@ def main():
             path_perception.agreement = warning_agreement
             behavior_tree.set_warning_agreement(warning_agreement)
             ctrl.set_warning_agreement(warning_agreement)
+            # ADR 172: in a share of rounds the agreement leaves the resupply alone.
+            ctrl.set_agreement_trial(AgreementTrial(float(_agree_cfg.get(
+                "resupply_holdoff_share", schema_default(
+                    "behavior_tree.climb.warning_agreement.resupply_holdoff_share")))))
         # Cycle 11: relative depth from a monocular model, in a worker process
         # that loads it in the background (shadow; stopped by ctrl.cleanup()).
         depth_view = DepthPerception(cfg.get("depth_view"))
@@ -1733,7 +1739,10 @@ def main():
         read_fn=lambda frame: analyzer.run_ocr(read_card, frame),
         enabled=(bool((cfg.get("kill_card") or {}).get(
             "enabled", schema_default("kill_card.enabled")))
-            and not replay_mode and not capture_mode))
+            and not replay_mode and not capture_mode),
+        # ADR 172: each verdict to the round's record, the terrain trial's crashes.
+        on_verdict=lambda verdict: stats_tracker.on_event(
+            "death_card_" + verdict.replace(" ", "_"), time.time()))
     kill_card.start()
     respawn = RespawnHandler(
         analyzer, ctrl, mission_cfg,
@@ -2022,7 +2031,7 @@ def main():
                     # hold survived into the NEXT match. That stale _ejecting
                     # flag let a maneuver key trigger "manual takeover" during
                     # the next round's GAME_STARTING wait, wedging the FSM and
-                    # locking out the 'u' resume (observed 2026-08-01 02:54:55).
+                    # locking out the 'u' resume (observed 2026-08-01).
                     ctrl.stop_eject_sequence(reason="match_ended")
                 else:
                     game_end_b_since = 0.0
@@ -2348,7 +2357,7 @@ def main():
             logger.info("Capture summary saved to %s", summary_output)
         # ADR 062 Phase A: per-session shadow-detector agreement summary.
         # Emitted BEFORE the cleanups — analyzer.cleanup() can block on stuck
-        # OCR futures (the 2026-08-01 10:01 session ended there and lost its
+        # OCR futures (the 2026-08-01 session ended there and lost its
         # summary and stats JSON), and this only reads analyzer fields.
         shadow_summary = analyzer.shadow_respawn_summary()
         if shadow_summary is not None:
@@ -2423,7 +2432,7 @@ def main():
                 logger.warning("ADR 156: host pointer restore failed: %s", e)
         # ADR 095: the run file is written from inside analyzer.cleanup(), via
         # on_session_end() once the OCR pool has joined. load_end has to be taken
-        # BEFORE that call or it misses the file entirely — the 2026-08-26 14:37
+        # BEFORE that call or it misses the file entirely — the 2026-08-26
         # session recorded load_start and no load_end for exactly this reason.
         try:
             _la_end = read_loadavg()

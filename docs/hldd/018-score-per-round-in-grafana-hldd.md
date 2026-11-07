@@ -1,4 +1,4 @@
-# Design 018 — Score per Round and Squadron Ranking Over Time in Grafana
+the # Design 018 — Score per Round and Squadron Ranking Over Time in Grafana
 
 | Status | Date       | Wingman Version |
 |--------|------------|-----------------|
@@ -6,7 +6,7 @@
 
 ## Overview
 
-Wingman has read the end-of-round PERFORMANCE panel since 2026-10-27 05:45. Each session's summary
+Wingman has read the end-of-round PERFORMANCE panel since 2026-10-27. Each session's summary
 prints that session's totals, and its stats file keeps each round's figures. Nothing yet shows them
 over time.
 
@@ -64,7 +64,7 @@ enables it (see "Where it runs, and switching it on").
 
 ### What the files hold (measured 2026-10-28)
 
-Six stats files carry round performance, written from 2026-10-27 05:45 to 2026-10-28 03:09:
+Six stats files carry round performance, written from 2026-10-27 to 2026-10-28:
 
 - 182 rounds ended with the click-to-finish outcome, and wingman read the panel of 118 of them (65%).
 - The 118 readings total 49,727 points: a mean of 421 per round, with a standard deviation of 212.
@@ -88,7 +88,7 @@ Two properties of this data shape the design:
   (see Rollout). Rounds before 2026-10-29 keep their gap, so the dashboard also shows the rounds
   flown and the rounds read beside every aggregate.
 - **One round says little.** Scores spread by about 200 points. Account 3, on unchanged code,
-  averaged 490 per round from 09:00 to 12:00 on 2026-10-27, then 291 from 12:00 to 15:00, with 21
+  averaged 490 per round over three hours on 2026-10-27, then 291 over the next three, with 21
   rounds in each block. A real 10% change (about 40 points) needs about 400 rounds on each side
   before it shows, if rounds are independent. They are not quite: with 21 rounds a side and a
   spread of 212, the drop from 490 to 291 is about t = 3 (inferred), more than chance. Something
@@ -182,7 +182,7 @@ end-of-round screen, which is where wingman reads the panel.
   `Game state: … → GAME_BATTLE_MANUAL` lines of the round in a log. Every panel but Score per
   round leaves these rounds out; Score per round draws them as their own points and moving
   average. Wingman's session summary leaves them out of its round figures, and counts them on a
-  "taken over" line. Of the 477 rounds loaded on 2026-10-29, one was taken over (the 17:40
+  "taken over" line. Of the 477 rounds loaded on 2026-10-29, one was taken over (one
   session's round 6, score 1,100, K/D/A 6/3/0, four takeovers).
 - **Time.** `ended_at` is `start_ts` plus `duration_s`, the end of the mission. Every chart plots
   against it.
@@ -191,9 +191,9 @@ end-of-round screen, which is where wingman reads the panel.
 - **Sessions from before the reader** contribute no rows. These are stats files without a
   `round_performance` block. Their rounds were never read, and counting them as unread would drag
   the read rate down.
-- **Readings with no mission behind them** are not rows. On 2026-10-28 00:49 the click-through
+- **Readings with no mission behind them** are not rows. On 2026-10-28 the click-through
   logged 28 readings against 24 missions. The extra ones came from a second click-through of the
-  same end screens (open question 4, answered). Since 2026-10-29 06:01 such a click-through reads
+  same end screens (open question 4, answered). Since 2026-10-29 such a click-through reads
   nothing and logs no `ROUND PERFORMANCE` line.
 - **Rounds from a log.** For a session that ended without a stats file, each `ROUND PERFORMANCE`
   line in its log is a round, read or not, at the line's time (see The ingest), except a line
@@ -297,7 +297,7 @@ one `jsonb` column, so a new key needs no change to the table, the ingest or the
   - A round rebuilt from a log gets `source: log`, and the `account` of the run_id that
     PerformanceTracker's `session data written to …run_<id>.json` line names, the one place a log
     names it. A log cut off before that line has no `account`; Score per round draws its rounds as
-    "no account". On 2026-10-30 a `make r2` session the shutdown watchdog ended at 08:54 wrote no
+    "no account". On 2026-10-30 a `make r2` session that the shutdown watchdog ended wrote no
     stats file but did write that line, and its 12 rounds were first drawn as "no account".
   - Any `tags` object in the stats file is copied through. One at the top of the file covers the
     whole session; one in a mission record covers a value that can change between rounds, and
@@ -359,7 +359,7 @@ Wingman flies in Mobius Squadron, tag `[ISAF]` ([Job Aid 013](../job-aids/013-jo
 
 - **Where the rank is.** It is on a leaderboard in the game's menus, reached by hand through
   Settings, then Leader boards, then Squadrons. The one reading on record is 698th, on 2026-10-13
-  at 04:25 ([FUTURE 000](../FUTURE/000-squad-rank.md)).
+  ([FUTURE 000](../FUTURE/000-squad-rank.md)).
 - **The navigation is [ADR 166](../adr/166-read-the-squadron-leaderboard-from-the-lobby.md)**
   (2026-10-31, from the operator's screenshots). From the lobby, wingman clicks the menu at the top
   right, then LEADERBOARDS, then the SQUADRONS tab. It reads our squadron's row at the bottom of
@@ -408,7 +408,7 @@ Wingman flies in Mobius Squadron, tag `[ISAF]` ([Job Aid 013](../job-aids/013-jo
      `Game state: … → GAME_END_B` line since the last `GAME_END_B →` line (a second click-through
      of the same end screens):
      - the row's time is the line's, read as America/New_York. Log times carry no UTC offset, so
-       a line in the hour that repeats when daylight time ends (01:00 to 02:00 on 2026-11-01) is
+       a line in the hour that repeats when daylight time ends (on 2026-11-01) is
        ambiguous; it is read as the first of the two, daylight time. Only sessions without a
        stats file are affected;
      - a `not read` line is an unread round;
@@ -526,7 +526,7 @@ operator's, which wingman's logs also use. Its default range is the last 30 days
 
 **Period summaries.** A period's value is the chosen aggregate over all the data within the
 period: every round whose end time falls inside it, in America/New_York. The month summary takes
-every round that ended from the first of the month at 00:00 up to the first of the next month, and
+every round that ended from the first of the month up to the first of the next month, and
 SUM()s its scores (operator, 2026-10-28). An unread round adds nothing to the sum, and the Rounds
 per period panel counts it. The SUM rule is for the score. The squadron ranking takes its last
 reading in each period instead (see Squadron ranking).
@@ -534,6 +534,7 @@ reading in each period instead (see Squadron ranking).
 | Panel | Type | Shows |
 |-------|------|-------|
 | Score per round | Time series: points, plus a line each | Every read round at `ended_at`: wingman's own as dots in one colour per account, with their moving average over the last `window` read rounds pooled over the accounts, and the rounds with a manual takeover as their own dots and moving average (operator, 2026-10-29), to see whether a takeover scores better than wingman alone. The takeover average shows its points: its rounds are few, and a line with one point draws nothing. The account dots come from a `metric` column, so a new account gets its own series with no change to the dashboard. Hovering a dot names its round's account, jet and K/D/A (see Hovering a dot) |
+| Score range by jet (operator 2026-11-03) | Bar chart: stacked | Under Score per round, one bar per jet over wingman's own rounds, from the jet's lowest score to its highest, with a tick at its mean, the jet with the most read rounds on the left (see Score range by jet) |
 | By period | Time series: bars | `aggregate` of `metric` per `granularity`, for example the sum of score per month |
 | Rounds per period | Time series: stacked bars | Rounds flown and rounds read per period |
 | Totals in range | Stat | Rounds flown, rounds read, total score, and the mean and median per read round, for wingman's own rounds; and the rounds with a manual takeover, counted apart |
@@ -592,7 +593,7 @@ details go in the name:
 
 - **Query D** makes one series per account, jet and K/D/A: 460 for the 743 read rounds on
   2026-11-01. A round with no jet reads `jet not recorded`. Of the 548 read rounds with none, all
-  but one ended before 06:56 on 2026-10-31, the first round with a jet
+  but one ended before 2026-10-31's first round with a jet
   ([ADR 167](../adr/167-read-each-rounds-jet-from-the-lobby.md)).
 - **It draws nothing.** Its series are lines of width 0 with no points, left out of the legend, so
   the account dots stay the ones on screen and in the legend. A legend click leaves alone any series
@@ -618,6 +619,34 @@ Of the neighbours, 226 of 313, 101 of 122 and 5 of 5 had the same score as the d
 the chart could tell them apart. The ring shows which dot the tooltip means, and the name and score
 always belong to one round. To read one round, narrow the time range first.
 
+**Score range by jet (operator, 2026-11-03).** The operator asked for a candlestick of score by
+jet: a vertical bar for each jet from its lowest score to its highest, with its mean as the tick. It
+is a high-low chart with the mean marked, not a Heikin-Ashi chart, which needs an open and a close in
+time order. Grafana 12.2's candlestick panel draws time along the bottom and needs a time field
+(`candlestick/fields.ts`), so it cannot put jets there. A stacked bar chart can, and draws the same
+picture:
+
+- **The stack.** Each jet's row stacks four lengths: an empty base up to the lowest score, the bar up
+  to the tick, the tick, and the bar on to the highest. The tick is 2% of the tallest bar, centred on
+  the mean, so a jet with one round shows the tick alone.
+- **The rounds.** Wingman's own rounds with a jet recorded, in the time range and the tags box.
+  Rounds with no jet are left out, because they flew every jet. A jet
+  whose name OCR read two ways gets a bar for each, as in the table (`F106 DELTA DART`).
+- **The order.** The jet with the most read rounds is on the left and the fewest on the right
+  (operator, 2026-11-03), so the bars that rest on the most rounds come first; jets with as many
+  rounds go best mean first. Every round with a jet recorded was read, so rounds flown give the same
+  order.
+- **The tooltip.** Hovering a bar, from the axis to its top, names the jet with its highest, mean
+  and lowest scores and its count of read rounds. The four stacked lengths stay out of it. Those
+  figures are fields hidden from the chart, and below schema 42 Grafana hides any such field from the
+  tooltip too (`migrateHideFromFunctionality`), so the dashboard is at schema 42. The migrations from
+  39 to 42 had nothing else to change in it.
+- **Colours.** The bar is blue and the tick takes the theme's text colour, so it shows on the bar
+  and off it in both themes.
+
+Measured on 2026-11-03 in headless Chromium over the last 30 days: hovering along the foot of the
+chart reached all 24 jets, and each tooltip matched the jet's row in Postgres.
+
 **Reading the dashboard.**
 
 - Compare periods by the mean per read round, with the count beside it, and only where nearly
@@ -641,6 +670,9 @@ always belong to one round. To read one round, narrow the time range first.
   30 days and 5 on one day. It is the only part of that tooltip that can belong to another round.
 - With an account isolated in the legend, the hidden accounts' rounds still answer a hover, on empty
   chart.
+- On Score range by jet, a bar's length grows with its count of rounds: one round more can only
+  widen it. Compare jets by their ticks, and check the count in the tooltip. The margin on each mean
+  is in Wingman by jet.
 
 ### Make targets
 
@@ -714,16 +746,16 @@ Everything in this table is tracked, except `grafana/.env`. The switch is turned
     LAN address.
   - Record both containers' memory while a session runs.
 - **V3, the numbers.**
-  - The first ingest finds the six stats files written from 2026-10-27 05:45 to 2026-10-28 03:09.
+  - The first ingest finds the six stats files written from 2026-10-27.
   - With the range set to those times (America/New_York), the Totals panel shows:
     - 182 rounds flown and 118 rounds read;
     - a total score of 49,727, a mean of 421 per read round.
-  - Narrowed to the 06:07 session (2026-10-27 06:05 to 16:35), it shows 62 rounds read and
+  - Narrowed to one 10.5 h session (2026-10-27), it shows 62 rounds read and
     24,347 points, the figures in that session's summary.
   - Over the full range, the tag filter `{"account": "acct1"}` shows 34 rounds flown, 22 read and
-    11,527 points: the 23:37 and 00:49 sessions.
-  - The three first changes show as markers at 2026-10-27 05:45, 18:32 and 23:37.
-  - On a fresh volume, with the 23:37 session's stats file set aside, the ingest rebuilds that
+    11,527 points: the two late-night sessions.
+  - The three first changes show as three markers on 2026-10-27.
+  - On a fresh volume, with the session's stats file set aside, the ingest rebuilds that
     session from `logs/wingman_20261028_004832.log`. It shows 10 rounds, 6 read and 2,472
     points, tagged `source: log`.
 - **V4, after a session** (Phase 2). A session's rounds appear on the dashboard after it ends,
@@ -756,13 +788,13 @@ Everything in this table is tracked, except `grafana/.env`. The switch is turned
     connected as `grafana_reader`, which was refused a write; every panel's query ran. Memory:
     Grafana 104 MiB, Postgres 29 MiB, idle.
   - V3, on the same stack: the ingest loaded 477 rounds, and a second run added none. For
-    2026-10-27 05:45 to 2026-10-28 03:09 the Totals query gave 182 rounds flown, 118 read, 49,727
+    2026-10-27 the Totals query gave 182 rounds flown, 118 read, 49,727
     points and a mean of 421.4, through Grafana's data source too, and the Tags query 34 rounds
     tagged `acct1`. The three markers loaded. From the same files, offline (the ingest's own
-    functions): the 06:07 session 62 read and 24,347 points; `acct1` 34 flown, 22 read, 11,527
-    points; the 23:37 session rebuilt from `logs/wingman_20261028_004832.log` 10 rounds, 6 read,
+    functions): the 10.5 h session 62 read and 24,347 points; `acct1` 34 flown, 22 read, 11,527
+    points; the late-night session rebuilt from `logs/wingman_20261028_004832.log` 10 rounds, 6 read,
     2,472 points, `source: log`.
-  - The operator's stack, 2026-10-29 19:29 (`grafana/.env` made, the switch on in
+  - The operator's stack, 2026-10-29 (`grafana/.env` made, the switch on in
     `config.local.yaml`, the full suite green at 3,505): `make grafana` brought both containers up
     healthy and loaded 477 rounds, 320 read, with the three markers; the home page is the
     dashboard, the data source connects, the V3 range reads 182, 118 and 49,727 through
@@ -860,6 +892,10 @@ Everything in this table is tracked, except `grafana/.env`. The switch is turned
 - **For Hovering a dot: a data link in the tooltip.** A link's title can hold the details, but it
   shows on hover only as `oneClick`, which reads "Click to open …" and makes every click on the
   chart follow it. Rejected.
+- **For Score range by jet: Grafana's candlestick panel,** with the mean as both open and close. It
+  draws the wick and tick asked for, but only along a time axis, so the jets could not be named
+  under their bars. Rejected for a stacked bar chart, whose tick is as wide as its bar rather than
+  wider.
 
 ## Open questions
 
@@ -871,7 +907,7 @@ Everything in this table is tracked, except `grafana/.env`. The switch is turned
    and the rule stands.
 3. **Answered** (2026-10-28). Yes: the ingest rebuilds a session without a stats file from its log
    (see The ingest).
-4. **Answered** (2026-10-29). On 2026-10-28 00:49 the click-through logged 28 readings against 24
+4. **Answered** (2026-10-29). On 2026-10-28 the click-through logged 28 readings against 24
    missions. Each extra one came from a second click-through of the same end screens: wingman had
    moved to the lobby with the end screens still up, and ADR 087's lobby scan found the prompt
    again 4 to 15 s later. They are not rounds. Since 2026-10-29 such a click-through reads nothing

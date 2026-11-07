@@ -41,22 +41,22 @@ lobby. That fix belongs in the GAME_STARTING probe and needs its own live trial.
 
 ## Context
 
-Session of 2026-11-01. `P` is the lobby quick-scan, `H` the health probe.
+Session of 2026-11-01. `P` is the lobby quick-scan, `H` the health probe. Times are seconds from the first line.
 
 ```text
-09:14:57,474 H #2 raw=77 UNCONFIRMED               P: PLAY visible (2/6)
-09:16:09,561 H #50 raw=73, health 73 confirmed     (ADR 063: 73 is within 15 of 77)
-09:16:09,636 Controller: mission 'acs' started → GAME_BATTLE
-09:16:09,725 P: PLAY visible in GAME_STARTING (1/6 reads)
-09:16:14,844 FINISH ROUND: requested — wingman will stop at the next lobby
-09:16:16,366 FINISH ROUND: cancelled — the session continues
-09:16:17,251 Controller: Backspace — ending wingman
-09:16:18,668 STANDBY: wingman has stopped
-09:16:19,119 FINISH ROUND: requested — … (four more presses, toggling a flag nothing reads)
-09:16:28,031 STANDBY: MetalStorm exited on its own
++   0.0 s H #2 raw=77 UNCONFIRMED               P: PLAY visible (2/6)
++  72.1 s H #50 raw=73, health 73 confirmed     (ADR 063: 73 is within 15 of 77)
++  72.2 s Controller: mission 'acs' started → GAME_BATTLE
++  72.3 s P: PLAY visible in GAME_STARTING (1/6 reads)
++  77.4 s FINISH ROUND: requested — wingman will stop at the next lobby
++  78.9 s FINISH ROUND: cancelled — the session continues
++  79.8 s Controller: Backspace — ending wingman
++  81.2 s STANDBY: wingman has stopped
++  81.6 s FINISH ROUND: requested — … (four more presses, toggling a flag nothing reads)
++  90.6 s STANDBY: MetalStorm exited on its own
 ```
 
-The last HUD frame, written 09:16:17, shows `[GAME_BATTLE] HP:73` over the main
+The last HUD frame, written at +79.5 s, shows `[GAME_BATTLE] HP:73` over the main
 lobby with PLAY lit. Three separate holes:
 
 - **The FSM was wrong, and `z` trusted it.** Both digit reads coincided with PLAY.
@@ -67,7 +67,7 @@ lobby with PLAY lit. Three separate holes:
   leaves the listener's key table full, so the handler ran and nothing read
   its flag.
 
-`z` was never broken when the FSM agreed: at 07:58:20 the same morning a lobby
+`z` was never broken when the FSM agreed: the same morning a lobby
 press stopped the session in 0.7 s.
 
 How often: of 918 GAME_STARTING health confirmations in the logs of 2026-10-23 to
@@ -90,10 +90,16 @@ with Backspace within 20 s of such a read.
   on screen in GAME_BATTLE`, then `stopping in GAME_LOBBY`, within about 2 s.
 - **Open:** a live press in standby. Expected log: `'z' in standby — closing`.
 
-## Known defect, not fixed here
+## Known defect, fixed 2026-11-02
 
 `_LinuxXTestKeyboard.unhook_all()` never clears `_grabbed`, so on Linux every
 hotkey stays registered through standby, whatever the `every hotkey released` line
-says. Only `z` was observed firing there (09:16:19, after that line). The narrowing
+says. Only `z` was observed firing there (after that line). The narrowing
 in `Controller.cleanup()` is therefore not in force. `z` is now registered
 explicitly, so fixing the leak will not take it away.
+
+It cost more the next day. Backspace put a session in standby, and 5.5 min
+later a `u` started `mission_j20`: no main loop, so nothing steered, but its
+search-and-destroy loops fired and toggled the padlock in the operator's game every
+second. `unhook_all()` now empties `_grabbed` and `_pending`;
+`test_unhook_all_drops_every_hotkey_so_standby_keeps_only_its_own` covers it.

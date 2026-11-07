@@ -145,7 +145,7 @@ def _fmt_sky(sky_frac) -> str:
 def _fmt_ttg(alt, rate) -> str:
     """Predicted seconds to ground, for the BT log line (ADR 086 d2).
 
-    Logged EVERY tick, not only when the trigger fires. The 2026-08-21 19:42
+    Logged EVERY tick, not only when the trigger fires. The 2026-08-21
     review could not tell "the trigger is armed and correctly quiet" from "the
     trigger is dead" because neither state emitted anything — a safety-critical
     condition must be observable while it is silent.
@@ -502,7 +502,7 @@ class RespawnHandler:
             return
 
         # Explicit disposition of every case — ADR 061 rule 3: the one-shot
-        # event is never consumed silently (the 2026-08-01 08:00 incident lost
+        # event is never consumed silently (the 2026-08-01 incident lost
         # the only restart signal for a life to an unlogged state-gate miss).
         disposition = self._disposition_fn(
             analyzer.game_state, analyzer.alive_after_observed_death
@@ -853,7 +853,7 @@ class RespawnHandler:
                     # respawn design left the aircraft flying uncommanded after
                     # every death — the scheduled restart was GAME_BATTLE-gated
                     # and the log promised a restart that could never fire,
-                    # observed 2026-07-31 07:42.)
+                    # observed 2026-07-31.)
                     if self._live_capture is not None:
                         _cap_now = time.time()
                         self._live_capture.on_event("respawn_detected", _cap_now)
@@ -980,6 +980,11 @@ class AmmoEventsHandler:
                 self._ctrl.pursuit_evade_new_round()
             except Exception as exc:
                 log_suppressed(logger, "pursuit_evade_new_round", exc)
+            # ADR 172: the terrain trial draws its arm at the same round start.
+            try:
+                self._ctrl.agreement_trial_new_round()
+            except Exception as exc:
+                log_suppressed(logger, "agreement_trial_new_round", exc)
         self._in_battle = in_battle
 
     def suppress_after_respawn(self, seconds: float = 10.0):
@@ -1114,9 +1119,12 @@ class AmmoEventsHandler:
             self._stats.on_event("missile_evade", alert_ts)
 
     def handle_low_flares(self) -> None:
-        """Press SPECIAL_ABILITY to reload flares when count reaches 2."""
+        """Press SPECIAL_ABILITY to reload flares when count reaches 2. A jet with a
+        reload point of its own is handled by `handle_jet_flare_reload` instead."""
         self._analyzer.low_flares_event.clear()
         if self._analyzer.game_state != GameState.GAME_BATTLE:
+            return
+        if self._jet_flare_reload_at() is not None:
             return
         elapsed = time.time() - self._last_flare_reload_ts
         if elapsed < self._flare_reload_cooldown_s:
@@ -1210,8 +1218,41 @@ class AmmoEventsHandler:
         else:
             self._ctrl.eject_and_dive(on_complete=_on_complete)
 
+    def _jet_flare_reload_at(self) -> "int | None":
+        try:
+            return self._ctrl.flare_reload_at()
+        except Exception as exc:
+            log_suppressed(logger, "flare_reload_at", exc)
+            return None
+
+    def handle_jet_flare_reload(self) -> None:
+        """Operator, 2026-11-02: on a jet whose profile names `flare_reload_at` (the
+        J-20's is 1), the special ability reloads the flares once they read that many
+        or fewer, in battle or in a pursuit, under the same cooldown. The low-flares
+        reload fires on a reading of exactly 2 and only in GAME_BATTLE; J-20 bursts
+        step past 2 and its pursuit runs in GAME_BATTLE_EJECT, so that day the count
+        read 1 about 120 times and 0 about 30 for about three reloads."""
+        at = self._jet_flare_reload_at()
+        if at is None or self._analyzer.game_state not in (
+                GameState.GAME_BATTLE, GameState.GAME_BATTLE_EJECT):
+            return
+        flares = self._analyzer.get_ammo_flares()
+        if flares is None or flares > at:
+            return
+        if time.time() - self._last_flare_reload_ts < self._flare_reload_cooldown_s:
+            return
+        logger.info("Flares %d, at or under the jet's reload point %d: special ability "
+                    "reloads them", flares, at)
+        # Through a cancelled mission, as the flares are: the pursuit runs with the
+        # mission cancelled, and the first live press was dropped.
+        self._ctrl.reload_flares(ignore_cancel=True)
+        self._last_flare_reload_ts = time.time()
+        if self._stats is not None:
+            self._stats.on_event("flare_reload", self._last_flare_reload_ts)
+
     def tick_events(self) -> None:
         """Fire the ammo event handlers whose analyzer events are set."""
+        self.handle_jet_flare_reload()
         if self._analyzer.low_flares_event.is_set():
             self.handle_low_flares()
         if self._analyzer.no_missiles_event.is_set():
@@ -1374,7 +1415,7 @@ class BoundaryPerceptionHandler:
         boundary_raw = reading
         # A respawn SETTLE, not just a respawn gate. The overlay is still on
         # screen after the FSM clears is_respawning — measured 2026-09-04
-        # 01:33:29, one tick after respawn=False went away: dist=0.073 fwd=+0.032
+        #, one tick after respawn=False went away: dist=0.073 fwd=+0.032
         # (bearing 0.44, so the entry gate passed it) with the banner colour
         # trigger firing on the same frame. An aircraft does not respawn 0.07R
         # from the edge, so the reading is false however well-formed it looks.
@@ -1386,7 +1427,7 @@ class BoundaryPerceptionHandler:
             # suppressed in the elif — it armed the deadline while respawning
             # and let that tick's reading straight through, which is backwards:
             # the respawn screen is the least trustworthy frame there is.
-            # Measured 2026-09-04 02:13:26, respawn=True with dist=0.093 on the
+            # Measured 2026-09-04, respawn=True with dist=0.093 on the
             # same tick.
             logger.debug("BOUNDARY: reading suppressed — %s",
                          "respawning" if is_respawning
@@ -1396,7 +1437,7 @@ class BoundaryPerceptionHandler:
         # ADR 117: capture what BLINDNESS looks like.
         #
         # Measured 2026-09-04: the detector produced a reading on 514 of 2204
-        # ticks — 23%. The crossing at 22:39:10 had its last reading 14 s
+        # ticks — 23%. The crossing had its last reading 14 s
         # earlier. Every frame the corpus holds is one where detection
         # SUCCEEDED, because approach frames are written on a reading, so the
         # failure case has never been looked at.
@@ -1487,7 +1528,7 @@ class BoundaryPerceptionHandler:
         """
         try:
             # The banner only means anything while the aircraft is flying.
-            # Live 2026-08-30 06:20: the colour test fired one tick after an
+            # Live 2026-08-30: the colour test fired one tick after an
             # eject, on the fireball — bright red, centre screen, exactly where
             # the banner sits. EJECTED's dark plate does not match, but the
             # explosion does. Gate on actually being in battle and not ejecting
@@ -2036,11 +2077,18 @@ class BehaviorTreeHandler:
             # ADR 147: the mission in play's own altitude doctrine (mission_acs
             # levels off at 3000 m, below the tree's floor). getattr so a
             # controller-less handler (mode off, tests) simply has none.
+            # ADR 171: BoundaryTurn sooner at speed (_boundary_speed_scale).
+            _bcfg = bt_cfg.get("boundary", {}) or {}
+            self._boundary_speed_ref = float(_bcfg.get("speed_ref_kph") or 0.0)
+            self._boundary_speed_max = float(_bcfg.get("max_speed_scale") or 1.0)
+            self._boundary_scale_last = 1.0
             self._tree = build_tree(
                 bt_cfg, actuators=actuators or None,
                 regroup_enabled=bool((minimap_cfg or {}).get("regroup_enabled", False)),
                 alt_floor_override_fn=getattr(ctrl, "altitude_floor_override_m", None),
-                sustain_suppressed_fn=getattr(ctrl, "sustain_climb_suppressed", None))
+                sustain_suppressed_fn=getattr(ctrl, "sustain_climb_suppressed", None),
+                boundary_scale_fn=(self._boundary_speed_scale
+                                   if self._boundary_speed_ref > 0 else None))
             self._writer = make_snapshot_writer()
             self._climb_emergency_fn = getattr(self._tree, "climb_emergency_fn", None)
             self._climb_hard_emergency_fn = getattr(
@@ -2280,6 +2328,21 @@ class BehaviorTreeHandler:
         except Exception as e:
             logger.warning("Terrain capture: failed: %s: %s", type(e).__name__, e)
 
+    def _boundary_speed_scale(self) -> float:
+        """ADR 171: BoundaryTurn's distances times the speed over speed_ref_kph, from
+        1 to max_speed_scale: a jet at 2,000 KPH covers 0.50R in seconds, and the
+        J-20 crossed 16 times with the turn already running (2026-11-02). Read by the
+        tree every tick; a stale speed keeps the last value."""
+        try:
+            snap = self._analyzer.get_telemetry() if self._analyzer is not None else None
+            if snap is not None and snap.speed_fresh() and snap.speed.stable_value:
+                self._boundary_scale_last = min(
+                    self._boundary_speed_max,
+                    max(1.0, float(snap.speed.stable_value) / self._boundary_speed_ref))
+        except Exception as exc:
+            log_suppressed(logger, "boundary_speed_scale", exc)
+        return self._boundary_scale_last
+
     def _start_boundary_turn(self) -> None:
         """BoundaryTurn start_fn. ADR 122: tell the turn which side the edge is
         on, so it rolls away from it rather than always right.
@@ -2360,7 +2423,7 @@ class BehaviorTreeHandler:
 
     def _push_climb_emergency(self) -> None:
         """Push this tick's HARD verdict into a running climb hold, whatever leaf
-        the tree selects (ADR 148 amendment, 2026-10-02 23:36). `_update_climb`
+        the tree selects (ADR 148 amendment, 2026-10-02). `_update_climb`
         only runs while Climb is selected; once Idle won, the hold kept a stale
         emergency and flew 30 s to its cap instead of handing the chase back."""
         is_climbing = getattr(self._ctrl, "is_climbing", None)
@@ -3123,7 +3186,7 @@ class UnknownAnomalyRecorder:
         Distinguishes "the dismissal failed" from "the dismissal worked but the
         screen is still unclassifiable". Without this the recorder infers
         failure from the state alone and mislabels a slow classification as a
-        failed dismissal (observed live 2026-08-20 00:33:37).
+        failed dismissal (observed live 2026-08-20).
         """
         if self._first_dismiss_ts:
             self._cleared_popups = list(self._dismiss_popups)
