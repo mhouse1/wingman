@@ -469,8 +469,13 @@ def test_telemetry_split_single_line_assigned_by_crop_half():
     # Design 020, the operator's river skim of 2026-11-07 19:48 (raw EasyOCR text): the
     # HUD read -206, -195 and -220 m and the minus came back as '-', '+' and '"'.
     ("-206 m", -206), ("+195m", -195), ('"220m', -220),
-    # Positive rows: no glyph, and the two junk glyphs seen on 124 positive rows.
-    ("2905 m", 2905), ("5332m", 5332), ("i7/933", 7), ("'8487&8", 8487),
+    # Positive rows: no glyph. A garbled token is unreadable, not a shorter number
+    # (2026-11-08 raw reads: '1B10 m' was 1,810 and parsed as 1; 'Y78 m' was 1,878).
+    ("2905 m", 2905), ("5332m", 5332), ("27681 feet", 27681), ("- 206 m", -206),
+    ("i7/933", None), ("'8487&8", None), ("1B10 m", None), ("38*6m", None), ("Y78 m", None),
+    ("'270m", None), ("1g03 m", None), ("17M7 m", None), ("208Bm", None), ("12o56 -", None),
+    # A bare number with no unit is a fragment (12:36:06: a lone '3' after a respawn).
+    ("3", None), ("41", None), ("201m", 201), ("27681 feet", 27681),
 ])
 def test_the_altitude_row_keeps_the_hud_minus_sign(alt_text, expected):
     results = [_tbox(10, 5, 120, 25, "1141 KPH"), _tbox(10, 35, 140, 55, alt_text)]
@@ -780,7 +785,7 @@ def test_a_low_altitude_read_logs_its_raw_ocr_text(monkeypatch, caplog):
                     ([[0, 40], [80, 40], [80, 58], [0, 58]], self.texts[1], 0.9)]
 
     frame = _np.zeros((20, 60, 3), _np.uint8)
-    for texts, logged in ((["903 KPH", "~45m"], True), (["903 KPH", "2905 m"], False)):
+    for texts, logged in ((["903 KPH", "45 m"], True), (["903 KPH", "2905 m"], False)):
         monkeypatch.setattr(A, "_get_thread_ocr_reader", lambda t=texts: _Reader(t))
         caplog.clear()
         with caplog.at_level(_logging.DEBUG, logger="wingman.analyzer"):

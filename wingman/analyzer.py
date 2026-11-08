@@ -532,12 +532,46 @@ def _row_value(boxes, signed: bool = False) -> "tuple[int | None, float]":
     if not match:
         return (None, 0.0)
     conf = min(c for _, _, _, c in boxes_sorted)
-    value = int(match.group())
     if signed:
-        before = text[:match.start()].rstrip()
-        if before and before[-1] in _ALT_MINUS_GLYPHS:
-            value = -value
-    return (value, float(conf))
+        return (_altitude_token_value(text), float(conf))
+    return (int(match.group()), float(conf))
+
+
+def _altitude_token_value(text: str) -> "int | None":
+    """The altitude row's number, or None when its token is garbled.
+
+    The token is the first whitespace-separated word holding a digit. It may carry
+    a minus glyph in front (also as a separate word just before it) and an `m`
+    label behind; anything else in it means a garbled read, not a shorter number.
+    Of 43 raw reads under 300 m on 2026-11-08, most were high altitudes with a digit
+    turned into a letter: '1B10 m' (1,810) parsed as 1, '38*6m' as 38, 'Y78 m'
+    (1,878) as 78. A false low altitude can start the pull-out and time-to-ground
+    climbs, so such a read is dropped, and the row's fallback passes get their turn.
+    """
+    words = text.split()
+    for i, word in enumerate(words):
+        if not any(ch.isdigit() for ch in word):
+            continue
+        negative = False
+        if word[0] in _ALT_MINUS_GLYPHS:
+            negative, word = True, word[1:]
+        elif i > 0 and words[i - 1] and words[i - 1][-1] in _ALT_MINUS_GLYPHS:
+            negative = True
+        if word[-1:] in ("m", "M"):
+            word = word[:-1]
+            labelled = True
+        else:
+            # A bare number of one or two digits is a fragment: after a respawn on
+            # 2026-11-08 12:36:06 a lone '3' seeded the altitude at 3 m (the spawn was at
+            # about 900 m). The low bare reads seen live were all 1 or 2 digits ('3', '6',
+            # '7', '8', '0', '30', '41'). OCR often drops the unit off a good read, and the
+            # row splitter keeps only boxes with digits, so a longer bare number stands.
+            nxt = words[i + 1].lower().rstrip(".,") if i + 1 < len(words) else ""
+            labelled = len(word) >= 3 or nxt in ("m", "feet", "ft")
+        if not word.isdigit() or not labelled:
+            return None
+        return -int(word) if negative else int(word)
+    return None
 
 
 def _split_telemetry_rows(ocr_results, img_height) -> "tuple[int | None, int | None, float, float]":

@@ -337,6 +337,13 @@ class ResupplyPassWatch:
     it last seen 53 px across or more; the other two (26 and 34 px) were not
     signed as passes either.
 
+    And the floor is 53 px, not 50. 2026-11-08 17:13:32, Crimson Canyon: the
+    marker dropped out 52 px across, about 1 km short of the ring, the pass was
+    signed, and the climb-out broke the dive; the marker was back below the nose
+    half a second later. Over the logs of 2026-11-01 to 11-08, the climb-outs
+    with the marker back within 3 s had it 49 to 52 px across in 34 of 59 with a
+    size; of 196 followed by a rearm, one had it under 53 (50 px).
+
     No I/O and no clock of its own: `update` is called once per steering tick.
     """
 
@@ -347,7 +354,7 @@ class ResupplyPassWatch:
 
     def __init__(self, *, missing_s: float = 0.5, min_off_centre_px: float = 35.0,
                  min_outward_px: float = 5.0, lined_up_px: float = 120.0,
-                 min_size_px: float = 50.0, min_approach_s: float = 2.0) -> None:
+                 min_size_px: float = 53.0, min_approach_s: float = 2.0) -> None:
         self.missing_s = max(0.0, float(missing_s))
         self.min_off_centre_px = float(min_off_centre_px)
         self.min_outward_px = float(min_outward_px)

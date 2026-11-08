@@ -30,6 +30,7 @@ import logging
 import math
 import os
 import random
+import time
 from dataclasses import dataclass
 
 import cv2
@@ -162,6 +163,7 @@ class TerrainService:
         self._last_fix: "Fix | None" = None
         self._last_map: "str | None" = None
         self._masks: dict = {}
+        self._climb_at: "float | None" = None    # monotonic time action() last said "climb"
 
     def has_map(self, map_name: "str | None") -> bool:
         return map_name is not None and map_name in self._maps
@@ -173,6 +175,7 @@ class TerrainService:
             return None
         self.arm = "map" if self._rng.random() < self.trial_share else "control"
         self.rounds += 1
+        self._climb_at = None
         return self.arm
 
     def warns(self, reading: "TerrainReading | None") -> bool:
@@ -322,7 +325,20 @@ class TerrainService:
         The best candidate when the straight path meets the ground within decide_s and a better
         one exists; the climb when nothing beats holding course and the 2 s warning fires; nothing
         when the straight path is clear (the warning's 15 deg spread alone does not fly), or the
-        reading is inside the ground."""
+        reading is inside the ground. A "climb" is remembered for `climb_wanted`."""
+        act = self._decide(reading)
+        if act == "climb":
+            self._climb_at = time.monotonic()
+        return act
+
+    def climb_wanted(self, max_age_s: float = 2.0) -> bool:
+        """ADR 174 revision 2: `action` said "climb" within `max_age_s`. The controller reads it so
+        that a map climb is not refused for a path that is already climbing: 2026-11-08 17:30:51,
+        climbing at +18 deg up the north-west canyon, the map saw the 1,061 m wall 2.9 s out, the
+        climb was refused as "level or climbing", and the aircraft hit the wall 2.6 s later."""
+        return self._climb_at is not None and time.monotonic() - self._climb_at <= max_age_s
+
+    def _decide(self, reading: "TerrainReading | None") -> "str | None":
         if not self.flies() or reading is None or reading.inside_ground or not reading.way_out:
             return None
         outs = reading.way_out
@@ -342,9 +358,9 @@ class TerrainService:
         """Design 020: each candidate manoeuvre's seconds to impact over the way-out horizon (None =
         clear), and the best: clear, or else the latest impact; ties to the one that turns least."""
         outs = {"hold": fly_candidate(data, x, z, vx, vz, height, climb_rate, 0.0, 0.0, self._way_out_h)}
-        for name, turn, pull, level in WAY_OUT_CANDIDATES:
+        for name, turn, pull, level, react in WAY_OUT_CANDIDATES:
             outs[name] = fly_candidate(data, x, z, vx, vz, height, climb_rate, turn, pull, self._way_out_h,
-                                       level_deg_s=level)
+                                       reaction_s=react, level_deg_s=level)
         def merit(name):
             v = outs[name]
             return float("inf") if v is None else v
@@ -370,17 +386,19 @@ class TerrainService:
 
 
 # Design 020 way_out: candidate manoeuvres as (turn deg/s, signed; pull deg/s of path angle;
-# level deg/s, raising a dive toward level). Rates measured 2026-11-08: wingman's heading
-# changed faster than 20 deg/s on 15% of ticks (p90 29); flown terrain turns came round at
-# about 40 deg/s level; pull-outs reach about 22 deg/s (Research 020). A turn is flown as a
-# bank and pull with the nose held up, so it also levels a dive: the 06:31:08 turn took the
-# nose from -32 to +8 deg in about 3 s. Order breaks ties: the one that turns least first.
+# level deg/s, raising a dive toward level; reaction s before it takes hold). Measured
+# 2026-11-08 over 19 flown terrain turns: the heading came round at a median of 10 deg/s
+# (1 to 43), and 7 of 8 deaths after a turn the model had called clear (at 25 deg/s after
+# 0.5 s) were crashes. So turns are modelled at 12 deg/s after a 1 s roll-in. Pull-outs
+# reach about 22 deg/s (Research 020). A turn is flown as a bank and pull with the nose held
+# up, so it also levels a dive: the 06:31:08 turn took the nose from -32 to +8 deg in about
+# 3 s. Order breaks ties: the one that turns least first.
 WAY_OUT_CANDIDATES = (
-    ("climb", 0.0, 22.0, 0.0),
-    ("left", -25.0, 0.0, 13.0),
-    ("right", 25.0, 0.0, 13.0),
-    ("left+climb", -18.0, 15.0, 0.0),
-    ("right+climb", 18.0, 15.0, 0.0),
+    ("climb", 0.0, 22.0, 0.0, 0.5),
+    ("left", -12.0, 0.0, 13.0, 1.0),
+    ("right", 12.0, 0.0, 13.0, 1.0),
+    ("left+climb", -10.0, 15.0, 0.0, 1.0),
+    ("right+climb", 10.0, 15.0, 0.0, 1.0),
 )
 
 

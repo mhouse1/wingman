@@ -30,6 +30,17 @@ terrain service's warning flies, judged by arms drawn per round.
   - Why: deciding at 5 s found a clear way out for 62 of 107 crashes against 12 at 2 s, and a turn is
     the only way out in about a fifth of path-into-terrain crashes (Design 020, "The way out").
   - Rounds before this revision (2026-11-08 01:07 to 04:2x) flew D1 and are scored apart.
+- **D6 (revision 2, 2026-11-08) — a climbing path does not refuse the map's climb.** Inside a pursuit,
+  the emergency climb was refused while the path was level or climbing, and it handed back as soon as
+  the path pointed up. A canyon wall rises faster than a +18 deg climb.
+  - On the 11-08 logs, 42 of 311 map warnings came on a level or climbing path and got no climb.
+    Another 90 were held off because a target or the resupply marker was in view.
+  - At 17:30:51 the map saw the 1,061 m wall of the north-west canyon 2.9 s out, with the climb
+    candidate clear. The climb was refused and the aircraft hit the wall 2.6 s later.
+  - Now, while the service said "climb" within the last 2 s, the recovery starts on a climbing path
+    and does not hand back for one.
+  - The hold-off for an objective in view is unchanged: breaking it would abort resupply approaches.
+  - Rounds before this revision are scored apart from those after it.
 - **D4 — the verdict.**
   - First: no-kill-card deaths per round, by arm, over at least 40 rounds per arm on maps with data.
   - Then: score per round by arm. Score is too noisy to judge on anything but arms drawn per round

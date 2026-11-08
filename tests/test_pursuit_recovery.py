@@ -442,6 +442,56 @@ def test_no_recovery_starts_on_a_level_or_climbing_path(monkeypatch, caplog):
     assert any("crash recovery not started" in r.getMessage() for r in caplog.records)
 
 
+class _MapSaysClimb:
+    """A real TerrainService whose last action was "climb" (ADR 174 revision 2)."""
+
+    def __new__(cls, now=True):
+        from wingman.terrain_service import TerrainService
+        service = TerrainService({"enabled": True})
+        if now:
+            service._climb_at = time.monotonic()
+        return service
+
+
+def test_a_map_climb_starts_the_recovery_on_a_climbing_path(monkeypatch, caplog):
+    """2026-11-08 17:30:51: climbing at +18 deg up the north-west canyon of Crimson
+    Canyon, the map saw the 1,061 m wall 2.9 s out and said climb; the recovery was
+    refused as "level or climbing" and the aircraft hit the wall 2.6 s later."""
+    analyzer = _Analyzer(altitude=900.0, angle=18.0)
+    ctrl = _crash_ctrl(monkeypatch, analyzer)
+    service = _MapSaysClimb()
+    ctrl.set_terrain_service(service)
+    ctrl._pursuing.set()
+    with caplog.at_level(logging.INFO, logger="wingman.controller"):
+        ctrl.climb_mode(emergency=True)
+        try:
+            assert _wait(ctrl.pursuit_recovery_active)
+            # While the map keeps saying climb, a path above level is not a hand-back.
+            for _ in range(8):
+                service._climb_at = time.monotonic()
+                time.sleep(0.1)
+            assert ctrl.is_climbing()
+            # The map clears (no climb for 2 s): the path above level hands back.
+            service._climb_at = time.monotonic() - 5.0
+            assert _wait(lambda: not ctrl.is_climbing(), timeout=3.0)
+        finally:
+            _stop(ctrl)
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "the map's ground rises faster" in text and "crash_cleared" in text
+
+
+def test_a_stale_map_climb_does_not_start_the_recovery_on_a_climbing_path(monkeypatch, caplog):
+    ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=5.0))
+    service = _MapSaysClimb()
+    service._climb_at = time.monotonic() - 5.0
+    ctrl.set_terrain_service(service)
+    ctrl._pursuing.set()
+    with caplog.at_level(logging.INFO, logger="wingman.controller"):
+        ctrl.climb_mode(emergency=True)
+    assert not ctrl.is_climbing()
+    assert any("crash recovery not started" in r.getMessage() for r in caplog.records)
+
+
 def test_the_shipped_config_enables_crash_recovery():
     import pathlib
 

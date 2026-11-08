@@ -322,6 +322,25 @@ def test_the_schema_keeps_the_trophies():
     assert "ALTER TABLE squadron_rankings ADD COLUMN IF NOT EXISTS trophies bigint;" in schema
 
 
+def test_the_schema_names_each_jet_once_by_its_letters_and_digits():
+    """Operator, 2026-11-08: F-106 DELTA DART and F106 DELTA DART were two jets on
+    the dashboard. The view keys a spelling the way `jet_name.same_jet` does, and is
+    replaced on every load, as the schema is applied before each one."""
+    schema = Path("grafana/schema.sql").read_text(encoding="utf-8")
+    assert "CREATE OR REPLACE VIEW jet_names AS" in schema
+    assert "regexp_replace(upper(tags->>'jet'), '[^A-Z0-9]', '', 'g')" in schema
+
+
+def test_every_panel_that_names_a_jet_names_it_through_the_view():
+    """A panel that groups by the spelling read splits one jet in two again."""
+    by_jet = [(title, sql) for title, sql in _dashboard_sql() if "tags->>'jet'" in sql]
+    assert len(by_jet) == 3
+    for title, sql in by_jet:
+        assert "JOIN jet_names ON spelling = tags->>'jet'" in sql, title
+        assert "tags->>'jet' AS" not in sql and "coalesce(tags->>'jet'" not in sql, title
+        assert "GROUP BY tags->>'jet'" not in sql, title
+
+
 # -- the dashboard ----------------------------------------------------------------
 
 _VAR_RE = re.compile(r"\$\{(\w+)(?::\w+)?\}|\$(\w+)")
@@ -457,7 +476,7 @@ def test_hovering_a_dot_names_the_rounds_account_jet_and_kda():
     nothing else from its row, so each account, jet and K/D/A is its own series."""
     hover, *_ = _score_per_round()
     assert "AS metric" in hover and "score AS value" in hover
-    for part in ("tags->>'account'", "tags->>'jet'", "K/D/A ", "kills", "deaths", "assists"):
+    for part in ("tags->>'account'", "coalesce(jet,", "K/D/A ", "kills", "deaths", "assists"):
         assert part in hover
     assert "manual_takeovers = 0 AND" not in hover, "an orange dot has its details too"
 
@@ -465,7 +484,8 @@ def test_hovering_a_dot_names_the_rounds_account_jet_and_kda():
 def test_a_round_with_no_jet_keeps_its_details():
     """In SQL a NULL jet would blank the whole name, and 548 read rounds have none."""
     hover, *_ = _score_per_round()
-    assert "coalesce(tags->>'jet', 'jet not recorded')" in hover
+    assert "coalesce(jet, 'jet not recorded')" in hover
+    assert "LEFT JOIN jet_names" in hover
 
 
 def test_the_hover_series_win_a_tie_with_the_account_dots():
@@ -516,7 +536,8 @@ def test_the_jet_panel_ranks_wingmans_rounds_and_shows_how_much_it_rests_on():
 def test_rounds_without_a_jet_are_shown_but_never_ranked_among_the_jets():
     sql = _by_jet()["targets"][0]["rawSql"]
     assert "'not recorded'" in sql
-    assert sql.index("tags->>'jet' IS NULL") < sql.index('"Mean score" DESC')
+    assert "LEFT JOIN jet_names" in sql
+    assert sql.index("ORDER BY jet IS NULL") < sql.index('"Mean score" DESC')
 
 
 def test_a_jet_with_few_rounds_cannot_top_the_jets_that_have_many():

@@ -999,7 +999,7 @@ SCHEMA = Section(
                     "min_off_centre_px": Leaf(types=NUMBER, minimum=0, default=35),
                     "min_outward_px": Leaf(types=NUMBER, default=5),
                     "lined_up_px": Leaf(types=NUMBER, minimum=0, default=120),
-                    "min_size_px": Leaf(types=NUMBER, minimum=0, default=50),
+                    "min_size_px": Leaf(types=NUMBER, minimum=0, default=53),
                 }),
                 # The frame in which a resupply marker first appears, saved to
                 # tests/test-output/target_tracking, two per pursuit at most.

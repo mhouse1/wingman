@@ -337,6 +337,18 @@ def test_a_marker_still_too_small_to_fly_through_is_not_a_pass():
                            then_missing_s=3.0)) == 1
 
 
+def test_a_marker_lost_52_px_across_is_still_a_kilometre_out():
+    """2026-11-08 17:13:32, Crimson Canyon: the marker dropped out 52 px across,
+    the pass was signed, and the climb-out pulled the aircraft off a ring still
+    about 1 km away; the marker was back half a second later. Over 11-01 to 11-08
+    the climb-outs with the marker back within 3 s were mostly 49 to 52 px; one
+    rearm in 196 had it under 53."""
+    assert _fly_marker(ResupplyPassWatch(), _APPROACH + _SWEEP, size=52,
+                       then_missing_s=3.0) == []
+    assert len(_fly_marker(ResupplyPassWatch(), _APPROACH + _SWEEP, size=53,
+                           then_missing_s=3.0)) == 1
+
+
 def test_the_next_pass_needs_its_own_approach():
     watch = ResupplyPassWatch()
     assert len(_fly_marker(watch, _APPROACH + _SWEEP, then_missing_s=1.0)) == 1

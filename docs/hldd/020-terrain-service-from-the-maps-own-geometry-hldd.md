@@ -608,6 +608,168 @@ Operator, 2026-11-08: "in this case turning left or right after the resupply wou
   - At 07:42:35.5 (506 m) the straight path hits at 3.9 s. The action is left, with left and right both
     clear for 5 s. That is a tick before the real decision, which had nothing clear.
 
+### The flown way out over 41 rounds, and an honest turn model (2026-11-08)
+
+- **Trial arms on the way-out rule** (04:47 to 09:20; rounds on maps with data; measured):
+
+| Arm | Rounds | Crashes per round | Score per round | Terrain turns per round |
+|---|---|---|---|---|
+| map | 20 | 0.90 | 336 | 1.1 |
+| control | 21 | 1.29 | 356 | 0 |
+
+  30% fewer crashes in the `map` arm at about the same score. 18 against 27 crashes is not yet
+  significant (one-sided p about 0.2).
+- **The 21 flown terrain turns (measured).**
+  - The heading came round at a median of 10 deg/s (1 to 43), against the model's 25.
+  - 10 were followed by a respawn within 8 s. Of the 15 the model had called clear, 8 died: 7 crashes
+    and 1 kill.
+  - Most decisions came with the straight path 1 to 2.5 s from impact, not 4 to 5 s.
+  - Most of these turns predate the fresh-altitude fix (08:35).
+- **Turn model brought to measurement (built 2026-11-08 09:30).**
+  - Left and right turn at 12 deg/s after a 1.0 s roll-in. The climbing turns turn at 10 deg/s after
+    1.0 s. The climb keeps 22 deg/s after 0.5 s.
+  - Replaying 07:42 with this model and fresh altitude, it acts at 07:42:35.5 and turns left. That is no
+    longer called clear: left is the latest impact, at 4.9 s.
+
+### Altitude reads: garbles dropped, and a real negative (2026-11-08)
+
+- **What the raw text showed (measured).** 43 low reads (`ALT RAW:`, 07:22 to 11:00) were mostly high
+  altitudes with a digit read as a letter. The old parser took the first digits:
+  - `1B10 m` (1,810) parsed as 1, `Y78 m` (1,878) as 78, and `38*6m` as 38.
+  - Other garbles of the same kind: `e188`, `1g03 m`, `17M7 m`, `208Bm` and `12o56`.
+  - A false low altitude can start the pull-out and time-to-ground climbs.
+- **Now built (`_altitude_token_value`).** The altitude token must be digits, with an optional minus
+  glyph in front and an `m` behind. Anything else makes the read unreadable, and the row's fallback
+  passes get their turn.
+  - On the 43 reads it drops 28, every one of them a garble, and keeps 9 clean ones.
+  - Of the kept, `125 m` to `298 m` are low passes, and `-142m` is a real negative: 08:43:22 on Crimson
+    Canyon over ground at -139, at the crash.
+  - It also drops `'1973 m`, probably a real 1,973. Losing a read there is the safe failure.
+- **The sign fix works live.** `-142m` is the first negative altitude read in flight, at the moment the
+  aircraft met the canyon floor.
+- **First live run of the parse fix.** It started 2026-11-08 12:21 on account 3 (`make r3`), with the
+  measured turn model. The code is commit `ebdc2be` plus the uncommitted `analyzer.py` and
+  `terrain_service.py` changes, gated at 4,087 passed. The game content build is unchanged
+  (2026-10-28_08-50).
+  - Before it, the account 2 session (10:21 to 12:11, old parser) accepted 4 impossible low stable
+    altitudes, 4.0 m among them. That is the garble the fix drops.
+  - Watched for: any stable altitude under 20 m in battle.
+  - **Seen at 12:36:06 (measured).** After a respawn, a bare `3` (no unit) seeded the altitude at 3.0 m.
+    The next read was 893 m, the spawn. The low bare reads seen live were all fragments of one or two
+    digits (`3`, `6`, `7`, `8`, `0`, `30`, `41`).
+  - **Fixed.** A token without a unit (`m` attached, or `m`/`feet` as the next word) must have three
+    digits or more. The real-image telemetry corpus test still passes, since OCR often drops the unit
+    off a good read and the row splitter keeps only boxes with digits.
+
+### The measured turn model in flight (2026-11-08, 10:21 to 14:17)
+
+Sessions: account 2 (10:21 to 12:11), account 3 (12:21 to 13:17 and 13:17 on). Measured.
+
+- **Terrain turns.** 13 flown. 12 were survived for 8 s, and 1 crashed (the model had called it clear).
+  On the 25 deg/s model before it, 11 of 21 were survived.
+- **Trial arms on this rule** (rounds on maps with data):
+
+| Arm | Rounds | Crashes per round | Score per round |
+|---|---|---|---|
+| map | 18 | 1.00 (18 crashes) | 536 |
+| control | 21 | 1.10 (23 crashes) | 544 |
+
+  No difference to speak of yet. Each change to the way-out rule splits the trial, so the rule is held
+  steady until both arms reach 40 or more rounds.
+- **Impossible low altitudes.** Account 2 (old parser) accepted 4. The first account 3 run accepted 1
+  (the bare `3`). The run since the fragment fix (13:17) has accepted none.
+
+### Deciding earlier from the heading: rejected (2026-11-08, measured)
+
+The idea: project the straight path along the compass heading (current each tick) rather than the
+track between two fixes 1.5 s apart, which lags in a turn. Replayed on 2026-11-08's logs (50 crashes with
+a track in the 8 s before, 14,544 ordinary ticks):
+
+| Projection | Acted before | A clear way out at the first act | Acts on ordinary ticks |
+|---|---|---|---|
+| fix track (as flown) | 37 of 50 | 18 | 7.1% |
+| compass heading | 39 of 50 | 20 | 7.0% |
+
+- **Verdict.** No real gain. It is not built, which spares a rule change that would split the trial.
+- **What limits saves.** It is that a clear way out exists at the first act for only 18 to 20 of 50
+  crashes. Most are already boxed in when any projection sees them.
+- **Where crashes happen (two days of logs, 404 crashes).** 79 (20%) came within 10 s of flying at the
+  resupply marker, the 07:42 pattern.
+- **The next target: Phase 6, starting with the resupply approach.** Before and during a resupply run,
+  check that the pass through the ring leaves a way out, and change the approach when it does not. It
+  needs a design of its own: the marker is on screen, not on the map.
+
+### Phase 6, first target: a resupply pass that leaves a way out (design, 2026-11-08)
+
+- **The trial so far** (current rule, 10:21 to 16:19; measured): `map` 30 rounds, 1.07 crashes a
+  round; `control` 28 rounds, 1.32. That is 19% fewer, with a one-sided p of 0.22. Score is 488
+  against 515, within its noise.
+- **Ring positions are not in the game files (measured).** `tools/extract_locators.py`, run with the
+  game closed, finds in every map's scene a `MapObjectiveAndPickupLocatorSpawner` that holds only
+  references to the pickup and objective prefabs. The scenes name capture-point scenery but no resupply
+  locators. Rings are placed at run time (inferred: by the game mode), so the plan has to locate them
+  live.
+- **Locating a ring live.**
+  - The resupply marker's place on screen gives its bearing from the nose: horizontal from the marker's
+    x and the camera's field of view, vertical from its y. Off screen, the ring pin gives the
+    horizontal bearing.
+  - With the fix and heading each tick, two bearings from points a few hundred metres apart cross at
+    the ring, with no distance needed. More ticks refine it.
+  - The marker's growing size is a check on range.
+- **Planning the pass.** With the ring on the map, project the run through it and the exits beyond it
+  (`way_out` from the ring's position, at the run's speed and descent):
+  - If no exit is clear, take an approach that leaves one: offset to the open side, or come in along the
+    canyon, not across it.
+  - If none exists, skip the ring this pass. That is ADR 172's hold-off, but decided by the map rather
+    than by a coin.
+- **Steps.**
+  1. Log the marker's bearing with the fix and heading. Triangulate offline, and check it against the
+     place the aircraft re-arms (`AIRCRAFT RE-ARMED`).
+  2. Shadow the pass plan.
+  3. Fly it per round.
+- **Step 1, done offline (2026-11-08, measured; `tools/triangulate_resupply.py`).**
+  - **No new logging was needed.** The `RESUPPLY:` lines give the marker's screen position and size
+    about three times a second; `TERRAIN:` and BT lines give the fix and heading; `RESUPPLY: rearm
+    climb-out` marks the re-arm. The check used 49 re-arms from four sessions, with the padlock off.
+  - **Bearings alone fail along the line of sight.** Wingman flies nearly straight at the marker (a
+    median of 64 px from screen centre), so the rays are near parallel. Across track the median error
+    is 156 m; along track it is 1,481 m. The field of view (60 to 110 deg tried, 70 best) does not rescue
+    it.
+  - **Marker size gives a coarse range.** Median sizes: 60 px at 200 to 600 m, 54 px at 600 to
+    1,200 m, 44 px at 1,200 to 2,500 m, 36 px at 2,500 to 6,000 m. The correlation with 1/distance is
+    0.75. It is an icon that scales only mildly, not one drawn to size.
+  - **Bearing with a size-read range** puts the ring at a median 335 m from the fix at the re-arm: 47%
+    within 300 m and 73% within 500 m.
+  - Caveats: the size table is fitted on the same data. The re-arm line comes after the aircraft has
+    passed through the ring, so the reference itself carries an offset along track.
+  - Not yet the about 200 m a pass plan needs. Next: a better reference (the closest approach to the
+    marker's line, or the moment the marker leaves the screen), and checking the size table on held-out
+    sessions.
+- **Every resupply run, before and after (2026-11-08, measured; `tools/resupply_runs.py`).** At the
+  operator's request, each rearm run is now reviewed from its start (`missiles exhausted` or
+  `urgency overtook`) to its end (re-arm, death card, or round end). Crimson Canyon, 11-01 to 11-08:
+  - **Outcomes:** 419 runs. Killed 37%, crash 29%, re-arm 20%, round end 14%. On the 11-08 logs,
+    Crimson re-armed in 20% of runs against 39% on the other maps.
+  - **The rings sit at fixed sites, so the triangulation above is not needed on Crimson.** The re-arm
+    fixes cluster at four sites: (-3082,3087) at 395 m altitude, 574 m above the river (8 re-arms);
+    (3227,-3154) at 416 m, 564 m above it (6); (324,-1252) at 1,598 m, 388 m above the plateau (16); and
+    (218,-1818) at 1,648 m (2).
+  - **Crashes come after the approach is abandoned, not on it.**
+    - 88 of 121 crashes came more than 8 s after the marker last had the steering.
+    - About 13 came on the approach itself.
+    - 20 came in runs where the marker never took the steering.
+  - **What breaks the approach off:**
+    - a map-warning climb, in 42 runs that did not re-arm;
+    - a dive steeper than the ring needed, in 35 (17:13: -90 deg where 28 deg reached the ring);
+    - starting too high to make the ring straight, in 27;
+    - a false pass climb-out, in 11.
+  - **False pass climb-outs, fixed.** Across the 11-01 to 11-08 logs, 36 of the 62 climb-outs whose
+    marker came back within 3 s had it 52 px across or less. Only 1 of the 196 climb-outs a re-arm
+    followed had it under 53. `pass_trigger.min_size_px` goes from 50 to 53.
+  - **Next: plan the descent to the known ring height.** Start the descent from the fix at no more
+    than about 15 deg and under about 700 kph, and level at the ring's height. The map warning should
+    then judge that planned path, not the straight dive extended past the ring.
+
 ## All six arenas (2026-11-07)
 
 `test_screenshots/terrain/tools/build_all_maps.py` built every map with the game closed, in 75 s. The

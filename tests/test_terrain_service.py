@@ -265,10 +265,11 @@ def _cell(v):
 
 
 def test_a_canyon_bend_is_cleared_by_turning_not_by_climbing(tmp_path, texture):
-    """North at 250 m/s, 300 m up, along a canyon floor; a 3,000 m wall 750 m ahead and to the
-    right, open ground to the left. Climbing cannot top the wall in time; turning left can."""
+    """North at 250 m/s, 300 m up, along a canyon floor; a 3,000 m wall 800 m ahead from 50 m right
+    of track eastward, open ground to the left. Climbing cannot top the wall in time; a left turn
+    at the measured 12 deg/s after a 1 s roll-in (radius about 1.2 km) slips past its edge."""
     top = np.full((1600, 1600), -200.0, np.float32)
-    top[_cell(750):, _cell(-600):] = 3000.0           # the wall ahead, from x = -600 m eastward
+    top[_cell(800):, _cell(-50):] = 3000.0            # the wall ahead, from x = -50 m eastward
     svc, data = _grid_map(tmp_path, texture, top)
     outs, best = svc.way_out(data, 0.0, 0.0, 0.0, 250.0, 300.0, 0.0)
     assert outs["hold"] is not None and outs["climb"] is not None
@@ -322,7 +323,7 @@ def _reading_for(svc, data, vx, vz, alt, rate=0.0, x=0.0, z=0.0):
 @pytest.mark.parametrize("arm, expect", [("map", "left"), ("control", None)])
 def test_the_action_at_a_canyon_bend_is_a_left_turn_in_the_map_arm(tmp_path, texture, arm, expect):
     top = np.full((1600, 1600), -200.0, np.float32)
-    top[_cell(750):, _cell(-600):] = 3000.0
+    top[_cell(800):, _cell(-50):] = 3000.0
     svc, data = _grid_map(tmp_path, texture, top)
     svc.arm = arm
     assert svc.action(_reading_for(svc, data, 0.0, 250.0, 300.0)) == expect
@@ -388,10 +389,33 @@ def test_a_turn_levels_a_dive_as_the_bank_and_pull_does(tmp_path, texture):
     dive (06:31:08: nose -32 to +8 deg in about 3 s), so the turn clears."""
     from wingman.terrain_service import fly_candidate
     top = np.full((1600, 1600), 0.0, np.float32)            # canyon floor at 0 m
-    top[_cell(750):, _cell(-600):] = 3000.0                  # the wall ahead and to the right
+    top[_cell(800):, _cell(-50):] = 3000.0                   # the wall ahead and to the right
     svc, data = _grid_map(tmp_path, texture, top)
-    held = fly_candidate(data, 0.0, 0.0, 0.0, 250.0, 500.0, -120.0, -25.0, 0.0, 5.0)
-    levelled = fly_candidate(data, 0.0, 0.0, 0.0, 250.0, 500.0, -120.0, -25.0, 0.0, 5.0, level_deg_s=13.0)
+    held = fly_candidate(data, 0.0, 0.0, 0.0, 250.0, 500.0, -120.0, -12.0, 0.0, 5.0, reaction_s=1.0)
+    levelled = fly_candidate(data, 0.0, 0.0, 0.0, 250.0, 500.0, -120.0, -12.0, 0.0, 5.0,
+                             reaction_s=1.0, level_deg_s=13.0)
     assert held is not None and levelled is None
     outs, best = svc.way_out(data, 0.0, 0.0, 0.0, 250.0, 500.0, -120.0)
     assert outs["climb"] is not None and outs["left"] is None and best == "left"
+
+
+def test_climb_wanted_remembers_the_last_climb_for_two_seconds(monkeypatch):
+    """ADR 174 revision 2: the controller asks whether the map said climb lately."""
+    import wingman.terrain_service as ts
+    service = ts.TerrainService({"enabled": True})
+    clock = [100.0]
+    monkeypatch.setattr(ts.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(service, "_decide", lambda reading: "climb")
+    assert not service.climb_wanted()
+    assert service.action(None) == "climb"
+    clock[0] += 1.9
+    assert service.climb_wanted()
+    clock[0] += 0.2
+    assert not service.climb_wanted()
+    monkeypatch.setattr(service, "_decide", lambda reading: "left")
+    service.action(None)
+    assert not service.climb_wanted()
+    service._climb_at = clock[0]
+    service.trial_share = 0.5
+    service.new_round()
+    assert not service.climb_wanted()

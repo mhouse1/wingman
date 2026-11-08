@@ -1699,8 +1699,8 @@ def main():
         # Design 020 Phase 4 (shadow): the fix on the map and time to impact,
         # logged as TERRAIN: on battle ticks of a map with data. Live only, like
         # the looming: replay frames carry no map read at matchmaking.
-        behavior_tree.set_terrain_service(TerrainService(cfg.get("terrain_service")),
-                                        round_note=stats_tracker.on_event)   # ADR 174
+        terrain = TerrainService(cfg.get("terrain_service"))
+        behavior_tree.set_terrain_service(terrain, round_note=stats_tracker.on_event)  # ADR 174
         # Code Review 019 step 3a: the same measurement on the pursuit's own
         # frames, with its own detector instances. Live only, for the reason
         # above: the pursuit's grabs are scripted screenshots in those lanes.
@@ -1727,6 +1727,8 @@ def main():
             ctrl.set_agreement_trial(AgreementTrial(float(_agree_cfg.get(
                 "resupply_holdoff_share", schema_default(
                     "behavior_tree.climb.warning_agreement.resupply_holdoff_share")))))
+        # ADR 174 revision 2: the map's climb is not refused on a climbing path.
+        ctrl.set_terrain_service(terrain)
         # Cycle 11: relative depth from a monocular model, in a worker process
         # that loads it in the background (shadow; stopped by ctrl.cleanup()).
         depth_view = DepthPerception(cfg.get("depth_view"))

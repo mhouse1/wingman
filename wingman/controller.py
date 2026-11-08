@@ -1983,6 +1983,19 @@ class Controller:
         pictures to (shadow), or None."""
         self._depth_perception = perception
 
+    def set_terrain_service(self, service) -> None:
+        """ADR 174 revision 2: the terrain service, so that its climb is not refused
+        for a path that is already climbing (`_map_climb_wanted`)."""
+        self._terrain_service = service
+
+    def _map_climb_wanted(self) -> bool:
+        service = getattr(self, "_terrain_service", None)
+        try:
+            return bool(service is not None and service.climb_wanted())
+        except Exception:
+            logger.exception("Controller: terrain service climb check failed")
+            return False
+
     def set_warning_agreement(self, agreement) -> None:
         """Code Review 019 cycle 25: the terrain-warning tracker; while it
         agrees, the crash recovery is not held off for a goal in view."""
@@ -6788,7 +6801,12 @@ class Controller:
             # or above level overrides the tree's lagging mean, or every tick of that
             # lag would start a hold, tap the airbrake and hand straight back.
             _path = self._telemetry_path_angle_deg()
-            if _path is not None and _path >= 0.0:
+            # ADR 174 revision 2: the map sees the ground ahead rising faster than
+            # the path climbs (a canyon wall), so its climb is not refused here.
+            if _path is not None and _path >= 0.0 and self._map_climb_wanted():
+                logger.info("Controller: crash recovery starts on a climbing path (%+.0f deg) — "
+                            "the map's ground rises faster (ADR 174)", _path)
+            elif _path is not None and _path >= 0.0:
                 now = time.time()
                 if now - self._dive_recovery_suppressed_log_ts >= 10.0:
                     self._dive_recovery_suppressed_log_ts = now
@@ -7959,9 +7977,12 @@ class Controller:
                                 _objective, time.time() - recovery_since)
                             exit_reason = "objective_in_view"
                             break
+                        # ADR 174 revision 2: a path pointing up is not clear while
+                        # the map still says climb (the wall rises faster than it).
                         if (_recovering and recovery_since is not None
                                 and _climbing_now
-                                and not self._pursuit_dive_safety):
+                                and not self._pursuit_dive_safety
+                                and not self._map_climb_wanted()):
                             logger.info(
                                 "Controller: climb — crash no longer predicted after "
                                 "%.1fs (path %s), handing the airframe back to the chase",
