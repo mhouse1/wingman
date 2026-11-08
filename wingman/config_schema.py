@@ -1178,6 +1178,10 @@ SCHEMA = Section(
             "nose_direction_deadband_mps": _num(0),   # ADR 123
             "max_speed_mph": _num(0),
             "max_altitude_ft": _num(0),
+            # Design 020: the HUD shows the map mesh's height, signed; it reads -206 m
+            # over Crimson Canyon's water. The lowest geometry on any map is Crucible's
+            # kill floor at -1,480 m (measured 2026-11-07).
+            "min_altitude_m": Leaf(types=NUMBER, maximum=0, default=-1600.0),
             "max_speed_change_mph_s": _num(0),
             "max_altitude_change_fps": _num(0),
             "plausibility_margin": _num(0),
@@ -1220,6 +1224,48 @@ SCHEMA = Section(
                 "heatdive_padlock_verify": BOOL,
                 "telemetry_confirm_polls": _int(0),
             }),
+        }),
+
+        # Design 020 Phase 4 (shadow): position on the map from the minimap and time to
+        # impact against the game's collision meshes. Logged as TERRAIN:, steers nothing.
+        "terrain_service": Section(children={
+            "enabled": Leaf(types=(bool,), default=True),
+            # MATCH map name -> its minimap texture and height map, built offline
+            # (test_screenshots/terrain/tools/). A map with no entry, or missing
+            # files, gets no reading.
+            "maps": MapOf(Section(children={"minimap": STR, "height": STR})),
+            # ttc_m: the path must clear the ground by this much (Design 020, 39 live
+            # crashes: 0 m warned 67% at 4.6% of ordinary ticks, 150 m 85% at 6.6%).
+            "clearance_margin_m": Leaf(types=NUMBER, minimum=0, default=150.0),
+            # ADR 174: ttc_y at or under warn_s is a map warning; in the `map` arm,
+            # drawn per round with this share, it starts the emergency climb.
+            "warn_s": Leaf(types=NUMBER, minimum=0.1, maximum=10, default=2.0),
+            "trial_share": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.5),
+            # Design 020 way_out (shadow): how far each candidate manoeuvre is projected
+            # on a warning tick (the offline check over 93 crashes used 5 s).
+            "way_out_horizon_s": Leaf(types=NUMBER, minimum=1, maximum=10, default=5.0),
+            # ADR 174 revised: in the `map` arm, fly the way out once the straight path
+            # meets the ground within this many seconds (offline, 107 crashes: a clear way
+            # out at 5 s for 62, at 2 s for 12; about two acts a round).
+            "decide_s": Leaf(types=NUMBER, minimum=0.5, maximum=10, default=5.0),
+            # How long the bank-and-pull of a terrain turn may run before it re-decides.
+            "turn_max_s": Leaf(types=NUMBER, minimum=0.5, maximum=10, default=3.0),
+            # Metres per pixel of the MINIMAP crop at 320 px wide (measured: 34).
+            "mpp_at_320px": Leaf(types=NUMBER, minimum=1, default=34.0),
+            # A fix needs this correlation, and this margin over the best match
+            # more than 1 km away (Design 020 Phase 1: 0.4 and 0.15).
+            "min_score": Leaf(types=NUMBER, minimum=-1, maximum=1, default=0.4),
+            "min_gap": Leaf(types=NUMBER, minimum=0, maximum=2, default=0.15),
+            "horizon_s": Leaf(types=NUMBER, minimum=0.1, maximum=10, default=3.0),
+            "track_spread_deg": Leaf(types=NUMBER, minimum=0, maximum=90, default=15.0),
+            # Two fixes further apart than this give no ground speed.
+            "max_fix_gap_s": Leaf(types=NUMBER, minimum=0.2, default=2.0),
+            # With a fix that recent, search this far round it before the whole map
+            # (cost: about 40 ms a tick for the whole map, measured 2026-11-07).
+            "search_window_m": Leaf(types=NUMBER, minimum=500, default=2500.0),
+            # Blur the crop and the texture by this much before matching (Stone Forest's
+            # trees: 0 of 55 recorded crops fixed unblurred, 50 of 55 at 100 m).
+            "match_blur_m": Leaf(types=NUMBER, minimum=0, maximum=500, default=100.0),
         }),
 
         # Performance 008 — periodic RESOURCE line for long-session leak diagnosis.

@@ -2266,6 +2266,59 @@ telemetry:
     heatdive_enabled: true,  # ADR 136: heat-seeker switch + tracking-guided roll during the dive
     heatdive_padlock_verify: false,  # ADR 136 D4: off — detector tracks the wrong HUD element (2026-09-09)
     telemetry_confirm_polls: 4}  # Anomaly 003: 4 x check_interval_s = 6.0s of fresh telemetry resumes control without waiting on respawn OCR
+# Design 020 Phase 4 (shadow): a TERRAIN: line each battle tick on a map with data —
+# the fix on the map and the time to impact under both readings of the HUD altitude.
+# The data is built offline into the untracked test_screenshots/terrain/ with
+# tools/build_all_maps.py (the game closed); all six arenas, 2026-11-07.
+terrain_service:
+  enabled: true
+  # The game's map names (MATCH:) to their data. ICEBOUND = arctic-3 and STORMBREAK =
+  # seastacks are inferred from the minimaps; a wrong pairing shows as weak-match fixes.
+  # Variants share their day geometry (measured: under 0.02% of cells differ); ICEBOUND
+  # SNOW has its own build.
+  maps:
+    CRIMSON CANYON:
+      minimap: test_screenshots/terrain/content-2026-10-28_08-50/crimson-canyon-day/crimson-canyon-minimap.png
+      height: test_screenshots/terrain/content-2026-10-28_08-50/crimson-canyon-day/crimson-canyon-height-16m.npz
+    CRIMSON CANYON SUNRISE:
+      minimap: test_screenshots/terrain/content-2026-10-28_08-50/crimson-canyon-day/crimson-canyon-minimap.png
+      height: test_screenshots/terrain/content-2026-10-28_08-50/crimson-canyon-day/crimson-canyon-height-16m.npz
+    CRIMSON CANYON NIGHT:
+      minimap: test_screenshots/terrain/content-2026-10-28_08-50/crimson-canyon-day/crimson-canyon-minimap.png
+      height: test_screenshots/terrain/content-2026-10-28_08-50/crimson-canyon-day/crimson-canyon-height-16m.npz
+    STONE FOREST:
+      minimap: test_screenshots/terrain/content-2026-10-28_08-50/stoneforest-day/stoneforest-minimap.png
+      height: test_screenshots/terrain/content-2026-10-28_08-50/stoneforest-day/stoneforest-height-16m.npz
+    STONE FOREST NIGHT:
+      minimap: test_screenshots/terrain/content-2026-10-28_08-50/stoneforest-day/stoneforest-minimap.png
+      height: test_screenshots/terrain/content-2026-10-28_08-50/stoneforest-day/stoneforest-height-16m.npz
+    COUNTDOWN:
+      minimap: test_screenshots/terrain/content-2026-10-28_08-50/countdown-day/countdown-minimap.png
+      height: test_screenshots/terrain/content-2026-10-28_08-50/countdown-day/countdown-height-16m.npz
+    COUNTDOWN NIGHT:
+      minimap: test_screenshots/terrain/content-2026-10-28_08-50/countdown-day/countdown-minimap.png
+      height: test_screenshots/terrain/content-2026-10-28_08-50/countdown-day/countdown-height-16m.npz
+    STORMBREAK:
+      minimap: test_screenshots/terrain/content-2026-10-28_08-50/seastacks-day/seastacks-minimap.png
+      height: test_screenshots/terrain/content-2026-10-28_08-50/seastacks-day/seastacks-height-16m.npz
+    STORMBREAK NIGHT:
+      minimap: test_screenshots/terrain/content-2026-10-28_08-50/seastacks-day/seastacks-minimap.png
+      height: test_screenshots/terrain/content-2026-10-28_08-50/seastacks-day/seastacks-height-16m.npz
+    CRUCIBLE:
+      minimap: test_screenshots/terrain/content-2026-10-28_08-50/crucible-day/crucible-minimap.png
+      height: test_screenshots/terrain/content-2026-10-28_08-50/crucible-day/crucible-height-16m.npz
+    CRUCIBLE NIGHT:
+      minimap: test_screenshots/terrain/content-2026-10-28_08-50/crucible-day/crucible-minimap.png
+      height: test_screenshots/terrain/content-2026-10-28_08-50/crucible-day/crucible-height-16m.npz
+    ICEBOUND:
+      minimap: test_screenshots/terrain/content-2026-10-28_08-50/arctic-3-day/arctic-3-minimap.png
+      height: test_screenshots/terrain/content-2026-10-28_08-50/arctic-3-day/arctic-3-height-16m.npz
+    ICEBOUND NIGHT:
+      minimap: test_screenshots/terrain/content-2026-10-28_08-50/arctic-3-day/arctic-3-minimap.png
+      height: test_screenshots/terrain/content-2026-10-28_08-50/arctic-3-day/arctic-3-height-16m.npz
+    ICEBOUND SNOW:
+      minimap: test_screenshots/terrain/content-2026-10-28_08-50/arctic-3-day/arctic-3-minimap.png
+      height: test_screenshots/terrain/content-2026-10-28_08-50/arctic-3-day/arctic-3-snow-height-16m.npz
 # ADR 090 — bound the unfixed Performance 008 leak. Soft limit stops at the
 # next lobby (no mission in flight); hard limit stops immediately, because an
 # OOM kill can take the whole desktop session down with it.

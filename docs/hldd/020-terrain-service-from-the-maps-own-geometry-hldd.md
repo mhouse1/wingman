@@ -24,19 +24,19 @@ and answers two questions for the rest of wingman:
 
 Each stage is scored offline against recorded crashes and ordinary flight before anything flies, as
 [Research 017](../research/017-camera-vision-for-terrain-avoidance.md) scored its candidates. The first
-stage needs one decision from the operator: unpacking the game's installed files to read the collision
-meshes ("Open decisions").
+stage, unpacking the game's installed files to read the collision meshes, ran on 2026-11-07 ("Phase 0
+results").
 
 ## Status
 
 | Phase | What | Status | Evidence |
 |---|---|---|---|
-| 0 | One map's height map from its collision meshes | Not started: waits on the unpacking decision | |
-| 1 | Position on the map from the minimap | Not started; [Design 017](017-terrain-map-from-flight-footage-hldd.md) measured the minimap's raw signals | |
+| 0 | One map's height map from its collision meshes | Height map built 2026-11-07; matches the game's own minimap texture. The ten-frame check is open | "Phase 0 results" |
+| 1 | Position on the map from the minimap | Live, full resolution, 2026-11-07: a fix on 92% of crops where the compass reads, 99.6% continuous. The HUD altitude offset is open | "Phase 1 results" |
 | 2 | State brought up to now: the reading carried forward, bank from the picture | Not started | |
-| 3 | Trajectory predictor and the two queries, scored offline | Not started | |
-| 4 | Shadow live | Not started | |
-| 5 | The way out flies, as a per-round trial | Not started | |
+| 3 | Trajectory predictor and the two queries, scored offline | Passes on 39 live Crimson Canyon crashes (2026-11-07): with no margin it warns before 67% at 4.6% of ordinary ticks, against the pull-out's 26.4% at 5.3%. One map only; `way_out()` not built | "Clearance margin sweep" |
+| 4 | Shadow live | Built 2026-11-07: `wingman/terrain_service.py` logs a `TERRAIN:` line each battle tick on Crimson Canyon (day and sunrise): the fix, the ground, the speed, and the time to impact under both HUD readings. Median 7.3 ms a tick | "Phase 4 shadow" |
+| 5 | The way out flies, as a per-round trial | First step built 2026-11-08 ([ADR 174](../adr/174-the-map-warning-starts-the-emergency-climb-in-half-the-rounds.md)): in half the rounds a `ttc_y` of 2 s or less starts the existing emergency climb. Choosing the way out is not built | ADR 174 |
 | 6 | Behavior tree tactics on the service | Not started | |
 
 ## Why
@@ -235,11 +235,417 @@ planning for the resupply, control points and the priority target; holding a con
 follows a target low; terrain masking against missiles. The terrain triggers it outperforms are retired then,
 each by its own ADR.
 
+## Phase 0 results (2026-11-07)
+
+Crimson Canyon (day scene), content build 2026-10-28_08-50. Tools and outputs are in the untracked
+`test_screenshots/terrain/` folder (see its README). Measured unless marked.
+
+- **The files are readable.** All 11,617 bundles in `Metalstorm_Data/content-bundle` are plain UnityFS
+  (Unity 6000.3.25f1, LZ4), and UnityPy 1.25.4 reads them. Indexing every bundle takes 7 s. The bundle
+  names are readable (`…_maps_map-crimson-canyon_map-crimson-canyon-day-scene_unity`), so a map is found by
+  name. Six scenes cover the map: day, sunrise and night, each at full and low quality.
+- **The ground is meshes only.** The day scene has 218 `MeshCollider`s and no Unity Terrain. 217 resolve
+  to 562,242 world-space triangles. The 218th is the water plane, a solid collider at y = -232.3 m
+  spanning about 31 km. All are on layer 0 except the two tunnel props (layer 20), and none is a trigger.
+  The ground is at about -165 m, mesa tops are at 1,400 to 1,450 m, and the highest point is 2,282 m.
+- **Height map.** 16 m cells over ±12.8 km (1,600 by 1,600), built in 5 s. Each cell holds the top surface
+  and, where there is one, an overhang: the lowest underside with at least 100 m of air below it.
+  4.5% of cells have an overhang, mostly undercut cliff lips round the mesas and the outlying spawn rocks.
+- **Frame and scale.** The game's minimap texture (4,096 px) spans exactly ±10,000 m and is centred on the
+  origin, with +x east and +z north. The texture's river matches the height map's water at IoU 0.61,
+  against 0.13 and 0.16 for the two mirror images. The texture's grid rings fall every 1,000 m out to
+  9,950 m. That puts the arena edge at a 10 km circle (inferred: the outermost ring), inside Design 017's
+  measured 8.8 to 10.3 km. A render of the height map puts the canyon, the river, the road arms, the
+  islands and the pillars where the texture draws them (`crimson-canyon-render-800.png` beside
+  `crimson-canyon-minimap.png`).
+- **Not done: the ten-frame check against recorded minimaps.** `CompassReader` reads no heading on the
+  960 by 600 demonstration frames, at 1x or 2x, so the rotation is unknown. A blind search over rotation,
+  scale and position matched noise: scores of about 0.3, the scale stuck at the edge of the range, and its
+  one high score (0.95) fell on a frame of sky. Registering frames is Phase 1's open measurement, so this
+  check moves there. It needs full-resolution minimap crops with a compass reading.
+- **HUD altitude against mesh height is not settled.** HUD altitudes logged on Crimson Canyon since
+  2026-10 go down to 0 to 25 m (66 readings). That fits the HUD measuring height above the water plane
+  (HUD = y + 232, which puts the canyon floor at about 67 m), but it is not shown. Phase 1's check that no
+  altitude falls below the ground settles it.
+
+## Phase 1 results (2026-11-07, offline)
+
+The tools are `test_screenshots/terrain/tools/register.py`, `score_fixes.py` and `crash_check.py`. The
+data is the operator's Crimson Canyon flights of 2026-11-04 (2,215 frames, 960 by 600, 5 a second) and
+today's black box. Each claim is marked measured or inferred.
+
+- **Heading on recorded frames needs its own thresholds (measured).** JPEG compression drains the N
+  letter's saturation from 210 to about 130, so the live profile reads 0 of 652 recorded frames. A
+  recorded-frame profile (S of 110 or more, V of 170 or more, letter area 0.001 to 0.006 of R²) reads 80%
+  of them. Against the live `hdg=` on ticks where the heading was steady, the median error is 1.5 deg and
+  93% are within 10 deg. The live profile reads 86% of battle ticks (7,128 of 8,273 attempts, session of
+  2026-11-07 08:25) and is unchanged.
+- **The minimap's scale is fixed (measured).** With rotation taken from the compass, every frame picks
+  the same scale, 66 to 68 m per recorded pixel (Design 017: 64). That is about 33 m per pixel at full
+  resolution.
+- **Fixes (measured).** Matching the north-up crop against the game's minimap texture gave a fix on
+  1,273 of 2,215 frames (57%). A fix needs a score of 0.5 or more, at least 0.15 above the best match
+  elsewhere. The compass is the limit: 1,472 frames had a heading. 99% of consecutive fixes, 0.2 s apart,
+  agree within 150 m plus flight distance. The median step between them is 68 m, one matching pixel.
+  Sub-pixel refinement is the obvious next gain.
+- **Altitude against the ground (measured; the offset is inferred).** Against the ground under the fix,
+  8.2% of readings are below it if the HUD shows the mesh height (y), and 16.5% if it shows y + 232
+  (height above the water). Against the lowest ground within 100 m, allowing for the fix's error, the
+  figures are 1.1% and 4.4%; within 200 m, 0.0% and 1.5%. This favours HUD = y but does not prove it.
+- **Black-box crashes (measured, three of them on Crimson Canyon Sunrise, 2026-11-07).** The Sunrise and
+  day scenes have identical collision geometry. The minimap is gone 5 to 8 s before the black box's death
+  time: the death camera. The 13:51:44 crash was east along the river at 826 KPH, 300 to 500 m up. The
+  straight track meets a 730 m wall 1.0 to 1.5 s after the last fix, under either altitude reading. The
+  13:49:26 and 13:56:18 crashes have no terrain on the straight track. They were turning or hit something
+  else (inferred).
+- **Correction: the first search could not reach the arena's edge (measured).** The template had to lie
+  inside the texture, which limited fixes to ±5.7 km of the centre. 85 accepted recorded fixes (6.7%) were
+  pinned to that edge. Padding the texture fixed it. On the corrected run there are 1,327 fixes,
+  continuity is 99%, and 1.0% (y) and 4.3% (y + 232) of readings are below the lowest ground within
+  100 m. The other figures above are from before the correction and barely move.
+- **Live, full resolution (measured).**
+  - Data: 2,211 minimap crops from display :3, two a second, read-only, over three Crimson Canyon rounds
+    (16:50 to 17:08), paired with `wingman.log`.
+  - Compass: the live profile reads 75% of crops. The rest include death cameras, respawn screens and
+    the scoreboard.
+  - Scale: fixed at 34 m per pixel.
+  - Fixes: with a score of 0.4 or more and a gap of at least 0.15 over the best match elsewhere, 92% of
+    the crops the compass reads get a fix (1,530). 99.6% of consecutive fixes agree.
+  - Altitude: 0.7% (y) and 1.6% (y + 232) of readings fall below the ground under the fix. With 50 m
+    allowed for position error, 0.0% and 0.3%. Most of the recorded frames' 8% was position error.
+- **Crashes caught on the live picture (measured; the cause is inferred).** A no-kill-card crash
+  replaces the minimap with the death camera within 0.5 s of the last fix. Ground ahead is read from the
+  last fix along the track, ±15 deg, for 3 s.
+
+  | Crash (respawn screen) | Last fix | Ground on the track | Impact predicted if HUD = y | Impact predicted if HUD = y + 232 |
+  |---|---|---|---|---|
+  | 16:54:38 | HUD 1,511 m over the canyon floor, 157 m/s | 1,190 to 1,244 m, 2.7 to 2.9 s ahead | none in 3 s | 1.8 to 2.3 s |
+  | 16:55:29 | HUD 1,523 m over the north mesa, 181 m/s | a 1,901 m spire, 1.5 s ahead | 0.9 to 1.2 s | 0.8 to 1.0 s |
+  | 16:58:08 | HUD 1,785 m over the canyon floor, 326 m/s | 2,030 m, 2.5 to 3 s ahead | 2.5 to 2.6 s | 1.9 to 2.1 s |
+  | 17:02:23 | HUD 2,248 m over a 1,990 m cliff top, 253 m/s | 2,035 to 2,196 m, 0.5 to 0.7 s ahead | none in 3 s | 0.2 s |
+  | 17:10:58 | HUD 1,039 m diving at 159 m/s toward a mesa side, 100 m/s across the ground | 1,207 to 1,454 m, 2.6 to 3.0 s ahead | 1.6 to 1.9 s | 1.6 to 1.9 s |
+  | 17:13:57 | HUD 1,577 m climbing at 66 m/s over the canyon floor, 154 m/s | at most 1,260 m within 3 s | none | none |
+  | 17:16:00 | HUD 1,190 m (1.2 s old) diving at 103 m/s into a slope rising from -50 m to 983 m, 247 m/s | 983 to 1,008 m, 0 to 2 s ahead | 1.8 to 2.2 s | 0.1 s; clearance 85, 56, then -25 m over the last three fixes |
+
+  | 17:18:12 | HUD 1,634 m over the gap between the mesas, 218 m/s, turning right | 1,661 m, 1.3 s ahead on the track turned 15 deg right | 1.2 s (turned track only) | 1.1 s (turned track only) |
+
+  | 17:22:37 | HUD 1,287 m level, 252 m/s, into ground rising 1,204 then 1,405 then 1,855 m over the last three fixes | 1,857 m, 0.3 s ahead | 0.1 s | 0.1 s |
+
+  With the 13:51:44 river wall, eight of ten canyon crashes have terrain on the track. The 17:13:57
+  crash has none under either reading: a turn or a collision (inferred). In each crash the minimap gives
+  way to the death camera within 0.5 s of the last fix. In all four crashes where the two readings
+  disagree (16:54, 16:58, 17:02, 17:16), y + 232 predicts the earlier impact, closer to what was
+  observed. A stale altitude in a dive makes both predictions late. Wingman's
+  picture-based escape was firing over, left and right before the 16:55 crash, without the obstacle's
+  height.
+- **Settled 2026-11-07 19:48 (measured): the HUD shows the mesh height y itself, signed, and wingman
+  drops the sign.**
+  - The operator skimmed the Crimson Canyon river (water plane at y = -232.3) and saved three
+    screenshots (`tests/test-output/screenshot_20261107_1948*.png`). The HUD read -206, -195 and -220 m,
+    12 to 37 m above the water.
+  - Wingman logged those ticks as +137 to +193. `_row_value` in `analyzer.py` takes `\d+`, so the minus
+    is lost. EasyOCR does see it, as `-`, `+` or `"` (raw: `-206 m`, `+195m`, `"220m`).
+  - So below y = 0 every logged altitude is the absolute value. That is why `ttc_sea` (altitude - 232)
+    looked better below: it was a closer stand-in for the true negative height. The two readings
+    weighed below were the wrong question.
+  - **Fixed 2026-11-07 (cycle 7).**
+    - The altitude row keeps a leading `-`, `+`, `"` or Unicode dash as a minus (`_ALT_MINUS_GLYPHS`).
+      On 124 full-resolution positive altitude rows, only `i` and `'` ever led the digits.
+    - The telemetry filter accepts altitudes down to `telemetry.min_altitude_m` (-1,600; Crucible's kill
+      floor is -1,480) instead of rejecting anything below 0.
+    - Effect on flight: below y = 0 the time-to-ground (`alt / -rate`) is now negative while
+      descending, so the emergency climb fires there. Before, it saw |y|. That is under 1% of canyon
+      ticks, all of them deep in the canyon.
+    - The terrain service's `ttc_y` is now the meaningful reading on every map. `ttc_sea` is kept in
+      the log for comparison only.
+  - The evidence once weighed both ways, kept for the record:
+  - For y + 232 (height above the water): the crash timings above, and the 16:54 and 17:02 crashes are
+    explained only by it. With
+    100 m allowed for position error, the closest wingman came to terrain in 961 live fixes is 38 m
+    under y + 232, against 270 m under y, in rounds where it flew into terrain four times.
+  - For y: the recorded frames' below-ground shares, and HUD readings of 4 m held for 5 s on Crimson
+    Canyon. Only 12 of 70 readings under 30 m were followed by a respawn within 8 s, against about 10%
+    for any tick.
+  - The cheapest decider is the HUD reading while skimming the river, from the operator or a live frame.
+- **Against the pass mark.**
+  - Continuity: met.
+  - Fix rate: met live (92%), taking "the compass reads" for "the minimap is on screen". Not met on the
+    recordings.
+  - Altitude check: met live with 50 m allowed for position error, under either offset.
+  - Boundary-arc agreement: not run.
+
+## Phase 3, first score (2026-11-07, offline on live fixes)
+
+The tool is `test_screenshots/terrain/tools/phase3.py`. The data is 4,611 full-resolution minimap crops
+from 16:50 to 17:29, giving 3,085 accepted fixes over Crimson Canyon rounds, with `wingman.log` for
+altitude, respawns and death cards. 24 deaths had a fix in the 15 s before: 12 crashes (no kill card)
+and 12 kills. 10 of the crashes have a usable window.
+
+**The warning.** At each fix, ground speed and track come from the previous fix (0.3 to 1.2 s earlier).
+Altitude is the last logged reading carried forward at its logged rate. The path is projected on the
+track and 15 deg either side. The warning fires if the path meets the height map within the horizon.
+
+**Scoring.** A crash counts as warned if any fix 1 to 6 s before it warns. Ordinary flight is every fix
+with no death of any kind in the next 10 s.
+
+| HUD reading | Horizon | Crashes warned 1 to 6 s before | Ordinary flight warned | Median first warning before the crash |
+|---|---|---|---|---|
+| y | 3 s | 8 of 10 (80%) | 4.2% of 2,663 fixes | 2.0 s |
+| y | 5 s | 9 of 10 | 7.7% | 2.5 s |
+| y + 232 | 3 s | 9 of 10 (90%) | 8.7% | 3.5 s |
+| y + 232 | 5 s | 10 of 10 | 13.3% | 5.0 s |
+
+The live pull-out trigger warns on 26.4% of crashes at 5.3% false alarms (Research 017).
+- **Read with care.** 10 crashes is far below the 40 this project trusts for any rate. "Ordinary flight"
+  includes near misses that wingman's own escape pulled out of, so part of that column is true warnings.
+- **Next.**
+  - Phase 4 shadow, logging both altitude readings on every canyon tick, gives the same score at scale
+    with no screen grabbing.
+  - More maps need their height maps, which can only be built with the game closed.
+
+## Phase 4 shadow (2026-11-07)
+
+`wingman/terrain_service.py` runs on the BT tick, after its log line, in live runs only.
+
+- **When it logs.** On a battle tick with health being read, on a map named in `terrain_service.maps`, it
+  logs one line, for example:
+  `TERRAIN: map=CRIMSON CANYON fix=-537,-2175 score=0.46/0.19 ground=-152 speed=104 ttc_y=clear ttc_sea=clear ms=7`.
+  With no fix the line reads `fix=none(no-compass|weak-match)`.
+- **Data.** The map data comes from the untracked `test_screenshots/terrain/` folder. Without it the
+  service warns once and logs nothing.
+- **The fix.** It is Phase 1's matcher (live compass profile, 34 m per pixel at 320 px, score of 0.4 or
+  more and a gap of 0.15 or more), with sub-pixel peaks. With a fix in the last 2 s it searches ±2.5 km
+  round it first.
+- **Cost.** Measured on 40 live crops 1.5 s apart: median 7.3 ms, p90 39 ms (a whole-map search), and
+  0.7 s once on the first tick of a map, to load it. The windowed fixes equal the whole-map ones (0 m
+  over 38).
+- **The predictor.** It is Phase 3's: the track from the last two fixes (at most 2 s apart), ±15 deg, a
+  3 s horizon. It reports both HUD readings, `ttc_y` and `ttc_sea`.
+- **Shadow.** Nothing steers on it. Tests are in `tests/test_terrain_service.py`, on synthetic data,
+  including a fix 8 km out, the edge the first search could not reach.
+
+### Live shadow score (2026-11-07, 18:11 to 19:46, Crimson Canyon only)
+
+Scored by `test_screenshots/terrain/tools/score_shadow.py` on the `TERRAIN:` lines of two sessions:
+2,088 lines, 80% with a fix, and 1 fix in 1,671 repeating the previous one. There were 17 crashes (no
+kill card) and 27 kills with shadow lines before them. A crash counts as warned if a line in the 8 s
+before the death camera warns. Ordinary ticks are those with no death in the next 10 s.
+
+| Warning | Crashes warned | Median first warning | Ordinary ticks warned |
+|---|---|---|---|
+| `ttc_y` 3 s or less | 13 of 17 (76%) | 3.2 s before | 4.3% |
+| `ttc_y` 2 s or less | 13 of 17 | 1.7 s before | 2.9% |
+| `ttc_sea` 2 s or less | 16 of 17 (94%) | 4.0 s before | 5.4% |
+| `ttc_sea` 1 s or less | 12 of 17 | 3.2 s before | 3.5% |
+
+- **Against the pull-out trigger.** It warns on 26.4% of crashes at 5.3% false alarms. At a similar
+  false-alarm rate the map-based warning catches about three times as many.
+- **Sample.** 17 crashes is under the 40 this project trusts for a rate, and all are on one map.
+- **The two readings (measured; what it means is inferred).** No crash was warned under `ttc_y` and
+  missed under `ttc_sea`. Three were the other way round (18:41, 19:18, 19:36). One crash (19:15) had
+  no terrain on any projected track. This is more evidence for the HUD showing height above the water.
+- **Where.** Many of the crashes cluster round the south mesa (x -500 to 500 m, z -2,200 to -800 m).
+
+### Clearance margin sweep (2026-11-07, 39 crashes)
+
+`test_screenshots/terrain/tools/margin_sweep.py` re-runs the shadow's prediction from the logged fixes and
+BT altitudes, requiring the path to clear the ground by a margin.
+- **Data.** Three sessions (18:11 to 21:03 and after), 3,894 ticks with a track, 39 crashes and 65
+  kills, all on Crimson Canyon.
+- **Scoring.** A crash counts as warned if a tick 1 to 8 s before its death camera warns. Ordinary ticks
+  are those with no death in the next 10 s.
+
+| Margin | Crashes warned | Median lead | Ordinary ticks warned |
+|---|---|---|---|
+| 0 m | 26 of 39 (67%) | 3.8 s | 4.6% |
+| 50 m | 29 of 39 (74%) | 3.2 s | 5.3% |
+| 100 m | 31 of 39 (79%) | 4.4 s | 5.9% |
+| 150 m | 33 of 39 (85%) | 3.2 s | 6.6% |
+| 200 m | 34 of 39 (87%) | 4.5 s | 7.7% |
+| 250 m | 36 of 39 (92%) | 4.5 s | 8.6% |
+| 300 m | 36 of 39 (92%) | 4.6 s | 10.1% |
+
+- **Against the pull-out trigger.** At its false-alarm rate (5.3%, margin 50 m) the map-based warning
+  catches 74% of crashes against its 26.4%. With no margin it beats it on both counts.
+- **Phase 3's pass mark is met on this map.** Caveats: the pull-out's figure was measured on black-box
+  windows, not ticks; "ordinary ticks" include near misses wingman's own escape pulled out of; and this
+  is one map.
+- **The second log field.** It is now `ttc_m`: the path within `clearance_margin_m` (150) of the ground.
+  The discredited "height above the water" reading is gone. Its edge was a 232 m margin by accident;
+  the session after the sign fix, all altitudes positive, still gave it 7 of 8 against 5 of 8.
+
+### The way out, offline (2026-11-08, 93 crashes)
+
+Operator, 2026-11-08: "forced climbs arent always the way to go, sometimes it may need to be turning left
+or right to avoid terrain, shouldnt this terrain work be focused on identifying good flight paths?"
+
+- **Turn rates (measured).** Over 9,300 tick pairs of compass heading, wingman turned faster than
+  20 deg/s on 15% of ticks (p90 29 deg/s). Vertical rate ran from -142 to +167 m/s (p5 to p95).
+- **The candidates** (`tools/way_out.py`, then `fly_candidate` in `wingman/terrain_service.py`): hold;
+  climb (path angle rising 22 deg/s to 50 deg); left and right (25 deg/s, path angle held); left and
+  right with a climb (18 deg/s turn, 15 deg/s pull). Each starts after 0.5 s of reaction on the
+  current path, and is projected 5 s against the height map.
+- **The test.** At the earliest tick 1 to 6 s before each crash where holding course meets the ground
+  within 5 s:
+
+| Outcome | Crashes |
+|---|---|
+| A climb clears (a turn too: 30) | 41 |
+| Only a turn clears (plain, or with a climb) | 14 |
+| Nothing clears | 18 |
+| Holding course never met the ground (a turning crash, a collision or a bad fix) | 17 |
+| No track before the crash | 3 |
+
+- **What it says (inferred from the model; not yet flown).** Of the 73 crashes that flew into the
+  terrain ahead:
+  - A turn is the only escape in 14 (19%), which a forced climb cannot save.
+  - The best candidate clears in 55 (75%), against 41 (56%) for the climb alone.
+  - Nothing clears by the time of the warning in 18 (25%). Those need warning earlier, or a route that
+    keeps out of such places (Phase 6).
+- **Shadow (built 2026-11-08).** On every tick whose path warns, the `TERRAIN:` line carries
+  `way_out=<best> [hold=… climb=… left=… right=… left+climb=… right+climb=…]`. Nothing flies on it.
+  The forced climb of ADR 174 is unchanged.
+
+### The way out, live and deciding earlier (2026-11-08, 107 crashes)
+
+- **Live way-out shadow (measured).** 02:39 to 03:39 gave 42 warning ticks:
+  - Nothing clear: 26 (62%). Hold clear, so the forced climb was not needed: 5 (12%). Climb clear: 6.
+    Only a turn clear: 5.
+  - Of the 26 with nothing clear, 9 hit with every candidate within 0.5 s, before any manoeuvre can
+    start. 8 had the altitude below the ground under the fix itself: a fix about 100 m off at a cliff,
+    or a stale altitude.
+  - At a 2 s warning on a 1.5 s tick, the warning comes too late to choose.
+- **Deciding earlier (`tools/decide_early.py`, measured offline).** Over 107 crashes and six sessions:
+  act when the straight path meets the ground within D s, and fly the best candidate. A state with
+  the altitude 30 m or more under the ground at the fix counts as a bad fix, not a warning.
+
+| D | Crashes with a clear way out at the first act | Boxed in | No act in time | Acts in ordinary flight, per tracked hour |
+|---|---|---|---|---|
+| 2 s | 12 | 36 | 59 | 28 |
+| 3 s | 35 | 29 | 43 | 39 |
+| 4 s | 47 | 23 | 37 | 53 |
+| 5 s | 62 (58%) | 17 | 28 | 68 |
+
+  - A tracked hour is about a third of a battle hour, so 5 s means about two acts a round.
+  - Most of the gain is from deciding early and choosing the path, not from climbing harder.
+- **Fix rate by map, live (measured).** CRIMSON CANYON 94%, ICEBOUND 92% and STORMBREAK 67% of ticks
+  with a compass. STORMBREAK is mostly open water, and its accepted fixes score a median of 0.57, which
+  confirms the pairing with seastacks.
+- **Next.** Fly the way out in the `map` arm: act at 5 s and fly the best candidate. The turn is the
+  boundary turn's bank-and-pull (ADR 107/122) toward the chosen side. Then check live that the real
+  turn rate matches the model's 25 deg/s. This revises ADR 174, which is still a Draft.
+
+### Stone Forest fixes, and the flown way out's first hour (2026-11-08)
+
+- **Stone Forest barely fixed live (measured).** From 04:47, 75 fixes from 476 compass reads (16%). Its
+  minimap draws the forest as fine speckle that the texture lacks.
+- **Matching variants on recorded Stone Forest crops (`tools/match_variants.py`).**
+
+| Preprocessing | Stone Forest passing | Median margin | Crimson Canyon passing | Median margin |
+|---|---|---|---|---|
+| grey (as built) | 0 of 55 | 0.12 | 34 of 34 | 0.49 |
+| gradient | 0 of 55 | 0.03 | 13 of 34 | 0.23 |
+| high-pass | 0 of 55 | 0.01 | 34 of 34 | 0.43 |
+| blur about 100 m | 50 of 55 | 0.19 | 34 of 34 | 0.51 |
+
+  - The blurred Stone Forest fixes are right: 99% of consecutive fixes agree within flight distance
+    (87 pairs).
+  - Now built: `terrain_service.match_blur_m` (100) blurs both the crop and the texture. On live Crimson
+    Canyon crops, fixes went from 38 to 39 of 40, at 8.1 ms median and 13 ms p90 (was 7.3 and 39).
+- **The flown way out's first hour (04:47 to 05:30, Stone Forest and Countdown).**
+  - In map-arm rounds it acted 3 times, all climbs, and made no terrain turn. Stone Forest gave few fixes
+    (above), and on Countdown wingman flew high, at up to 4,200 m.
+  - The inside-ground guard suppressed 2 readings at a Countdown spawn on high ground.
+- **False minus readings (measured).** On Crucible (04:15 to 04:31) the altitude OCR read three positive
+  altitudes near 2,000 m as negative (-1,969, -2,188, -2,229). The -1,600 m floor rejected all three.
+  A tighter floor (-300 m, below Crimson Canyon's water) is the next change.
+
+### First terrain turns flown (2026-11-08, Crimson Canyon)
+
+Four TerrainTurn turns in `map`-arm rounds, 06:30 to 06:49 (measured):
+
+| Start | Side | Heading over the turn | Outcome |
+|---|---|---|---|
+| 06:30:20 | left | 272 then compass unread | death 5 s later, no card read. It started in a -69 deg dive at 281 m/s, the altitude froze at 1,654 |
+| 06:31:08 | left | 54, 57, 52, 33 (about -6 deg/s; nose -32 to +8 first) | survived a ridge-edge near miss, climbing at 190 m/s 6 s later |
+| 06:31:41 | left | 196, 172, 132, 56 (-40 deg/s) | survived |
+| 06:49:19 | right | 262, 284, 341 (+38 deg/s) | survived |
+
+- **Turn rate.** In level flight the turn runs at about 40 deg/s, above the model's 25. From a dive it
+  is slower, because the bank-and-pull first lifts the nose.
+- **Dives.** A bank-and-pull in a steep dive mostly turns the dive. A pull-out may be the better
+  answer there.
+- **Sample.** Four turns are too few for any outcome rate; the trial's arms decide.
+- **Altitude sign, still unproven live (measured).** No negative altitude was accepted in about 16,000
+  ticks after the fix, across every map. Crimson Canyon's lowest read was +1 m, over a floor at -165.
+  Since 2026-11-08 07:00 every parsed altitude under 300 m logs its raw OCR text (`ALT RAW:`). That
+  shows whether a minus glyph is there and missed, or absent.
+
+### The 07:42 crash after the resupply, and two fixes (2026-11-08)
+
+Operator, 2026-11-08: "in this case turning left or right after the resupply would have avoided terrain"
+(screenshots `tests/test-output/screenshot_20261108_074233.png` and `074236.png`).
+
+- **What happened (measured).**
+  - Wingman dived at the resupply ring in the canyon. At 07:42:31 the agreement and the pull-out fired
+    ("climb forced"). ADR 172's arm for the round kept the hold-off, so the run went on.
+  - At 07:42:36 it re-armed (B secured) at 278 m by the HUD, with a wall filling the view.
+  - The terrain service acted only at 07:42:37. Every candidate then hit within 2.2 to 2.8 s, and it
+    turned left into a crash.
+- **Why it was late.**
+  - **Stale altitude.** It used the smoothed altitude: 627 m at 07:42:36.1, against 278 m on the HUD at
+    07:42:36.9, in a -166 m/s dive. Design 020 Phase 2, "the state brought up to now", had not been
+    built.
+  - **Turns that kept diving.** The model's turns held the dive angle. The flown bank-and-pull holds the
+    nose up and levels the dive.
+- **The fixes (built 2026-11-08).**
+  - The service is given `altitude_ahead(0)`: the last accepted reading carried to now at its rate,
+    downward only. It falls back to the smoothed value when no fresh reading exists.
+  - The left and right candidates raise a dive toward level at 13 deg/s (the 06:31:08 turn: nose -32
+    to +8 deg in about 3 s).
+- **Replay of the crash with both fixes**, using the altitude from the screenshots:
+  - At 07:42:34.0 (750 m) the straight path is clear for 5 s, and nothing acts.
+  - At 07:42:35.5 (506 m) the straight path hits at 3.9 s. The action is left, with left and right both
+    clear for 5 s. That is a tick before the real decision, which had nothing clear.
+
+## All six arenas (2026-11-07)
+
+`test_screenshots/terrain/tools/build_all_maps.py` built every map with the game closed, in 75 s. The
+summary is in `maps-summary.json` beside the data.
+
+| Map (game name) | Triangles | Water plane | Ring spacing | Night and snow variants |
+|---|---|---|---|---|
+| crimson-canyon (CRIMSON CANYON) | 562,242 | -232.3 | 204 px | sunrise identical; night differs in 0.0001% of cells |
+| stoneforest (STONE FOREST) | 1,789,563 | -68.7 | 204 px | night identical |
+| countdown (COUNTDOWN) | 488,680 | 12.0 | 204 px | night identical |
+| seastacks (STORMBREAK, inferred) | 483,576 | 0.0 | 204 px | night: 0 cells differ |
+| crucible (CRUCIBLE) | 2,113,617 | none | 204 px | night identical |
+| arctic-3 (ICEBOUND) | 252,508 | none | 204 px | night identical; snow differs in 0.02% of cells (own build) |
+
+- **Scale (inferred).** Every minimap texture is 4,096 px with grid rings 204 px apart: 1 km at ±10 km.
+  So the 34 m per pixel live scale holds on every map.
+- **The renders.** Each matches its minimap by eye.
+- **Names checked on black-box frames (measured).**
+  - ICEBOUND fixes on arctic-3 with a median score margin of 0.48, against 0.01 to 0.02 on the other
+    maps.
+  - STONE FOREST fixes on stoneforest at 0.12, against at most 0.02. The forest's texture matches less
+    sharply.
+  - STORMBREAK is not yet checked.
+- **Water per map.** The "height above the water" reading uses each map's own water plane (`water_y` in
+  `terrain_service.maps`). It is close to the mesh-height reading on Stormbreak (0) and Countdown (12),
+  so only Crimson Canyon and Stone Forest separate the two readings.
+- **Known gaps.**
+  - ICEBOUND's sea has no collider. Below it the height map falls to the lowest collider (-1,305 m), so
+    crashes into that sea are not predicted.
+  - Crucible's islands float over a kill floor (-1,480 m).
+  - Countdown's water plane is treated as covering the whole map at 12 m. Where the valleys lie below
+    it, warnings come early by up to their depth.
+
 ## Open decisions
 
-- **Unpacking the game's files** to read the collision meshes (operator; Research 017 left it open).
-  Read-only, with the game closed, in a separate folder; nothing is written back.
-- **The first map.** Crimson Canyon proposed.
+- **Unpacking the game's files.** Decided 2026-11-07 (operator: "proceed with the map unpack"). The read is
+  read-only and done with the game closed.
+- **The first map.** Crimson Canyon, done.
 
 ## Risks
 

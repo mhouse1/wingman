@@ -42,6 +42,8 @@ TACTIC_EJECT = "Eject"
 TACTIC_MISSILE_EVADE = "MissileEvade"
 TACTIC_EVADE = "Evade"
 TACTIC_BOUNDARY_TURN = "BoundaryTurn"
+# ADR 174 revised (Design 020 way out): a bank-and-pull to the side the terrain service chose.
+TACTIC_TERRAIN_TURN = "TerrainTurn"
 TACTIC_DISENGAGE = "Disengage"
 TACTIC_CLIMB = "Climb"
 TACTIC_ENGAGE = "Engage"
@@ -111,6 +113,12 @@ class AnalyzerSnapshot:
     # Code Review 019 cycle 25: two terrain warnings agreed within the hold
     # (wingman/warning_agreement.py). The trigger lives in ClimbCondition.
     terrain_warnings_agree: bool = False
+    # ADR 174: the terrain service's path meets the map's ground within warn_s, in a
+    # round of the `map` arm (False in `control` rounds and on maps without data).
+    terrain_map_warning: bool = False
+    # ADR 174 revised: the side the terrain service's way out turns to ("left"/"right"),
+    # in a round of the `map` arm; None otherwise. Selects the TerrainTurn leaf.
+    terrain_turn: "str | None" = None
     # Code Review 019 cycle 32 (HLDD 001 part 2): the latest raw HUD altitude
     # and speed and the flight-path angle, each None unless fresh, for the
     # pull-out trigger in ClimbCondition. `altitude` above is the stable value,
@@ -598,6 +606,7 @@ class ClimbCondition:
         self._agreement_enabled = agreement_enabled
         self._agreement_shadow = agreement_shadow
         self._agreement_active = False
+        self._map_warning_active = False      # ADR 174: edge-log state for the map warning
         self._exit_above_alt = exit_above_alt
         self._is_running_fn = is_running_fn
         self._confirm_reads = confirm_reads
@@ -853,6 +862,15 @@ class ClimbCondition:
             if not self._agreement_shadow:
                 emergency = emergency or agree
 
+        # ADR 174 (Design 020 Phase 5): the map's own ground on the projected path.
+        # The field is set only in rounds of the `map` arm, so it always flies.
+        map_warning = bool(getattr(snapshot, "terrain_map_warning", False))
+        if map_warning and not self._map_warning_active:
+            logger.warning("BT: MAP WARNING — the path meets the map's ground within 2 s — "
+                           "climb forced (ADR 174)")
+        self._map_warning_active = map_warning
+        emergency = emergency or map_warning
+
         # Code Review 019 cycle 32 (HLDD 001 part 2): the lowest point of a
         # pull-out started now (wingman/pullout.py), from the raw altitude, speed
         # and path, against one floor for every map. Over 373 missions of
@@ -1084,7 +1102,7 @@ def always(_snapshot: AnalyzerSnapshot) -> bool:
 # followed it, and adding Regroup pushed Climb below Engage.
 _PRIORITY_ORDER = (
     TACTIC_IDLE, TACTIC_RESPAWN_WAIT, TACTIC_EJECT, TACTIC_MISSILE_EVADE,
-    TACTIC_BOUNDARY_TURN, TACTIC_EVADE, TACTIC_DISENGAGE, TACTIC_CLIMB,
+    TACTIC_TERRAIN_TURN, TACTIC_BOUNDARY_TURN, TACTIC_EVADE, TACTIC_DISENGAGE, TACTIC_CLIMB,
     TACTIC_ENGAGE, TACTIC_REGROUP, TACTIC_ATTACK_SUPPORT,
 )
 
@@ -1386,6 +1404,25 @@ def _build_boundary_slot(ctx: "_BuildContext"):
     )
 
 
+def is_terrain_turn(snapshot: AnalyzerSnapshot) -> bool:
+    """ADR 174 revised: the terrain service chose a turn this tick."""
+    return getattr(snapshot, "terrain_turn", None) in ("left", "right")
+
+
+def _build_terrain_turn_slot(ctx: "_BuildContext"):
+    """ADR 174 revised: only where it actuates. A selection-only TerrainTurn would take the
+    selection from the leaf below it and fly nothing (replay and capture lanes)."""
+    fns = ctx.actuators.get(TACTIC_TERRAIN_TURN)
+    if fns is None:
+        return None
+    return MinimumHold(
+        TACTIC_TERRAIN_TURN,
+        ConditionTactic(f"{TACTIC_TERRAIN_TURN}Condition", is_terrain_turn,
+                        start_fn=fns[0], is_running_fn=fns[1]),
+        hold_s=2.0, clock=ctx.clock,
+    )
+
+
 def _build_regroup_slot(ctx: "_BuildContext"):
     # ADR 028 revision 4. Absent unless enabled, so `minimap.regroup_enabled:
     # false` disables the FEATURE rather than half of it — gating the
@@ -1430,6 +1467,9 @@ def _build_slots(ctx: "_BuildContext") -> dict:
     # on _build_climb_slot as _build_boundary_slot above — moved here from
     # the dict literal so that dependency is real, not incidental.
     built[TACTIC_MISSILE_EVADE] = _build_missile_evade_slot(ctx)
+    terrain_turn_leaf = _build_terrain_turn_slot(ctx)
+    if terrain_turn_leaf is not None:
+        built[TACTIC_TERRAIN_TURN] = terrain_turn_leaf
     built[TACTIC_IDLE] = _build_idle_slot(ctx)
     regroup_leaf = _build_regroup_slot(ctx)
     if regroup_leaf is not None:

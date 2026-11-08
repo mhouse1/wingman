@@ -337,6 +337,11 @@ class MissionStatsTracker:
             # round's resupply approaches. Drawn at the same round start.
             self._tag_round("agree_resupply", event_name.rsplit("_", 1)[1], ts)
 
+        elif event_name in ("map_arm_map", "map_arm_control"):
+            # ADR 174 map trial: whether the terrain service's warning starts the
+            # emergency climb this round. Drawn at the same round start.
+            self._tag_round("map_warning", event_name.rsplit("_", 1)[1], ts)
+
         elif event_name == "death_card_no_card":
             # ADR 172: the kill card's verdict per round, the trial's crash count.
             # "No card" is a crash or self-inflicted, and sometimes a missed card.

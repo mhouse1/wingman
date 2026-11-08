@@ -44,6 +44,7 @@ from .kill_card import KillCardReader, read_card
 from .warning_agreement import WarningAgreement
 from .agreement_trial import AgreementTrial
 from .terrain_loom import TerrainLoom
+from .terrain_service import TerrainService
 from .mission_stats import MissionStatsTracker
 from .round_performance import (CAPTURE_DIR as ROUND_PERFORMANCE_DIR, KDA_CROP, SCORE_CROP,
                                 describe_read, frame_tag, read_panel, read_round,
@@ -1695,6 +1696,11 @@ def main():
         behavior_tree.set_terrain_loom(
             TerrainLoom((cfg.get("terrain_avoidance") or {}).get("loom")),
             cap.grab_from_thread)
+        # Design 020 Phase 4 (shadow): the fix on the map and time to impact,
+        # logged as TERRAIN: on battle ticks of a map with data. Live only, like
+        # the looming: replay frames carry no map read at matchmaking.
+        behavior_tree.set_terrain_service(TerrainService(cfg.get("terrain_service")),
+                                        round_note=stats_tracker.on_event)   # ADR 174
         # Code Review 019 step 3a: the same measurement on the pursuit's own
         # frames, with its own detector instances. Live only, for the reason
         # above: the pursuit's grabs are scripted screenshots in those lanes.

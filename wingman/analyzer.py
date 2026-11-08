@@ -505,7 +505,14 @@ def _process_health_region(health_frame, label: str = "health") -> "tuple[int | 
     return (None, time.time() - t_start)
 
 
-def _row_value(boxes) -> "tuple[int | None, float]":
+# Design 020: how EasyOCR renders the altitude's minus sign. The HUD shows the map
+# mesh's height, signed (-206 m over Crimson Canyon's water); the same glyph came
+# back as '-', '+' and '"' on three frames of 2026-11-07. On 124 positive altitude
+# rows only 'i' and "'" ever led the digits, both on junk reads, so neither counts.
+_ALT_MINUS_GLYPHS = frozenset('-+"−–—')
+
+
+def _row_value(boxes, signed: bool = False) -> "tuple[int | None, float]":
     """Parse the leading number from one row of x-ordered OCR boxes.
 
     Boxes are joined left-to-right into a single string, and the first contiguous
@@ -515,6 +522,9 @@ def _row_value(boxes) -> "tuple[int | None, float]":
     '27681 feet' → 27681). Returns (value, confidence); confidence is the
     minimum OCR confidence across the row's digit boxes (conservative — one
     doubtful box taints the row), 0.0 when the row has no digits.
+
+    With `signed` (the altitude row), a minus glyph just before the digits makes
+    the value negative (see _ALT_MINUS_GLYPHS).
     """
     boxes_sorted = sorted(boxes, key=lambda b: b[1])
     text = " ".join(str(t) for _, _, t, _ in boxes_sorted)
@@ -522,7 +532,12 @@ def _row_value(boxes) -> "tuple[int | None, float]":
     if not match:
         return (None, 0.0)
     conf = min(c for _, _, _, c in boxes_sorted)
-    return (int(match.group()), float(conf))
+    value = int(match.group())
+    if signed:
+        before = text[:match.start()].rstrip()
+        if before and before[-1] in _ALT_MINUS_GLYPHS:
+            value = -value
+    return (value, float(conf))
 
 
 def _split_telemetry_rows(ocr_results, img_height) -> "tuple[int | None, int | None, float, float]":
@@ -550,17 +565,18 @@ def _split_telemetry_rows(ocr_results, img_height) -> "tuple[int | None, int | N
 
     # Single visible line: assign by which half of the crop it sits in.
     if spread < img_height * 0.25:
-        value, conf = _row_value(boxes)
         line_y = sum(y_centers) / len(y_centers)
         if line_y < img_height / 2.0:
+            value, conf = _row_value(boxes)
             return (value, None, conf, 0.0)
+        value, conf = _row_value(boxes, signed=True)
         return (None, value, 0.0, conf)
 
     mid_row = (max(y_centers) + min(y_centers)) / 2.0
     speed_boxes = [b for b in boxes if b[0] <= mid_row]
     alt_boxes = [b for b in boxes if b[0] > mid_row]
     speed, speed_conf = _row_value(speed_boxes) if speed_boxes else (None, 0.0)
-    alt, alt_conf = _row_value(alt_boxes) if alt_boxes else (None, 0.0)
+    alt, alt_conf = _row_value(alt_boxes, signed=True) if alt_boxes else (None, 0.0)
     return (speed, alt, speed_conf, alt_conf)
 
 
@@ -629,7 +645,7 @@ def _process_telemetry_region(telemetry_frame) -> "tuple[int | None, int | None,
             if current is None:
                 return candidate, candidate_conf
             if (candidate_conf >= _TELEMETRY_ROW_CONF_MIN
-                    and len(str(candidate)) > len(str(current))):
+                    and len(str(abs(candidate))) > len(str(abs(current)))):
                 return candidate, candidate_conf
             return current, current_conf
 
@@ -641,7 +657,17 @@ def _process_telemetry_region(telemetry_frame) -> "tuple[int | None, int | None,
             if speed is not None and altitude is not None:
                 break
 
+    # Design 020: whether the HUD's minus reaches us. Since the sign fix no negative
+    # altitude was accepted in ~16,000 ticks, Crimson Canyon's included (floor -165 m), and
+    # the lowest reads sat at 0 to 4 m. The raw text of every low read shows whether a
+    # minus glyph is there and missed, or absent.
+    if altitude is not None and abs(altitude) < _ALT_RAW_LOG_BELOW_M:
+        logger.debug("ALT RAW: parsed=%s hsv=%r", altitude,
+                     [str(t) for _, t, _ in results])
     return (speed, altitude, time.time() - t_start)
+
+
+_ALT_RAW_LOG_BELOW_M = 300
 
 
 def _apply_health_ceiling_filter(

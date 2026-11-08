@@ -27,6 +27,7 @@ import time
 
 from . import capture_budget
 from .compass import fmt_heading
+from .crop_region import get_crop
 from .special_weapon import SpecialWeaponPresser
 from .state import GameState, BATTLE_STATES
 from .suppressed import log_suppressed
@@ -48,6 +49,7 @@ from .behavior_tree import (
     make_climb_condition,
     make_snapshot_writer,
     TACTIC_BOUNDARY_TURN,
+    TACTIC_TERRAIN_TURN,
     selected_tactic,
     tree_status_dict,
     tree_status_text,
@@ -2067,6 +2069,12 @@ class BehaviorTreeHandler:
         self._warning_agreement = None
         self._loom_grab_fn = None
         self._shapes = None
+        # Design 020 Phase 4: None until set_terrain_service(). ADR 174: the round
+        # edge for its per-round arm, and the mission stats' intake for the tag.
+        self._terrain = None
+        self._terrain_round_note = None
+        self._terrain_in_battle = False
+        self._terrain_turn_side = None
         self._terrain_hud_cfg = (
             bool(_terrain_capture_cfg.get("enabled", False)),
             float(_terrain_capture_cfg.get("sky_min_frac", 0.55)),
@@ -2130,6 +2138,11 @@ class BehaviorTreeHandler:
             if self.active and boundary_tactic_enabled(bt_cfg):
                 actuators[TACTIC_BOUNDARY_TURN] = (self._start_boundary_turn,
                                                    ctrl.is_boundary_turning)
+            # ADR 174 revised: the terrain service's turn flies the same bank-and-pull.
+            # Selected only while the service supplies a side (map arm, live runs).
+            if self.active:
+                actuators[TACTIC_TERRAIN_TURN] = (self._start_terrain_turn,
+                                                  ctrl.is_boundary_turning)
             # ADR 147: the mission in play's own altitude doctrine (mission_acs
             # levels off at 3000 m, below the tree's floor). getattr so a
             # controller-less handler (mode off, tests) simply has none.
@@ -2178,6 +2191,69 @@ class BehaviorTreeHandler:
         """Code Review 019 cycle 25: the tracker LOOM and SHAPE switching on
         are noted in, and whose verdict rides on the snapshot."""
         self._warning_agreement = agreement
+
+    def set_terrain_service(self, service, round_note=None) -> None:
+        """Design 020 Phase 4: the terrain service, logged each battle tick. ADR 174:
+        `round_note` (the mission stats' event intake) tags each round's arm."""
+        self._terrain = service if service is not None and service.enabled else None
+        self._terrain_round_note = round_note
+        self._terrain_in_battle = False
+
+    def _terrain_round_edge(self, current_game_state) -> None:
+        """ADR 174: draw the round's arm where ADR 165 opens a round, on entering a
+        battle state from outside one; moves between battle states do not count."""
+        terrain = self._terrain
+        if terrain is None:
+            return
+        in_battle = current_game_state in _BATTLE_STATES
+        if in_battle and not self._terrain_in_battle:
+            arm = terrain.new_round()
+            if arm is not None:
+                logger.info("MAP TRIAL: round %d — %s arm (ADR 174, share %.2f)",
+                            terrain.rounds, arm, terrain.trial_share)
+                if self._terrain_round_note is not None:
+                    try:
+                        self._terrain_round_note("map_arm_" + arm, time.time())
+                    except Exception as exc:
+                        log_suppressed(logger, "map_trial_note", exc)
+        self._terrain_in_battle = in_battle
+
+    def _observe_terrain(self, frame, current_game_state, altitude, altitude_rate) -> "str | None":
+        """One TERRAIN: line on a battle tick of a map the service has data for.
+        Returns what to fly this tick (ADR 174 revised, `map` arm only): "climb", "left",
+        "right" or None.
+
+        Gated as the heading is: a battle state with health being read, the proof
+        that the minimap is up. The compass's north bearing turns the crop north-up;
+        the padlock camera turns the minimap but not its centre, so it does not gate
+        the fix (it only makes the heading not the aircraft's).
+        """
+        terrain = self._terrain
+        if terrain is None or current_game_state not in _BATTLE_STATES:
+            return None
+        map_name = getattr(self._analyzer, "match_map", None)
+        if not terrain.has_map(map_name) or not self._analyzer.game_battle_alive:
+            return None
+        crops = getattr(self._analyzer, "crops", None) or {}
+        if frame is None or "MINIMAP" not in crops:
+            return None
+        try:
+            started = time.monotonic()
+            heading = self._analyzer.read_compass_heading(frame)
+            bearing = None if heading is None else (360.0 - heading) % 360.0
+            crop = get_crop(frame, *crops["MINIMAP"][:4])
+            reading = terrain.observe(map_name, crop, bearing, altitude, altitude_rate, time.time())
+            if reading is None:
+                return None
+            warns = terrain.warns(reading)
+            act = terrain.action(reading)
+            logger.debug("TERRAIN: %s arm=%s%s act=%s ms=%.0f", reading.log_text(map_name),
+                         terrain.arm or "off", " WARN" if warns else "", act or "-",
+                         (time.monotonic() - started) * 1000.0)
+            return act
+        except Exception as exc:
+            log_suppressed(logger, "terrain_service", exc)
+            return None
 
     def set_terrain_loom(self, loom, grab_fn) -> None:
         """Wire in the Phase 2 looming measurement (HLDD 001, shadow only).
@@ -2414,6 +2490,16 @@ class BehaviorTreeHandler:
             lat = reading[2]
         self._ctrl.boundary_turn_mode(lateral=lat)
 
+    def _start_terrain_turn(self) -> None:
+        """TerrainTurn start_fn (ADR 174 revised): bank and pull to the side the terrain
+        service chose this tick. boundary_turn_mode rolls LEFT for a positive lateral."""
+        side = getattr(self, "_terrain_turn_side", None)
+        if side not in ("left", "right"):
+            return
+        max_s = self._terrain.turn_max_s if self._terrain is not None else 3.0
+        logger.info("Controller: terrain turn %s (Design 020 way out, ADR 174)", side)
+        self._ctrl.boundary_turn_mode(max_s=max_s, lateral=1.0 if side == "left" else -1.0)
+
     def _start_climb(self) -> None:
         """Climb leaf start_fn (ADR 075): pick the band the selection came from.
 
@@ -2567,6 +2653,22 @@ class BehaviorTreeHandler:
         # Stored for _start_climb, which runs inside tree.tick() below and
         # needs the altitude the selection was made against (ADR 075).
         self._last_altitude = altitude
+        # Design 020 / ADR 174: the round's arm, then this tick's fix and path,
+        # before the snapshot so a map warning can start the climb this tick.
+        self._terrain_round_edge(current_game_state)
+        # Design 020 Phase 2: the freshest altitude, carried to now at its rate, not the
+        # smoothed one. Measured 2026-11-08 07:42:36 in a -166 m/s dive: HUD 278 m on the
+        # operator's screenshot, smoothed 627 m, and the way out came a tick too late.
+        terrain_alt = altitude
+        if snapshot_obj is not None:
+            try:
+                fresh = snapshot_obj.altitude_ahead(0.0)
+                if fresh is not None:
+                    terrain_alt = fresh
+            except Exception as exc:
+                log_suppressed(logger, "terrain_fresh_altitude", exc)
+        terrain_act = self._observe_terrain(frame, current_game_state, terrain_alt, altitude_rate)
+        self._terrain_turn_side = terrain_act if terrain_act in ("left", "right") else None
         is_respawning, _, _ = self._analyzer.get_respawn_cache_result()
         incoming, _, _ = self._analyzer.get_incoming_cache_result()
         missiles_empty_confirmed = False
@@ -2672,6 +2774,8 @@ class BehaviorTreeHandler:
             terrain_warnings_agree=(self._warning_agreement is not None
                                     and current_game_state in _BATTLE_STATES
                                     and self._warning_agreement.agreeing(now)),
+            terrain_map_warning=terrain_act == "climb",
+            terrain_turn=self._terrain_turn_side,
             altitude_now=altitude_now,
             speed_kph=speed_kph,
             path_deg=path_deg,
@@ -2811,7 +2915,7 @@ class BehaviorTreeHandler:
         # approach. Per-tick range/bearing tracking, logged as a summary once
         # the turn ends, lives on BoundaryPerceptionHandler now.
         self._boundary.record_turn_tick(selection, _b_dist, _b_fwd, _b_lat)
-        if (selection != TACTIC_BOUNDARY_TURN
+        if (selection not in (TACTIC_BOUNDARY_TURN, TACTIC_TERRAIN_TURN)
                 and self._ctrl.is_boundary_turning()):
             self._ctrl.stop_boundary_turn()
         if _may_fly and selection in (TACTIC_ENGAGE, TACTIC_REGROUP):

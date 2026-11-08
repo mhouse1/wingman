@@ -1501,7 +1501,9 @@ def test_deselection_stops_the_actuation():
     from wingman.tick_handlers import BehaviorTreeHandler
     src = inspect.getsource(BehaviorTreeHandler)
     assert "stop_boundary_turn()" in src
-    assert "selection != TACTIC_BOUNDARY_TURN" in src
+    # ADR 174 revised: the terrain turn flies the same bank-and-pull, so leaving either
+    # leaf stops it, and moving between the two does not.
+    assert "selection not in (TACTIC_BOUNDARY_TURN, TACTIC_TERRAIN_TURN)" in src
 
 
 def test_recession_does_not_release_while_still_on_the_edge():

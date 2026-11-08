@@ -465,6 +465,26 @@ def test_telemetry_split_single_line_assigned_by_crop_half():
     assert _split_telemetry_rows([_tbox(10, 40, 140, 58, "27681 feet")], 60) == (None, 27681, 0.0, 0.9)
 
 
+@pytest.mark.parametrize("alt_text, expected", [
+    # Design 020, the operator's river skim of 2026-11-07 19:48 (raw EasyOCR text): the
+    # HUD read -206, -195 and -220 m and the minus came back as '-', '+' and '"'.
+    ("-206 m", -206), ("+195m", -195), ('"220m', -220),
+    # Positive rows: no glyph, and the two junk glyphs seen on 124 positive rows.
+    ("2905 m", 2905), ("5332m", 5332), ("i7/933", 7), ("'8487&8", 8487),
+])
+def test_the_altitude_row_keeps_the_hud_minus_sign(alt_text, expected):
+    results = [_tbox(10, 5, 120, 25, "1141 KPH"), _tbox(10, 35, 140, 55, alt_text)]
+    speed, alt, _, _ = _split_telemetry_rows(results, img_height=60)
+    assert (speed, alt) == (1141, expected)
+    # Alone on the line (lower half), it is still the altitude, still signed.
+    assert _split_telemetry_rows([_tbox(10, 40, 140, 58, alt_text)], 60)[1] == expected
+
+
+def test_the_speed_row_is_never_signed():
+    results = [_tbox(10, 5, 120, 25, "-903 KPH"), _tbox(10, 35, 140, 55, "-220m")]
+    assert _split_telemetry_rows(results, img_height=60)[:2] == (903, -220)
+
+
 def test_telemetry_split_ignores_boxes_without_digits_and_empty():
     assert _split_telemetry_rows([], 60) == (None, None, 0.0, 0.0)
     assert _split_telemetry_rows([_tbox(10, 5, 60, 25, "MPH")], 60) == (None, None, 0.0, 0.0)
@@ -742,3 +762,27 @@ def test_detect_terrain_ahead_missing_crop_returns_none(analyzer):
     analyzer.crops = {k: v for k, v in analyzer.crops.items() if k != "TERRAIN_FORWARD"}
     frame = _hsv_fill_frame(105, 50, 220)
     assert analyzer.detect_terrain_ahead(frame) is None
+
+
+def test_a_low_altitude_read_logs_its_raw_ocr_text(monkeypatch, caplog):
+    """Design 020: a parsed altitude under 300 m logs the raw rows, so a missed minus glyph
+    shows in the session log; a high one does not."""
+    import logging as _logging
+    import numpy as _np
+    from wingman import analyzer as A
+
+    class _Reader:
+        def __init__(self, texts):
+            self.texts = texts
+
+        def readtext(self, img, **kw):
+            return [([[0, 5], [80, 5], [80, 25], [0, 25]], self.texts[0], 0.9),
+                    ([[0, 40], [80, 40], [80, 58], [0, 58]], self.texts[1], 0.9)]
+
+    frame = _np.zeros((20, 60, 3), _np.uint8)
+    for texts, logged in ((["903 KPH", "~45m"], True), (["903 KPH", "2905 m"], False)):
+        monkeypatch.setattr(A, "_get_thread_ocr_reader", lambda t=texts: _Reader(t))
+        caplog.clear()
+        with caplog.at_level(_logging.DEBUG, logger="wingman.analyzer"):
+            A._process_telemetry_region(frame)
+        assert any("ALT RAW" in r.getMessage() for r in caplog.records) is logged
