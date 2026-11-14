@@ -1002,6 +1002,23 @@ SCHEMA = Section(
                 # under this range; the shadow still searches to search_max_km.
                 "steer_max_km": Leaf(types=NUMBER, minimum=0, default=1.2),
             }),
+            # ADR 179: in a share of rounds the chase brakes when it closes fast
+            # on a target that is near.
+            "closing_brake": Section(children={
+                # The share of rounds that brake. 0 = off.
+                "share": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.0),
+                # Only with the tracked target nearer than this.
+                "on_km": Leaf(types=NUMBER, minimum=0, default=1.5),
+                # It starts when the range closes this fast, m/s, and ends below
+                # off_mps.
+                "on_mps": Leaf(types=NUMBER, minimum=0, default=150.0),
+                "off_mps": Leaf(types=NUMBER, minimum=0, default=50.0),
+                # The longest one hold, and the wait before the next.
+                "max_hold_s": Leaf(types=NUMBER, minimum=0, default=4.0),
+                "cooldown_s": Leaf(types=NUMBER, minimum=0, default=3.0),
+                # No braking under this speed, or without a fresh speed reading.
+                "min_kph": Leaf(types=NUMBER, minimum=0, maximum=3000, default=650.0),
+            }),
             # Design 021 Phase 5 (shadow): where the tracked target is going,
             # logged and drawn on the HUD. Nothing flies on it.
             "target_projection": Section(children={

@@ -380,6 +380,12 @@ class _AmmoCtrlStub:
     def gun_aim_new_round(self):
         self.gun_aim_rounds += 1
 
+    # ADR 179: and the closing brake trial.
+    closing_brake_rounds = 0
+
+    def closing_brake_new_round(self):
+        self.closing_brake_rounds += 1
+
 
 def _ammo(analyzer=None, ctrl=None, bt_owns_eject=False, stats=None, **cfg):
     from wingman.tick_handlers import AmmoEventsHandler
@@ -659,6 +665,7 @@ class TestEvadeTrialRounds:
         assert c.new_rounds == 1
         assert c.agreement_rounds == 1           # ADR 172, the same round start
         assert c.gun_aim_rounds == 1             # Design 021 Phase 3, the same
+        assert c.closing_brake_rounds == 1       # ADR 179, the same
 
     def test_moves_between_battle_states_stay_in_the_round(self):
         h, _, c = _ammo()

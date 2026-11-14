@@ -4,7 +4,7 @@ Wingman flies a fighter jet in MetalStorm (PC) on its own. It reads the screen,
 decides what to do, and presses the keys, for hours at a time, on an ordinary
 CPU.
 
-Current version: v1.9.2 — runs on **Windows** and **Linux** (GNOME Wayland, Ubuntu 24.04 or later), on **CPU only**, from a low-end laptop to a desktop workstation.
+Current version: v1.9.4 — runs on **Windows** and **Linux** (GNOME Wayland, Ubuntu 24.04 or later), on **CPU only**, from a low-end laptop to a desktop workstation.
 
 ![Wingman mid-fight: one enemy destroyed, already chasing the next](docs/images/game-battle-hud-pursuit.png)
 
@@ -126,88 +126,18 @@ magenta band runs from it to the target being pursued.*
 
 ## Quick Start
 
-### Prerequisites
-
 ```bash
 uv sync --all-groups
+make r      # launches MetalStorm (Linux) and runs Wingman; logs to wingman.log
 ```
 
-**Linux only (one-time setup):** See [`docs/job-aids/010-run-metalstorm-on-linux.md`](docs/job-aids/010-run-metalstorm-on-linux.md) for the full checklist. The short version:
+The game runs on its own nested display, so you can keep using the computer.
+Press Enter in the game window to fly it yourself; `ctrl+alt+z` finishes the
+round and exits. Every key is under [Runtime Hotkeys](#runtime-hotkeys).
 
-1. Install MetalStorm via Heroic Games Launcher (Flatpak) with Proton-GE.
-2. Install `umu-run` standalone — Makefile variables `UMU_RUN`, `PROTON_ROOT`, `WINE_PREFIX`, `GAME_EXE` point to your install.
-3. Run `make r` once to trigger the one-time PipeWire screen-share dialog; subsequent runs skip it automatically. (Not needed while the nested display lane is enabled — it captures its own X server directly and never uses the portal.)
-4. Set MetalStorm's Controls mode to **Controller / Joystick** in-game settings (required for pitch input under Wine — see [ADR 051](docs/adr/051-linux-pitch-control-joystick-binding.md)).
-5. Configure in-game keybindings as described in [`docs/job-aids/011-wingman-keybindings.md`](docs/job-aids/011-wingman-keybindings.md).
-
-No `sudo`, no `input` group membership, no root access required.
-
-### Run
-
-```bash
-make r     # run Wingman, with DEBUG logs written to wingman.log
-```
-
-On Linux, `make r` automatically launches MetalStorm via `umu-run` if it is not already running, waits for the lobby to appear, then starts Wingman. No manual game launch step is needed.
-
-On Windows, launch MetalStorm manually before running `make r`.
-
-**Only one wingman runs at a time.** A second instance is refused at startup
-([SAF-014](docs/requirements/001-safety.md)): two of them inject into the same display and fight each other and the
-operator, and neither can detect the other — each behaves correctly in
-isolation, so nothing shows up in either log.
-
-### Using the computer while Wingman runs
-
-By default (`nested.enabled: true` in `wingman/config.yaml`) the game runs on its
-own nested X display. Wingman captures and injects there, so its keystrokes
-cannot reach whatever you are typing in — you can use the machine normally while
-a session runs. Your hotkeys still work: wingman watches for them on both your
-display and the nested one, so they register whether you are looking at the game
-or at an X11 window of your own. (Native-Wayland windows such as VS Code cannot
-be observed by any X11 listener — a pre-existing limitation.)
-
-```bash
-make r               # honours nested.enabled
-make r NESTED=0      # force the on-screen lane for one run
-make nested-status   # is the lane up, and what holds focus
-make nested-stop     # tear the nested server down
-```
-
-Stopping a session:
-
-- **`z`** — finish the round, then close MetalStorm and the nested display. With
-  the lobby on screen it closes at once, even if wingman thinks a round is on, and
-  in standby it closes as a second Backspace does
-  ([ADR 169](docs/adr/169-z-in-the-lobby-exits-whatever-the-fsm-believes.md)). A
-  second press cancels only while wingman is still waiting for a round to end.
-- **Backspace** — two-stage. The first press stops wingman and **leaves
-  MetalStorm running**, so you can take over and keep flying by hand, even
-  mid-battle; wingman waits in standby. Press Backspace again, whenever you are
-  done, to close MetalStorm and the nested display and exit. Ctrl-C during
-  standby leaves everything up.
-
-Guard-triggered exits leave both up, because they mean "restart wingman". Set
-`finish_round_then_exit.close_game: false` to stop wingman only.
-
-**Manual takeover:** press **Enter** at the game window to take the aircraft —
-wingman stops instantly, releases every key, and from then on only deploys
-flares. It holds through respawns until the round ends. Pressed during the
-countdown it claims the coming round: no mission starts, and the aircraft is
-yours from the first second. Press **`u`** to hand it back. Arrow keys also take
-over, and `ctrl+alt+i/j/k/l` works from your own display. Bare `i/j/k/l` at the
-game window are wingman's own roll commands and are ignored there. A respawn
-ends a takeover by those other keys and the last mission resumes automatically — set
-`mission.manual_takeover.persist_through_respawn: true` to keep flying across
-deaths instead.
-
-**Hotkeys need `ctrl+alt` while the nested lane is on** — `ctrl+alt+z`,
-`ctrl+alt+backspace`, and so on. Without the game holding your keyboard, bare
-single letters would fire from ordinary typing: the letter `z` in a text editor
-would close the game. Bare keys still work when the nested game window itself
-has focus.
-
-See [ADR 099](docs/adr/099-nested-display-lane-for-unattended-operation.md) and [`docs/hldd/009-nested-display-isolation-hldd.md`](docs/hldd/009-nested-display-isolation-hldd.md) for the design.
+- First-time Linux setup: [Job Aid 010](docs/job-aids/010-run-metalstorm-on-linux.md)
+- In-game keybindings: [Job Aid 011](docs/job-aids/011-wingman-keybindings.md)
+- Nested display design: [ADR 099](docs/adr/099-nested-display-lane-for-unattended-operation.md)
 
 ---
 

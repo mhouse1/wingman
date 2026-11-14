@@ -472,6 +472,40 @@ Both arms keep the Phase 1 shadow and its logs.
   - The burst is logged `aim=marker`, because it opened before the ring was confirmed. `aim=` alone
     undercounts the ring's part; the per-arm tally of pictures within 40 px is the measure.
 
+- **Hit counter rev 6 (2026-11-14 01:20): the gun's share of every burst.** Bursts near a missile launch
+  were left out of the gun's figures whole. That was 48 of 55 bursts in the 21:07 session, and it hid
+  the gun hits, as at 21:51.
+  - Rises in today's bursts, measured: 9 to 55 (ten), 75 (one), 94 to 142 (nineteen, 98 twelve times),
+    300 and more (eight, misreads).
+  - Inferred: the small rises are the gun and 94 to 142 are missiles. `gun_gain` counts the rises of 60
+    or less (`GUN_STEP_MAX`) between the values `burst_gain` keeps. Each `GUNHIT` line now has `gun=`,
+    and the summary adds the gun's share by arm over every burst, mixed or not.
+  - Rescored over every Phase 3 round wingman flew (takeover rounds left out):
+
+    | Arm | Bursts | With gun hits | Gun seconds | Gun damage |
+    |---|---|---|---|---|
+    | Marker | 52 | 4 | 41.3 s | 138 |
+    | Ring | 80 | 3 | 59.5 s | 73 |
+
+  - The gun does hit: 7 bursts with gun-sized steps, all hidden before. Seven hits do not separate the
+    arms.
+
+- **Rev 4 (2026-11-14): `fire_px` 60, was 40.** The operator's "just get it close" and the table under
+  "What the operator knows from flying": from 40 to 60 px the next picture had the ring within 60 px 80%
+  of the time. The gun lets go at 90 px (1.5 times). The shutdown tally `GUNAIM: ring within N px`
+  counts within 60 px from here, so its rows are not comparable with the earlier ones.
+
+- **Rev 4 and hit counter rev 6 live from 2026-11-14 01:49** (`make r3`, gate 4,297 passed).
+
+- **Account 2 from 2026-11-14 02:07** (`make r2`, same code as the 01:49 run). Account 2's jets
+  differ from account 3's (2026-11-13 morning: Su-57, Mirage 2000, J-10), so the trial log names the
+  account and jets on each row.
+
+- **First gun hit from a burst opened on the ring (measured, account 2, 2026-11-14 02:16:26).** Ring
+  round, Mirage III, 0.36 km. The gun opened with the ring 26 px from the crosshair and held for 1.5 s.
+  The damage text read 18, then 36 (a misread 3736 in between taken as 36): gun share 18. A missile was
+  launched near it, so before rev 6 it would not have counted.
+
 Tests: `tests/test_gun_lead.py` (Phase 3 section): the ring's error against the crosshair, the memory and
 the dots rule, firing on the ring with the marker out of the box, holding fire with the ring off the
 crosshair, the marker arm unchanged, the tally, the round draw, the summary by arm and the config.
@@ -481,6 +515,10 @@ Also `tests/test_mission_stats.py` (the round tag) and `tests/test_tick_handlers
 
 | Session | Code | Missions | Ring arm rounds | Marker arm rounds | Ring within 40 px under 1.2 km, by arm | Clean bursts and damage, by arm | Notes |
 |---|---|---|---|---|---|---|---|
+| 2026-11-14 04:20 to 05:00, `make r2` (account 2) | ADR 179 rev 1 (closing brake) with Phase 3 rev 4 | 5 (2 taken over: rounds 4 and 5) | 0 | 5 (all marker) | marker arm 9 of 106 pictures (the tally includes the taken-over rounds) | One gun hit, 12 at 1.90 km on the marker rule. Closing brake: 4 holds, 4.4 s in all, at 527, 498, 483 and 374 m/s (all head-on speeds); encounters under 1.2 km: brake arm 10, median 1.2 s; control arm 2, median 4.7 s (the brake arm's include the two taken-over rounds; too few to read) | Stopped with z for ADR 179 revs 2 and 3, after the operator flew rounds 4 and 5. Every brake release was logged "the target no longer has the steering"; the causes were a dive brake taking the key (twice, one at 726 KPH where it did not brake), the flare roll, and one unread. Revs 2 and 3 fix that. Score 850 per round read (3 rounds), K/D/A 4.3/2.3/3.3 |
+| 2026-11-14 02:07 to 04:00, `make r2` (account 2) | Phase 3 rev 4 (`fire_px` 60) and hit counter rev 6 | 17, none taken over | 10 | 7 | within 60 px: ring arm 23 of 185 pictures (12%); marker arm 0 of 135 | Gun share (rev 6, every burst): ring arm 4 of 35 bursts with gun hits, 28.5 s, 116 damage; marker arm 0 of 20, 14.0 s, 0. The four: 18 at 0.36 km (opened on the ring, 26 px), 36 at 0.49 km (on the ring, 51 px), 8 at 0.96 km and 54 at 1.90 km (both on the marker rule, no ring). The gun opened on the ring 6 times | Stopped by the operator with Backspace during matchmaking at 04:00 (standby). Range readings: 356 of 5,249 under 1.2 km (7%), 372 at 1.2 to 2.0 km. Ring found 216 of 276 under 1.0 km (78%), confirmed 139; 31 of 37 at 1.0 to 1.2 km. Projection against the ring: 299 pictures, miss median 137 px, 15 within 40 px, 66 within 80 px. One burst with no missile launch near it gained 108 with a gun share of 0: a missile-sized rise from a missile launched earlier, so the "clean" sums are not gun-only and the gun share is the figure to use. Mirage III (17 lobby reads), Mirage 2000 (2); maps CRUCIBLE, ICEBOUND, STONE, STORMBREAK. Score 255 per round read, K/D/A 1.1/4.2/1.6 |
+| 2026-11-14 01:49 to 02:05, `make r3` | Phase 3 rev 4 (`fire_px` 60) and hit counter rev 6 | 3 | 2 (rounds 1, 2) | 1 (round 3) | within 60 px from here: ring arm 3 of 59 pictures; marker arm 0 of 15 | 5 bursts, all in ring rounds, 2.2 s, no gun hits (rev 6 share 0). One opened on the ring at 50 px, which the 40 px rule would not have opened (01:52:46, 0.77 km): the chase brought the ring 377, 281, 222, 113, 50 px in 1 s; the dive recovery took the aircraft after 0.1 s | Stopped by the operator with z during matchmaking at 02:05. Range readings: 74 of 822 under 1.2 km (9%). Projection against the ring: 62 pictures, miss median 135 px, 6 within 40 px, 20 within 80 px. J35 Draken every round. Score 378 per round read, K/D/A 1.3/2.0/1.3 (3 rounds) |
+| 2026-11-14 00:40 to 01:23, `make r3` | Phase 3 rev 3 and the HUD projection | 6 (1 taken over) | 4 (rounds 1, 3, 4, 6; 4 taken over) | 2 (rounds 2, 5) | ring arm 6 of 73 pictures (8%); marker arm 0 of 10 (the tally includes the taken-over round) | ring arm 4 clean bursts at 1.2 to 2.0 km, 3.5 s, 0 damage; 12 bursts mixed. Gun share (rev 6, rescored): ring arm 2 bursts with gun hits, 9 each | Stopped with z for hit counter rev 6. Range readings: 100 of 1,906 under 1.2 km (5%), 108 at 1.2 to 2.0 km. Projection against the ring: 74 pictures, miss median 114 px, 13 within 40 px, 21 within 80 px (the same method offline on this log: 123 px; no lead: 169 px). Jets: Mirage III (5 reads), J35 Draken (2), Mirage 2000 (1), MiG-21 (1); maps COUNTDOWN, CRUCIBLE. Score 209 per round read, K/D/A 1.0/3.8/1.8. An earlier session the same night (23:48 to 00:24, 5 rounds) had 4 of 5 rounds taken over by the operator and is not a row |
 | 2026-11-13 21:07 to 23:33, `make r3` | Phase 3 rev 3 (160 px confirmation with the dots) | 24 | 15 | 9 | ring arm 11 of 102 pictures (11%); marker arm 1 of 59 (2%) | ring arm 5 clean bursts, 2.9 s, 0 damage; marker arm 2, 1.3 s, 0 damage. 48 of 55 bursts were mixed with a missile. One burst opened on the ring (21:19, 33 px, 0.2 s, mixed, no damage text read) | Stopped with z for the HUD projection build. Range readings: 184 of 4,778 under 1.2 km (4%), 312 at 1.2 to 2.0 km. The ring arm's 11 pictures are two encounters (rounds 2 and 8, in the build notes above); round 8's showed gun-sized damage steps with the ring on the crosshair, in a mixed burst. Under 1.0 km the ring was found 95 of 136 (70%), confirmed 60 (rev 2: 25 of 79 found); at 1.0 to 1.2 km found 0 of 25. MiG-23 Flogger every round; maps COUNTDOWN, CRIMSON, CRUCIBLE, ICEBOUND, STORMBREAK. Score 202 per round read, K/D/A 0.9/3.5/1.2. By arm over all three Phase 3 sessions (39 rounds, from the `gun_aim` tags; under 40 an arm, so noise): ring arm 21 rounds, score 169 a round, kills 0.8, deaths 3.0, deaths with no kill card 4 (0.2 a round); marker arm 18 rounds, score 214, kills 0.9, deaths 3.7, deaths with no kill card 12 (0.7 a round) |
 | 2026-11-13 20:11 to 20:55, `make r3` | Phase 3 rev 2 (`steer_max_km` 1.2) | 7 | 3 (rounds 3, 6, 7) | 4 (rounds 1, 2, 4, 5) | ring arm 0 of 83 pictures; marker arm 5 of 64 (8%) | All 16 clean bursts at 1.2 to 2.0 km, all `aim=marker`: ring arm 11 bursts, 5.1 s, 0 damage; marker arm 5, 2.5 s, 0 damage. No burst opened on a ring | Stopped with z for rev 3. Range readings: 166 of 1,851 under 1.2 km (9%), 254 at 1.2 to 2.0 km. The ring arm aimed at a ring 8 times, every one a real ring (green or tan, 4 dots) on a close, fast pass; the chase rolled toward it and brought it from about 445 to 280 px (20:26) and from 431 to 130 to 170 px (20:50), never inside 40, before the target went by. When the ring was confirmed 135 px away during a marker-rule burst (20:50:13), the ring rule released the gun. The marker arm's 5 pictures on the crosshair are one encounter, round 5 at 20:40:22 to 23: the target dead ahead, closing from 0.80 to 0.46 km, the ring 1 to 11 px from the crosshair, the gun firing. That 2.6 s burst read 164 then 197, a step of 33 (gun-sized; missile steps were 94), marked mixed. Under 1.0 km the ring was found 79 of 113, confirmed 25; at 1.0 to 1.2 km found 3 of 30, none confirmed. The 80 px confirmation dropped half the close-range ring pairs (rev 3). MiG-23 Flogger every round, maps CRUCIBLE and STONE. Score 251 per round read, K/D/A 1.3/3.4/1.7 (7 rounds, not attributed) |
 | 2026-11-13 19:18 to 19:58, `make r3` | Phase 3 rev 1 (ADR 178 before `steer_max_km`) | 8 | 3 (rounds 6 to 8) | 5 (rounds 1 to 5) | ring arm 0 of 8 pictures; marker arm 0 of 6 | ring arm 1 burst, 0.4 s, 0 damage; marker arm 1 burst, 0.2 s, 0 damage. Both opened on the marker (`aim=marker`); no burst opened on a ring | Stopped with z for rev 2. The chase rarely got close: of 1,220 range readings with a number, 16 were under 1.2 km, 42 at 1.2 to 2.0 km and 1,162 at 2 km or more. The one aim at a "ring" (round 7, 19:53:41, 0.7 s) was control point A's dashed circle at 1.9 km, the reason for rev 2. Ring found 8 of 12 under 1.0 km and 15 of 50 at 1.2 to 2.0 km (colours red 20, green 2, tan 1); red past 1.2 km is inferred to be mostly the objective markers. MiG-23 Flogger every round, maps CRIMSON and ICEBOUND. Score 100 per round read, K/D/A 0.1/2.8/0.9 (a jet and 8-round figure, not attributed). New hit-counter misread, in a mixed burst at 19:56:40: 113, 113, 713, 713, 1113, 113 gained 600. A "1" read as "7" twice in a row passes both the two-readings rule and the wrapped rule; open |
@@ -507,6 +545,29 @@ questions.
   following target." Slower, the aircraft turns tighter; the speed comes back once the nose is on the
   target again.
 
+- **The game's aim assist finishes the aim.** "We just need to get it close, the game's aim assist will
+  zoom the camera in and bring it closer, this may need to be factored into our controls."
+  (2026-11-14.) The logs fit it (measured, 466 back-to-back ring sightings under 1.2 km with two or more
+  dots):
+
+  | Ring's distance now | Pairs | Next picture within 40 px | Next picture within 60 px |
+  |---|---|---|---|
+  | 0 to 20 px | 16 | 88% | 94% |
+  | 20 to 40 px | 13 | 62% | 77% |
+  | 40 to 60 px | 5 | 20% | 80% |
+  | 60 to 80 px | 8 | 38% | 38% |
+  | 100 to 150 px | 13 | 0% | 0% |
+  | 150 to 250 px | 75 | 1% | 3% |
+
+  Once close, the ring stays close. It did so in the Phase 1 shadow too, with wingman steering at the
+  marker: 19, 16, 3, 5 px and 9, 9, 10, 12, 13, 18 px. Inferred: that is the assist; under 100 px the
+  samples are small. What it means for the controls:
+  - the gun opens at 60 px, not 40 (Phase 3 rev 4, below);
+  - near the ring the steering keys may fight the assist: the deadband is about 48 px across but only
+    30 px up and down. To be measured with rev 4 flying;
+  - the zoom: while the camera is zoomed, a held key moves the picture further per second, which
+    changes the hold model's rates and the projection's scale. The logs cannot show the zoom yet. Open.
+
 ### Plan
 
 Each step that changes what wingman does is a per-round trial with its own ADR, as Phase 3 is.
@@ -519,9 +580,56 @@ Each step that changes what wingman does is a per-round trial with its own ADR, 
    far out to fire.
 3. **The gun fires on the projected point where no ring shows**, out to ADR 177's 2 km.
 4. **The crossing-target turn.** When the target's crossing rate is high, the chase brakes while it
-   turns and takes the afterburner once the target is ahead again. The measure: targets lost within a few
+   turns and takes the afterburner once the target is ahead again. The braking half is built
+   ([ADR 179](../adr/179-the-chase-brakes-when-it-closes-fast-on-a-near-target-in-half-the-rounds.md),
+   2026-11-14, a per-round trial: the airbrake while a target under 1.5 km closes at 150 m/s or more).
+   Turning toward the projected side is the half still to build. Live from 2026-11-14 04:20 on `make r2` (gate 4,316 passed). The measure: targets lost within a few
    seconds of a high crossing rate, by arm. D6 item 3 (the airbrake) is part of this.
 5. **Missiles.** Measured first: missile hits (the 94-point steps) against the crossing rate at launch.
+
+### Step 2: the operator's recording cannot give the range
+
+Tried 2026-11-14 on the 2026-11-04 recording (`test_screenshots/gun_lead/tools/demo_gun_damage.py`, 234
+bursts of the gun key, 571 s held). Measured:
+
+- **Range: not readable.** The tracker does not lock on the half-scale JPEG frames scaled back up, and
+  EasyOCR of the nameplates misreads them: "3.9km" read as "3 91m", "1.5km" as "45km". Live data answers
+  step 2 instead. Every live burst logs its range at the opening, and rev 6 counts the gun's hits in
+  every burst.
+- **The operator's gun hits** (no range): 125 bursts had damage readings, 13 of them (10%) with
+  gun-sized rises, 517 damage over 363 s held. The frames are about a second apart, so a value is often
+  seen once. These are counted with every rise of 60 or less between consecutive readings, not with
+  the live rule's "read twice in a row".
+  - Wingman's Phase 3 bursts, rescored with rev 6: 7 of 132 (5%), 211 damage over 101 s.
+  - Different rules and jets, so a rough guide only.
+- **The operator's steps came in 14s:** 28 to 42, 21 to 35 to 70, 14 to 42. Inferred: a fixed damage a
+  bullet for that jet. Wingman's live steps were 9, 20 to 33 and 55.
+
+### Why step 4 comes next: close encounters last two seconds
+
+Measured 2026-11-14 on the six Phase 3 logs: 89 encounters with three or more range readings under
+1.2 km.
+
+| Measure | Value |
+|---|---|
+| Time under 1.2 km, median | 2.0 s (quarter under 1.1 s; 71% under 3 s) |
+| Closing speed to the nearest point, median | 252 m/s (73% over 150 m/s) |
+| Nearest point, median | 0.48 km |
+| Ended with the range opening again by 150 m or more | 6 of 89 |
+
+- Wingman arrives in gun range closing at about its own flying speed and has about two seconds there.
+  The ring cannot be brought to the crosshair and held in that time, whatever the aim rule.
+- Most encounters end at their nearest point with the target lost from view, not with the range
+  opening: the target goes out of the picture as wingman goes by (inferred).
+- This is the operator's second and third statement measured. Step 4 (brake while turning with a
+  crossing target, then speed up) is the lever for time in range. The airbrake already has a holder for
+  objective approaches (`_approach_brake`), and the projection names the target's side 89% of the time.
+
+### A gun hit past the ring's range (measured, 2026-11-14 03:57:50, account 2)
+
+A 2.8 s burst on the marker rule at 1.90 km, no ring in the picture, read 119, then 173: a gun-sized rise
+of 54 (missile steps are 94 to 142). It is the first measured sign of the operator's first statement,
+that the gun hits before the ring appears. One burst, and mixed with a missile launch.
 
 ### First check: the marker's screen speed alone does not find the ring
 
@@ -609,10 +717,31 @@ flies on it.
   rounds 3 and 4 by Enter during loading. They then stopped wingman with Backspace and kept flying.
   The projection logged no errors. Scored against the ring on 10 pictures: median miss 99 px, 1 within
   40 px, 3 within 80 px. Too few to compare with the offline 71 px; the chase was rarely in ring range.
+- **Second session (00:40 on, measured): the live point is the designed point.** On 2026-11-14's log the
+  live miss was a median 112 px over 66 pictures. The offline method with the same fixed values, run on
+  the same log, gives the same speeds and misses picture by picture (88 against 89 px, 137 against 138,
+  169 against 167). So the code is right; the session's encounters are harder. With no lead the miss
+  is 169 px there, against 134 px on the fit's six logs. The projection takes a quarter off the no-lead
+  miss there, and half on the fit's logs. How much it helps varies by session; judge it over many.
 - **Scored only under 1.1 km.** The factors were fitted on rings under 1.2 km, and the lead grows with the
   range: at 23:51 the target was 7.2 km out, and a drift of 30 to 50 px/s drew a lead over 100 px. Past
   the ring's range the point is an extrapolation that nothing scores yet (inferred). Plan step 2 (damage
   by range) is what would score it there.
+
+### Phase 3 by arm, running total
+
+From the `gun_aim` tags in the stats files of 2026-11-13 and 14, accounts 2 and 3, all revisions, rounds
+the operator took over left out. Measured 2026-11-14 04:05.
+
+| Arm | Rounds | Score a round | Kills | Deaths | Deaths with no kill card |
+|---|---|---|---|---|---|
+| Ring | 37 | 222 | 1.0 | 3.4 | 18 (0.5 a round) |
+| Marker | 28 | 211 | 0.8 | 3.8 | 20 (0.7 a round) |
+
+- The ring arm is not worse on any of these. Round score swings by about 200 between rounds on unchanged
+  code, so none of the gaps is a result yet; the marker arm is 12 rounds short of 40.
+- The revisions changed the ring arm as it went (the 1.2 km limit, the 160 px confirmation, `fire_px`
+  60), so the earlier ring rounds are not the current rule.
 
 ## Risks and open questions
 

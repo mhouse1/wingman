@@ -470,7 +470,7 @@ def test_the_shared_config_runs_the_phase3_trial_in_half_the_rounds():
     assert schema_default("pursuit_mode.gun_lead.steer_share") == 0.0
     cfg = yaml.safe_load((Path(__file__).parents[1] / "wingman" / "config.yaml").read_text())
     gl = cfg["pursuit_mode"]["gun_lead"]
-    assert gl["steer_share"] == 0.5 and gl["fire_px"] == 40
+    assert gl["steer_share"] == 0.5 and gl["fire_px"] == 60
     assert gl["ring_memory_s"] == 0.45 and gl["ring_min_dots"] == 2
     assert gl["steer_max_km"] == 1.2 == schema_default("pursuit_mode.gun_lead.steer_max_km")
 
@@ -491,3 +491,50 @@ def test_a_dotted_ring_is_confirmed_across_a_fast_move_and_an_undotted_one_is_no
     assert watch.observe(frame, (680, 640), 0.6, ts=1.2, gun_held=False) is not None  # 126 px
     assert watch.observe(frame, (560, 600), 0.6, ts=1.4, gun_held=False) is not None  # 126 px back
     assert watch.observe(frame, (680, 640), 0.6, ts=1.6, gun_held=False) is None      # 1 dot
+
+
+@pytest.mark.parametrize("values,gun", [
+    # 21:51:19 (live, mixed): 98, then 109 and 131 read once each, then 153
+    # read again and again. Counted: 98 to 153, a gun-sized 55.
+    ([98, 98, 98, 98, 98, 98, 98, 109, 131, 153, 4433, 153, 153, 153, 453, 153, 153, 153], 55),
+    # A missile hit of 94 between gun hits: only the gun's rises count.
+    ([30, 30, 52, 52, 146, 146, 168, 168], 44),
+    # 19:56:40 (live): "1" read as "7" twice, a rise of 600, is not the gun.
+    ([113, 113, 713, 713, 1113, 113, 113], 0),
+    ([], 0),
+])
+def test_the_guns_share_is_the_small_rises(values, gun):
+    """Rev 6: a burst near a missile launch keeps the gun's rises (60 or less)."""
+    assert gd.gun_gain(values) == gun
+
+
+def test_a_mixed_burst_still_counts_its_gun_damage_by_arm():
+    log = GunDamageLog()
+    log.missile_fired(now=9.5)
+    log.burst_open(0.8, 20.0, now=10.0, arm="ring", aim="ring")
+    for v in (98, 98, 120, 120, 214, 214):
+        log.damage(v, None)
+    log.burst_close(now=11.0)
+    log.tick(now=14.0)
+    assert log.mixed == 1 and log.by_arm == {}
+    assert log.gun_by_arm == {"ring": [1, 1, 1.0, 22]}
+    assert "gun share, ring arm: 1 bursts, 1 with gun hits, 1.0s, 22 dmg" in log.summary()
+
+
+def test_the_shipped_fire_radius_opens_close_and_lets_go_late(monkeypatch):
+    """Rev 4: fire_px 60 (operator: "we just need to get it close", the aim
+    assist does the rest). 55 px opens the gun, 89 holds it, 91 lets go."""
+    cfg = yaml.safe_load((Path(__file__).parents[1] / "wingman" / "config.yaml").read_text())
+    ctrl, keys, frame = _ring_ctrl(monkeypatch, "ring")
+    ctrl._ring_fire_px = float(cfg["pursuit_mode"]["gun_lead"]["fire_px"])
+    ctrl._ring_aim(frame, True, 1.1)
+    ctrl._ring_aim_px = 55.0
+    ctrl._pursuit_gun_tick(True, 0.3, 0.3)
+    assert keys == [("down", FIRE_MACHINE_GUN)]
+    ctrl._ring_aim_px = 89.0
+    ctrl._pursuit_gun_tick(True, 0.3, 0.3)
+    assert keys == [("down", FIRE_MACHINE_GUN)]
+    ctrl._ring_aim_px = 91.0
+    ctrl._pursuit_gun_tick(True, 0.3, 0.3)
+    assert keys[-1] == ("up", FIRE_MACHINE_GUN)
+    ctrl._target_range.stop()

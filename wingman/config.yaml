@@ -1980,7 +1980,11 @@ pursuit_mode:
     # onto the lead ring and fire while it is within fire_px of it; the other
     # half steer at the marker and fire on today's rule.
     steer_share: 0.5
-    fire_px: 40
+    # Rev 4 (2026-11-14): 60, was 40. Operator: "we just need to get it close,
+    # the game's aim assist will zoom the camera in and bring it closer". Of
+    # ring sightings 40 to 60 px from the crosshair, the next picture had the
+    # ring within 60 px 80% of the time; from 100 px and more, never.
+    fire_px: 60
     # 0.45 s spans one missed picture: confirmed rings 60% of the time follow
     # each other within 0.26 s, 70% within 0.42 s (2026-11-13, 196 gaps).
     ring_memory_s: 0.45
@@ -1992,6 +1996,21 @@ pursuit_mode:
     # matches scoring under 0.50 past 1.2 km sat 223 to 357 px from the marker,
     # the two under 1.0 km (real rings) 38 to 40 px.
     steer_max_km: 1.2
+  # ADR 179 (operator, 2026-11-13: "slow down while turning and then speed up
+  # quickly"): half the rounds, drawn per round, hold the airbrake while the
+  # tracked target is under on_km and the range closes at on_mps or more. Of 89
+  # encounters under 1.2 km, the median lasted 2.0 s at a median 252 m/s of
+  # closing, 73% over 150 m/s (Design 021). Named guesses: off_mps, max_hold_s
+  # and cooldown_s. min_kph is the lowest speed the approach brake aims for
+  # (resupply_target_kph).
+  closing_brake:
+    share: 0.5
+    on_km: 1.5
+    on_mps: 150
+    off_mps: 50
+    max_hold_s: 4.0
+    cooldown_s: 3.0
+    min_kph: 650
   # Design 021 Phase 5 (shadow): where the tracked target is going, drawn on
   # live_hud.png as PROJ and logged as TARGETPROJ. Nothing flies on it. The
   # three values are the fit on 630 ring sightings of 2026-11-13: the marker's

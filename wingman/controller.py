@@ -33,6 +33,7 @@ from .clear_path import PathGoal
 from .gun_damage import GunDamageLog
 from .lead_ring import LeadRingWatch, RingAimTrial, crosshair
 from .target_projection import TargetProjection
+from .closing_brake import ClosingBrake
 from .target_range import TargetRangeReader
 from .crop_region import CropCoords, crop_centre
 from .icon_steering import IconPoints, IconSteeringConfig, find_ring_icons
@@ -968,6 +969,22 @@ class Controller:
                                             _gl_get("crosshair_pct"))
             self._gun_damage = GunDamageLog()
             self._target_range.damage_log = self._gun_damage
+        # ADR 179: in a share of rounds the chase brakes when it closes fast on
+        # a target that is near. It needs the range reader.
+        _cb = _pm.get("closing_brake") or {}
+
+        def _cb_get(key):
+            return _cb.get(key, schema_default("pursuit_mode.closing_brake." + key))
+        self._closing_brake = ClosingBrake(
+            float(_cb_get("share")) if self._target_range is not None else 0.0,
+            _cb_get("on_km"), _cb_get("on_mps"), _cb_get("off_mps"),
+            _cb_get("max_hold_s"), _cb_get("cooldown_s"))
+        self._closing_brake_min_kph = float(_cb_get("min_kph"))
+        self._closing_brake_holds = False       # the airbrake is down for it
+        self._closing_brake_since = 0.0
+        self._closing_brake_count = 0
+        self._closing_brake_held_s = 0.0
+        self._closing_brake_read_ts: "float | None" = None
         # Design 021 Phase 5 (shadow): where the tracked target is going, from
         # the marker's motion with the chase's own keys taken out. Logged and
         # drawn on the HUD; nothing flies on it.
@@ -2132,6 +2149,58 @@ class Controller:
             except Exception as exc:
                 log_suppressed(logger, "agreement_trial_note", exc)
 
+    def closing_brake_new_round(self) -> None:
+        """A round has started: draw ADR 179's arm for it, log it, and tag the
+        round for the summary."""
+        brake = getattr(self, "_closing_brake", None)
+        arm = brake.new_round() if brake is not None else None
+        if arm is None:
+            return
+        logger.info("CLOSEBRAKE TRIAL: round %d — %s arm (ADR 179, share %.2f)",
+                    brake.rounds, arm, brake.share)
+        if self._round_note is not None:
+            try:
+                self._round_note("brake_arm_" + arm, time.time())
+            except Exception as exc:
+                log_suppressed(logger, "closing_brake_note", exc)
+
+    def _closing_brake_note(self) -> None:
+        """ADR 179, every pursuit cycle in both arms: pass the tracked target's
+        newest range reading on, for the closing speed and the encounter tally.
+        Its failure must not cost the steering tick."""
+        brake = self._closing_brake
+        if not brake.enabled or self._target_range is None or self._gun_cluster is None:
+            return
+        try:
+            reading = self._target_range.latest(self._gun_cluster, self._gun_range_max_age_s)
+            if reading is not None and reading.ts != self._closing_brake_read_ts:
+                self._closing_brake_read_ts = reading.ts
+                brake.note(reading.km, reading.ts)
+        except Exception as exc:
+            log_suppressed(logger, "closing_brake_note", exc)
+
+    def _closing_brake_goal(self, target_steers: bool) -> "str | None":
+        """ADR 179: "closing target" while a `brake` round should hold the
+        airbrake: the target steers, its range closes fast, and a fresh speed
+        reading is at `min_kph` or more."""
+        brake = self._closing_brake
+        if not brake.enabled:
+            return None
+        try:
+            if not target_steers:
+                brake.stop("the target no longer has the steering")
+                return None
+            if not brake.wants(time.monotonic()):
+                return None
+            speed, _ts = self._speed_reading()
+            if speed is None or speed < self._closing_brake_min_kph:
+                brake.stop("no fresh speed" if speed is None else "%.0f KPH" % speed)
+                return None
+            return "closing target"
+        except Exception as exc:
+            log_suppressed(logger, "closing_brake_goal", exc)
+            return None
+
     def gun_aim_new_round(self) -> None:
         """A round has started: draw Design 021 Phase 3's arm for it, log it,
         and tag the round for the summary (as ADR 172 does)."""
@@ -2880,9 +2949,39 @@ class Controller:
         or below `target_kph` ends one early.
         """
         cfg = self._approach_brake_cfg
+        now = time.time()
+        # ADR 179: the chase closing fast on a near target. Held for as long as
+        # the goal is given, not dosed on the speed; the vetoes are the same.
+        if goal == "closing target":
+            veto = self._approach_brake_veto(now)
+            if veto is not None:
+                self._approach_brake_off(veto)
+                return
+            if not self._closing_brake_holds:
+                self._closing_brake_holds = True
+                self._closing_brake_since = now
+                self._closing_brake_count += 1
+                closing = self._closing_brake.closing_mps()
+                logger.info("CLOSEBRAKE: airbrake on — the target is closing at %s m/s",
+                            "?" if closing is None else "%.0f" % closing)
+            self._dive_dose_running = False
+            self._approach_brake_until = now + 1.0
+            self._approach_brake_on()
+            return
+        if self._closing_brake_holds:
+            if goal is not None and self._approach_brake_held:
+                # Another brake wants the key: hand it over held, not released
+                # and pressed again in the same millisecond (live 04:24:37, a
+                # fast dive took it 0.2 s after the closing brake went on).
+                self._closing_brake_holds = False
+                self._closing_brake_held_s += max(0.0, now - self._closing_brake_since)
+                self._closing_brake.stop("handed to the %s brake" % goal)
+                logger.info("CLOSEBRAKE: airbrake handed to the %s brake", goal)
+            else:
+                self._approach_brake_off(self._closing_brake.why_off
+                                         or "the target no longer has the steering")
         if not cfg["enabled"]:
             return
-        now = time.time()
         armed = goal is not None and bool(cfg.get(self._BRAKE_GOAL_KEYS.get(goal, ""), False))
         unarmed = (self._dive_brake_end_why if self._dive_dose_running
                    else "no braked objective has the steering")
@@ -2953,6 +3052,9 @@ class Controller:
         self._approach_brake_until = 0.0
         self._dive_dose_running = False
         self._dive_brake_end_why = "no braked objective has the steering"
+        if getattr(self, "_closing_brake_holds", False):
+            self._closing_brake_holds = False
+            self._closing_brake_held_s += max(0.0, time.time() - self._closing_brake_since)
         if not getattr(self, "_approach_brake_held", False):
             return
         self._approach_brake_held = False
@@ -5224,6 +5326,7 @@ class Controller:
                             self._target_range.submit(frame, self._gun_cluster, picture_ts)
                         self._gun_lead_shadow(frame, obs, picture_ts)
                         self._target_projection_shadow(frame, obs, picture_ts)
+                        self._closing_brake_note()
                         # Design 021 Phase 3 (D4): in a `ring` round, with a ring
                         # of this target in view, the chase and the gun take
                         # their error from the ring against the crosshair. Every
@@ -5246,6 +5349,9 @@ class Controller:
                         if owner != yield_owner:
                             if owner is not None:
                                 self.release_tracking_holds(why=f"yield to {owner}")
+                                # ADR 179: the airbrake's release names it too
+                                # (live 04:24:52, the flare roll).
+                                self._closing_brake.stop(f"yield to {owner}")
                                 logger.info(
                                     "Controller: pursue_and_engage — yielding pitch and "
                                     "roll to the %s (%s)", owner,
@@ -5617,8 +5723,13 @@ class Controller:
                                               else "control point")
                             else:
                                 # Cycle 27: a fast dive with no objective steering,
-                                # the chase included.
-                                brake_goal = self._dive_brake_goal()
+                                # the chase included. ADR 179 rev 3: the chase
+                                # closing fast on a near target first. The dive
+                                # goal is set in any dive of -10 deg under 3 km,
+                                # braking or not, and cut the closing brake at
+                                # 726 KPH (live 04:37:29); both hold the same key.
+                                brake_goal = (self._closing_brake_goal(control_visible)
+                                              or self._dive_brake_goal())
                         self._approach_brake_tick(brake_goal)
                         # Code Review 019 step 3e: the planner's aim in place of the
                         # marker while it detours or escapes (when steering is on).
@@ -10238,6 +10349,12 @@ class Controller:
                 self._path_perception.stop(timeout=0.5)
             except Exception as exc:
                 log_suppressed(logger, "clear_path_stop", exc)
+        if self._closing_brake.enabled:
+            try:
+                logger.info("CLOSEBRAKE: %s; %d holds, %.1f s", self._closing_brake.summary(),
+                            self._closing_brake_count, self._closing_brake_held_s)
+            except Exception as exc:
+                log_suppressed(logger, "closing_brake_summary", exc)
         if self._lead_ring is not None:
             try:
                 logger.info("LEADRING: %s", self._lead_ring.summary())

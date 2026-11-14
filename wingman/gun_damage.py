@@ -39,6 +39,11 @@ SETTLE_S = 2.0
 # A missile launched this long before a burst opened, or during it and its
 # settling time, can add to the same text: such a burst is logged "mixed".
 MISSILE_BEFORE_S = 3.0
+# Rev 6 (2026-11-14): a rise of this much or less is a gun hit. In today's
+# bursts the rises were 9 to 55 (ten), then 75 (one), then 94 to 142 (nineteen,
+# 98 twelve times: missiles), then 300 and more (misreads). A burst near a
+# missile launch keeps its gun share this way.
+GUN_STEP_MAX = 60
 _BANDS = ((0.0, 1.0), (1.0, 1.2), (1.2, 2.0))
 _CROP_DIR = Path("test_screenshots/unknown_anomalies")
 _CROPS_PER_SESSION = 30
@@ -158,6 +163,23 @@ def burst_gain(values: "list[int]") -> "tuple[int, int, int | None, int | None]"
     return gain, drops, (kept[0] if kept else None), (kept[-1] if kept else None)
 
 
+def gun_gain(values: "list[int]") -> int:
+    """The gun's share of a burst's gain: the rises of GUN_STEP_MAX or less
+    between the values `burst_gain` counts. A missile hit (about 94 to 142) and
+    a misread (300 and more) are left out, so a burst near a missile launch
+    still says what the gun did (rev 6)."""
+    clean: "list[int]" = []
+    for v in values:
+        if clean and wrapped(v, clean[-1]):
+            v = clean[-1]
+        elif clean and wrapped(clean[-1], v):
+            junk = clean[-1]
+            clean = [v if c == junk else c for c in clean]
+        clean.append(v)
+    kept = [v for i, v in enumerate(clean) if i > 0 and clean[i - 1] == v]
+    return sum(b - a for a, b in pairwise(kept) if 0 < b - a <= GUN_STEP_MAX)
+
+
 class GunDamageLog:
     """Burst bookkeeping. The pursuit calls `burst_open` and `burst_close` with
     the gun; the worker calls `damage` with each reading; `tick` writes a
@@ -186,6 +208,9 @@ class GunDamageLog:
         # Phase 3, by the round's arm: clean bursts, bursts that gained, gun
         # seconds, damage.
         self.by_arm: "dict[str, list]" = {}
+        # Rev 6, by the round's arm, over every burst, mixed or not: bursts,
+        # bursts with a gun-sized rise, gun seconds, gun damage.
+        self.gun_by_arm: "dict[str, list]" = {}
 
     def missile_fired(self, now: "float | None" = None) -> None:
         if not self._lock.acquire(timeout=0.5):
@@ -278,6 +303,12 @@ class GunDamageLog:
         closed = b.closed if b.closed is not None else time.monotonic()
         held = max(0.0, closed - b.opened)
         gain, drops, first, last = burst_gain(b.values)
+        gun = gun_gain(b.values)
+        tally = self.gun_by_arm.setdefault(b.arm or "-", [0, 0, 0.0, 0])
+        tally[0] += 1
+        tally[1] += gun > 0
+        tally[2] += held
+        tally[3] += gun
         mixed = (self._missile_ts is not None
                  and b.opened - MISSILE_BEFORE_S <= self._missile_ts <= closed + SETTLE_S)
         band = next((i for i, (lo, hi) in enumerate(_BANDS)
@@ -297,11 +328,11 @@ class GunDamageLog:
                 tally[3] += gain
         logger.debug(
             "GUNHIT: burst=%.1fs range=%s ring_px=%s reads=%d first=%s last=%s gain=%d "
-            "drops=%d%s arm=%s aim=%s values=%s",
+            "gun=%d drops=%d%s arm=%s aim=%s values=%s",
             held, "none" if b.km is None else "%.2fkm" % b.km,
             "none" if b.ring_px is None else "%.0f" % b.ring_px, b.reads,
             "-" if first is None else first, "-" if last is None else last,
-            gain, drops, " mixed" if mixed else "", b.arm or "-", b.aim, b.values[:30])
+            gain, gun, drops, " mixed" if mixed else "", b.arm or "-", b.aim, b.values[:30])
 
     def _save(self, crop, value: int, junk: bool = False) -> None:
         """A crop for checking by eye. Readings that wrap their neighbour have
@@ -333,5 +364,7 @@ class GunDamageLog:
                              % (n, k, hb, s, d, d / s if s > 0 else 0.0))
         arms = "".join("; %s arm %d bursts, %d gained, %.1fs, %d dmg" % (a, *t)
                        for a, t in sorted(self.by_arm.items()))
+        arms += "".join("; gun share, %s arm: %d bursts, %d with gun hits, %.1fs, %d dmg" % (a, *t)
+                        for a, t in sorted(self.gun_by_arm.items()))
         return ("; ".join(parts or ["no bursts"]) + "; %d mixed with a missile" % self.mixed
                 + arms)

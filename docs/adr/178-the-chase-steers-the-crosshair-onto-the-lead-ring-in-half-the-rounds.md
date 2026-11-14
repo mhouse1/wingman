@@ -28,8 +28,10 @@ game's lead ring.
   acts on whichever error is steering: the dive guard, terrain, the resupply run, objectives and the
   climb-out. The steering code and the hold model are unchanged.
 - **D3. Firing in the `ring` arm.** While a ring is in use, the gun holds while the ring is within
-  `fire_px` (40 px at 1,200 px high) of the crosshair. It lets go past 1.5 times that, the factor
-  the gun already uses. With no ring in use, the gun uses the marker rule (the target within
+  `fire_px` (60 px at 1,200 px high; 40 until 2026-11-14) of the crosshair. It lets go past 1.5 times
+  that, the factor the gun already uses. The operator, 2026-11-14: "we just need to get it close, the
+  game's aim assist will zoom the camera in and bring it closer". From 40 to 60 px the next picture had
+  the ring within 60 px 80% of the time (Design 021). With no ring in use, the gun uses the marker rule (the target within
   `gun_centre_err`), so a round that never sees a ring flies as a `marker` round does. ADR 177's
   2 km range gate applies in both arms.
 - **D4. The `marker` arm** is today's rule, unchanged.

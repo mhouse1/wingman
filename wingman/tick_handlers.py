@@ -1001,6 +1001,11 @@ class AmmoEventsHandler:
                 self._ctrl.gun_aim_new_round()
             except Exception as exc:
                 log_suppressed(logger, "gun_aim_new_round", exc)
+            # ADR 179: and the closing brake trial.
+            try:
+                self._ctrl.closing_brake_new_round()
+            except Exception as exc:
+                log_suppressed(logger, "closing_brake_new_round", exc)
         self._in_battle = in_battle
 
     def suppress_after_respawn(self, seconds: float = 10.0):

@@ -1155,6 +1155,21 @@ class TestMissionTrialTag:
         assert first["tags"] == {"gun_aim": "ring", "map_warning": "map"}
         assert second["tags"] == {"gun_aim": "marker"}
 
+    def test_the_closing_brake_arm_tags_the_round(self, tmp_path):
+        """ADR 179: the closing brake's arm tags each round, beside the others."""
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        _enter_battle(t, ts=100.0)
+        t.on_event("brake_arm_brake", 100.1)
+        t.on_event("gun_arm_ring", 100.2)
+        _leave_battle(t, ts=400.0)
+        _enter_battle(t, ts=500.0)
+        t.on_event("brake_arm_control", 500.1)
+        _leave_battle(t, ts=800.0)
+        first, second = t.finalize()["missions"]
+        assert first["tags"] == {"close_brake": "brake", "gun_aim": "ring"}
+        assert second["tags"] == {"close_brake": "control"}
+
     def test_no_card_deaths_are_counted_by_round(self, tmp_path):
         """ADR 172: the kill card's verdict per round, the trial's crash count."""
         t = _tracker(tmp_path)
