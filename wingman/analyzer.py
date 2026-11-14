@@ -19,6 +19,7 @@ from .compass import CompassReader
 from .config_schema import schema_default
 from .full_map import FullMapReader
 from .crop_region import CropCoords, get_crop, load_crops, draw_crops
+from .special_weapon import SpecialWeaponReader
 from .telemetry import TelemetryProcessor, pitch_band_from_angle_deg
 # CR-018-15: the FSM vocabulary lives in the leaf module .state, so code that
 # needs only these names does not import EasyOCR through this module. Every
@@ -86,6 +87,13 @@ STALL_ACTION_STATES = (GameState.GAME_UNKNOWN, GameState.GAME_STARTING_STALLED)
 STALL_RECOVERY_CROPS = ("STALL_PROFILE", "STALL_INVITE_PLAYERS", "STALL_PARTS_CRATE",
                         "STALL_CHOOSE_REWARDS", "STALL_RETRY", "STALL_EXIT_TO_DESKTOP",
                         "STALL_AIRCRAFT")
+
+# Anomaly 004: the parts dialog is handled only once the liveness guard reports
+# a stall (ADR 093 soft limit), so an operator at the desk has that long to pick
+# the jet themselves (operator, 2026-11-13). These are the states it opens in.
+STALL_PARTS_CROP = "STALL_PARTS_SELECT"
+STALL_PARTS_STATES = (GameState.GAME_LOBBY, GameState.GAME_UNKNOWN,
+                      GameState.GAME_STARTING_STALLED)
 
 # Gated on UNREADY dwell rather than state dwell: UNREADY makes
 # scan_region_for_play_button return None, which makes _classify_unknown_state
@@ -504,7 +512,14 @@ def _process_health_region(health_frame, label: str = "health") -> "tuple[int | 
     return (None, time.time() - t_start)
 
 
-def _row_value(boxes) -> "tuple[int | None, float]":
+# Design 020: how EasyOCR renders the altitude's minus sign. The HUD shows the map
+# mesh's height, signed (-206 m over Crimson Canyon's water); the same glyph came
+# back as '-', '+' and '"' on three frames of 2026-11-07. On 124 positive altitude
+# rows only 'i' and "'" ever led the digits, both on junk reads, so neither counts.
+_ALT_MINUS_GLYPHS = frozenset('-+"−–—')
+
+
+def _row_value(boxes, signed: bool = False) -> "tuple[int | None, float]":
     """Parse the leading number from one row of x-ordered OCR boxes.
 
     Boxes are joined left-to-right into a single string, and the first contiguous
@@ -514,6 +529,9 @@ def _row_value(boxes) -> "tuple[int | None, float]":
     '27681 feet' → 27681). Returns (value, confidence); confidence is the
     minimum OCR confidence across the row's digit boxes (conservative — one
     doubtful box taints the row), 0.0 when the row has no digits.
+
+    With `signed` (the altitude row), a minus glyph just before the digits makes
+    the value negative (see _ALT_MINUS_GLYPHS).
     """
     boxes_sorted = sorted(boxes, key=lambda b: b[1])
     text = " ".join(str(t) for _, _, t, _ in boxes_sorted)
@@ -521,7 +539,46 @@ def _row_value(boxes) -> "tuple[int | None, float]":
     if not match:
         return (None, 0.0)
     conf = min(c for _, _, _, c in boxes_sorted)
+    if signed:
+        return (_altitude_token_value(text), float(conf))
     return (int(match.group()), float(conf))
+
+
+def _altitude_token_value(text: str) -> "int | None":
+    """The altitude row's number, or None when its token is garbled.
+
+    The token is the first whitespace-separated word holding a digit. It may carry
+    a minus glyph in front (also as a separate word just before it) and an `m`
+    label behind; anything else in it means a garbled read, not a shorter number.
+    Of 43 raw reads under 300 m on 2026-11-08, most were high altitudes with a digit
+    turned into a letter: '1B10 m' (1,810) parsed as 1, '38*6m' as 38, 'Y78 m'
+    (1,878) as 78. A false low altitude can start the pull-out and time-to-ground
+    climbs, so such a read is dropped, and the row's fallback passes get their turn.
+    """
+    words = text.split()
+    for i, word in enumerate(words):
+        if not any(ch.isdigit() for ch in word):
+            continue
+        negative = False
+        if word[0] in _ALT_MINUS_GLYPHS:
+            negative, word = True, word[1:]
+        elif i > 0 and words[i - 1] and words[i - 1][-1] in _ALT_MINUS_GLYPHS:
+            negative = True
+        if word[-1:] in ("m", "M"):
+            word = word[:-1]
+            labelled = True
+        else:
+            # A bare number of one or two digits is a fragment: after a respawn on
+            # 2026-11-08 12:36:06 a lone '3' seeded the altitude at 3 m (the spawn was at
+            # about 900 m). The low bare reads seen live were all 1 or 2 digits ('3', '6',
+            # '7', '8', '0', '30', '41'). OCR often drops the unit off a good read, and the
+            # row splitter keeps only boxes with digits, so a longer bare number stands.
+            nxt = words[i + 1].lower().rstrip(".,") if i + 1 < len(words) else ""
+            labelled = len(word) >= 3 or nxt in ("m", "feet", "ft")
+        if not word.isdigit() or not labelled:
+            return None
+        return -int(word) if negative else int(word)
+    return None
 
 
 def _split_telemetry_rows(ocr_results, img_height) -> "tuple[int | None, int | None, float, float]":
@@ -549,17 +606,18 @@ def _split_telemetry_rows(ocr_results, img_height) -> "tuple[int | None, int | N
 
     # Single visible line: assign by which half of the crop it sits in.
     if spread < img_height * 0.25:
-        value, conf = _row_value(boxes)
         line_y = sum(y_centers) / len(y_centers)
         if line_y < img_height / 2.0:
+            value, conf = _row_value(boxes)
             return (value, None, conf, 0.0)
+        value, conf = _row_value(boxes, signed=True)
         return (None, value, 0.0, conf)
 
     mid_row = (max(y_centers) + min(y_centers)) / 2.0
     speed_boxes = [b for b in boxes if b[0] <= mid_row]
     alt_boxes = [b for b in boxes if b[0] > mid_row]
     speed, speed_conf = _row_value(speed_boxes) if speed_boxes else (None, 0.0)
-    alt, alt_conf = _row_value(alt_boxes) if alt_boxes else (None, 0.0)
+    alt, alt_conf = _row_value(alt_boxes, signed=True) if alt_boxes else (None, 0.0)
     return (speed, alt, speed_conf, alt_conf)
 
 
@@ -628,7 +686,7 @@ def _process_telemetry_region(telemetry_frame) -> "tuple[int | None, int | None,
             if current is None:
                 return candidate, candidate_conf
             if (candidate_conf >= _TELEMETRY_ROW_CONF_MIN
-                    and len(str(candidate)) > len(str(current))):
+                    and len(str(abs(candidate))) > len(str(abs(current)))):
                 return candidate, candidate_conf
             return current, current_conf
 
@@ -640,7 +698,17 @@ def _process_telemetry_region(telemetry_frame) -> "tuple[int | None, int | None,
             if speed is not None and altitude is not None:
                 break
 
+    # Design 020: whether the HUD's minus reaches us. Since the sign fix no negative
+    # altitude was accepted in ~16,000 ticks, Crimson Canyon's included (floor -165 m), and
+    # the lowest reads sat at 0 to 4 m. The raw text of every low read shows whether a
+    # minus glyph is there and missed, or absent.
+    if altitude is not None and abs(altitude) < _ALT_RAW_LOG_BELOW_M:
+        logger.debug("ALT RAW: parsed=%s hsv=%r", altitude,
+                     [str(t) for _, t, _ in results])
     return (speed, altitude, time.time() - t_start)
+
+
+_ALT_RAW_LOG_BELOW_M = 300
 
 
 def _apply_health_ceiling_filter(
@@ -1004,6 +1072,14 @@ class GameStateAnalyzer:
         # Named percentage-coordinate crop regions (ADR 023)
         self.crops = load_crops(config.get("crops", {}))
 
+        # ADR 173: the special weapon's ring, read on every battle frame. No crop,
+        # or `special_weapon.enabled: false`, leaves it unknown and nothing presses.
+        sw_cfg = config.get("special_weapon", {}) or {}
+        sw_box = self.crops.get("SPECIAL_WEAPON")
+        if sw_cfg.get("enabled") is False:
+            sw_box = None
+        self._special_weapon = SpecialWeaponReader(sw_box, sw_cfg)
+
         # Enemy HSV range for red-color detection in ENEMY_CLOSE_BY crop
         enemy_hsv_cfg = config.get("enemy_hsv", {})
         self._enemy_hsv_lower = np.array(enemy_hsv_cfg.get("lower", [0, 120, 120]), dtype=np.uint8)
@@ -1223,6 +1299,7 @@ class GameStateAnalyzer:
         self._blackout_esc_ceiling_s = float(
             _blk_cfg.get("blackout_esc_ceiling_s", 120.0))
         self._lobby_blackout_since = 0.0   # ADR 087: sustained GAME_LOBBY blackout
+        self._liveness_stalled = False     # ADR 093 soft limit, set by the main loop
         self._exit_dialog_seen_ts = 0.0    # ADR 087: Exit-to-Desktop modal on screen
         self._stall_unready_dwell_s = float(_stall_cfg.get("unready_dwell_s", 30.0))
         self._stall_scan_interval_s = float(_stall_cfg.get("scan_interval_s", 5.0))
@@ -1726,6 +1803,11 @@ class GameStateAnalyzer:
         if value != self._last_logged_fuel:
             logger.debug("Afterburner fuel: %d%%", value)
             self._last_logged_fuel = value
+
+    def special_weapon_ready(self) -> "bool | None":
+        """ADR 173: True while the special weapon's ring is lit, False when it is
+        not, None with no fresh read (outside battle, or no SPECIAL_WEAPON crop)."""
+        return self._special_weapon.ready()
 
     def get_afterburner_fuel_pct(self) -> "int | None":
         """Latest afterburner fuel percentage, or None when unknown/stale.
@@ -2895,6 +2977,9 @@ class GameStateAnalyzer:
         state['respawn_confidence'] = confidence
         state['respawn_method'] = method
 
+        if self.game_state in BATTLE_STATES:
+            self._special_weapon.update(frame)
+
         # Detect incoming missiles - use cached result from background OCR
         with self._incoming_cache_lock:
             incoming_detected, incoming_conf, incoming_method = self._incoming_cache['result']
@@ -3487,6 +3572,59 @@ class GameStateAnalyzer:
         """
         return [crop for crop in ("PLAY", "READY") if crop in self.crops]
 
+    def stop_if_lobby_on_screen(self) -> None:
+        """ADR 169: 'z' landed in a battle state; is that battle really there?
+
+        A GAME_STARTING health probe can confirm lobby digits and enter a battle
+        that does not exist (2026-11-01 09:16:09: HP:73 over the PLAY button),
+        and a stop deferred to "the next lobby" then waits while sitting in it.
+        PLAY or READY on the newest frame means there is no round to finish, so
+        this walks the FSM back and the main loop's safe point fires on its next
+        tick.
+
+        On the OCR pool because the caller is the key listener's thread, which
+        also hears the takeover keys (SAF-001), and readers are thread-local.
+        Both conditions are read again after the OCR: a second press can cancel
+        the stop while it runs.
+        """
+        with self._click_to_frame_lock:
+            frame = self._click_to_latest_frame
+            frame_ts = self._click_to_frame_ts
+        executor = self.ocr_executor
+        if frame is None or executor is None or time.time() - frame_ts > 3.0:
+            return
+        images = {crop: _crop_for_ocr(frame, self.crops[crop][:4])
+                  for crop in self._lobby_recheck_crops()}
+
+        def _read():
+            try:
+                for crop, image in images.items():
+                    detected, _, _ = _process_text_region(image, self.crops[crop].text or [])
+                    if not detected:
+                        continue
+                    state = self.game_state
+                    if state in BATTLE_STATES and self._round_start_suppressed():
+                        logger.warning(
+                            "\033[93m🏁 FINISH ROUND: %s is on screen in %s — no round "
+                            "in progress, stopping now (ADR 169)\033[0m", crop, state.name)
+                        self._trigger("manual_reset")
+                    return
+            except Exception:
+                logger.exception("Analyzer: lobby read for the pending stop failed")
+
+        try:
+            executor.submit(_read)
+        except RuntimeError as e:
+            logger.debug("Analyzer: lobby read not submitted (%s)", e)
+
+    def note_liveness_stall(self, stalled: bool) -> None:
+        """Record whether the liveness guard reports a stall (ADR 093 soft limit).
+
+        Called by the main loop every tick. Gates the parts dialog (Anomaly 004),
+        which waits for this so an operator who is present picks the jet first.
+        """
+        self._liveness_stalled = bool(stalled)
+
     def _stall_recovery_targets(self, state):
         """Return the stall-recovery crops eligible to act right now (ADR 084).
 
@@ -3548,18 +3686,18 @@ class GameStateAnalyzer:
                 and "STALL_INVITE_PLAYERS" in self.crops
                 and "STALL_INVITE_PLAYERS" not in targets):
             targets.append("STALL_INVITE_PLAYERS")
-        # Anomaly 004 (2026-09-13): STALL_PARTS_CONFIRM is calibrated (below,
-        # config.yaml) and OCR-verified (tests/test_stall_crops_ocr.py) for
-        # DETECTION, but deliberately NOT added to this auto-click gate yet.
-        # Unlike STALL_PROFILE's close-X and STALL_EXIT_TO_DESKTOP's Cancel —
-        # both a strictly de-escalating dismiss, which is this gate's whole
-        # documented invariant (see test_lobby_blackout_past_dwell_opens_
-        # only_de_escalating_crops) — clicking CONFIRM here commits an
-        # in-game action (100 parts assigned to whichever aircraft the game
-        # has pre-selected). Low-stakes, but a real policy widening, not a
-        # same-shape addition, so it's left for the operator to decide rather
-        # than crossed autonomously. See docs/anomaly/004-parts-distribution-
-        # overlay-lobby-stall.md.
+        # Anomaly 004: the "SELECT AN AIRCRAFT TO RECEIVE PARTS" overlay opens
+        # over a lobby that still classifies as GAME_LOBBY (2026-11-04, 9 min by
+        # hand; 2026-11-09, the 900 s liveness limit ended the session) and at a
+        # start in GAME_UNKNOWN (2026-11-10). Not de-escalating: it assigns the
+        # parts, on the operator's rule of 2026-11-10 (the second jet, then
+        # CONFIRM). Gated on the liveness guard's stall, not on the 15 s dwell,
+        # so an operator who is present has that long to choose (2026-11-13).
+        if (self._liveness_stalled
+                and state in STALL_PARTS_STATES
+                and STALL_PARTS_CROP in self.crops
+                and STALL_PARTS_CROP not in targets):
+            targets.insert(0, STALL_PARTS_CROP)
         # Independent gate: a stuck UNREADY blocks classification outright, so it
         # is timed from the UNREADY read itself rather than from the state.
         if (self._unready_since

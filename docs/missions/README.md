@@ -53,7 +53,7 @@ Bullets run in order. Put numbers and conditions in the bullet ("after reaching
 5000 altitude set nose angle to -10 degrees"); Claude derives the config keys.
 
 * **Engagement is a bullet.** Name `search_and_destroy` (padlock plus fire) or `boresight_engage` (fire only), and put it where it should start. Position matters: the loop fires whatever weapon is selected when it starts, so a loop started before a weapon switch fires the spawn weapon until the switch. If the order matters to you, say why in the bullet.
-* **Altitude and angle targets respect the floor.** Below 4000 m the tree's Climb tactic takes the pitch axis: the hard floor (`behavior_tree.climb.alt_floor_m`) always, and the sustain band (4000 to 5000 m) while the aircraft is armed and a mission runs. A scripted flight path below 4000 m is overridden by a climb, not held. Only `mission_acs` (ADR 147) has its own floor; a new mission that needs one is a shared-behavior change (default 8).
+* **Altitude and angle targets respect the floor.** Below 4000 m the tree's Climb tactic takes the pitch axis: the hard floor (`behavior_tree.climb.alt_floor_m`) always, and the sustain band (4000 to 5000 m) while the aircraft is armed and a mission runs. A scripted flight path below 4000 m is overridden by a climb, not held. Only `mission_acs` (ADR 147) has its own floor; a new mission that needs one is a shared-behavior change (default 8). None of this applies inside a pursuit, which owns the airframe in `GAME_BATTLE_EJECT`: `climb_mode` refuses all but a hard emergency there, which is how the resupply is reached under either floor (ADR 171).
 * **A mission that returns early turns off the lock-gated behavior** in section 3.1. A hand-off mission should say what takes over.
 * **A bullet that asks for something shared behavior already does** (climbing, cruise afterburner, evading) is a change to every mission. See default 8.
 
@@ -61,7 +61,7 @@ Bullets run in order. Put numbers and conditions in the bullet ("after reaching
 
 Claude applies these and records them in the ADR.
 
-1. **Launch.** No hotkey of its own (ADR 145). The mission is added to the `mission.default_mission` choices; `u`, battle entry and the restart fallback all launch whichever mission that key names. A dedicated hotkey is added only when the spec asks for one. Claude then picks an unused key and flags it for you to check against the game's bindings: `test_keybindings` checks only against keys wingman itself injects, and hotkeys are grabbed with `suppress=False`, so the game also receives them.
+1. **Launch.** No hotkey of its own (ADR 145). The mission is added to the `mission.default_mission` choices; `u`, battle entry and the restart fallback all launch whichever mission that key names, or the one the jet's profile names (ADR 171). A mission for one jet gets a profile (section 6, row J1). A dedicated hotkey is added only when the spec asks for one. Claude then picks an unused key and flags it for you to check against the game's bindings: `test_keybindings` checks only against keys wingman itself injects, and hotkeys are grabbed with `suppress=False`, so the game also receives them.
 2. **Hotkey while a mission runs.** `u` skips: it logs and does nothing while a mission holds the lock. A dedicated hotkey preempts: it cancels the running mission and takes over (ADR 111), as `o` does for `mission_acs`.
 3. **Shipped default.** The shipped `mission.default_mission` value is not changed unless the spec says so. Selecting the new mission is a one-line config edit for you.
 4. **End.** The mission runs until cancelled, unless the last bullet is a hand-off.
@@ -81,6 +81,10 @@ exception is ADR 147: while `mission_acs` is the mission in play, the tree uses 
 exception names acs in code, so it is not a switch a new mission can set. A
 spec that wants a different value or an opt-out is asking for a shared change
 (default 8 in section 2.2).
+
+The second exception is ADR 171: while `mission_j20` is the mission in play, the
+pursuit comes down to acs's altitude before it steers at anything and ends at the
+rearm (`Controller._j20_cycle_in_play`). It names j20 in code in the same way.
 
 ### 3.1 Behavior gated on the mission lock
 
@@ -135,7 +139,7 @@ Under ADR 147, `mission_acs` flies with a 3000 m floor and no sustain band.
 | Cause | Who cancels | Restarts? |
 |-------|-------------|-----------|
 | Death | `RespawnHandler` on respawn detection | Yes, on health alive |
-| Missiles empty | `pursue_and_engage` or `eject_and_dive` call `cancel_mission()` | Yes, after the respawn that follows |
+| Missiles empty | `pursue_and_engage` or `eject_and_dive` call `cancel_mission()` | Yes, after the respawn that follows. For `mission_j20`, at the rearm instead, with no respawn (ADR 171) |
 | No enemy for the disengage window | `disengage_roll_right` cancels, rolls, waits up to 5 s for teardown | Yes, immediately after the roll |
 | Manual takeover (`i j k l`, arrows, Enter) | `_handle_maneuver_key_press`, `release_for_manual_takeover` | No; `u` resumes the configured mission |
 | End key | `cancel_mission_hotkey` | No; auto restart is switched off |
@@ -225,7 +229,7 @@ Taken from what `mission_jas39` touched (ADR 145; the mission was removed by ADR
 | 3 | `wingman/controller.py` | `mission_<x>(self)`, with the docstring line `Compatible Jets: ...` |
 | 4 | `wingman/controller.py` `_start_default_mission` | add `"<x>"` to the name mapping |
 | 5 | `wingman/controller.py` `restart_last_mission` | a branch for `"<x>"`; without it a respawn silently restarts the default mission |
-| 6 | `wingman/config_schema.py` | a `Section` for the block, and `"<x>"` in the `default_mission` `choices`. A misspelt key must fail validation |
+| 6 | `wingman/config_schema.py` | a `Section` for the block, and `"<x>"` in `_MISSIONS`. A misspelt key must fail validation |
 | 7 | `wingman/config.yaml` | the block, with comments giving the reason for each number |
 | 8 | `docs/adr/` | next free number, status `Draft`, per `CLAUDE.md` |
 | 9 | `tests/test_mission_<x>.py` | follow `tests/test_mission_acs.py`: step order, toggles, stale data, cancel at each step, lock release, launch through `default_mission`, restart branch, shipped config matches the spec, schema |
@@ -234,6 +238,12 @@ Taken from what `mission_jas39` touched (ADR 145; the mission was removed by ADR
 Rows 4, 5 and 6 each hard-code mission names. Missing one fails silently:
 `_start_default_mission` falls back to j20 for an unknown name, and a respawn
 restarts the wrong mission.
+
+When the mission is for one jet (ADR 171), also:
+
+| # | File | Change |
+|---|------|--------|
+| J1 | `wingman/config.yaml` | a profile under `jet_profile.profiles`, with `match`, the start of the name on the lobby label, and `mission: <x>`. Check `match` against a real label in `test_screenshots/jet_name/`, and that it does not start another jet's name |
 
 Only when the spec asks for a dedicated hotkey (default 1), also:
 
@@ -268,7 +278,8 @@ before a live trial. A live trial is still needed before the ADR leaves `Draft`.
 * **`u` launches the configured mission and does not preempt** (ADR 145). Its handler is still named `start_j20_mission` and its key `MISSION_J20_KEY`, but it calls `_start_default_mission()`. Pressing it while a mission holds the lock is a no-op apart from a log line. `o` starts `mission_acs` directly and preempts (ADR 144, ADR 111, ADR 160).
 * **The altitude floor has one per-mission exception** (ADR 147): `mission_acs` flies with `acs_mission.alt_floor_m` (3000) and no sustain band. It is keyed on the last launched mission being `"acs"` (`_own_altitude_floor_in_play_m`), not on a mission-level setting. ADR 141 stays Accepted and unchanged.
 * **`j20_mission.*` is mostly shared config despite its name.** Only `target_painting_mode` is J20's (read by the search-and-destroy weapon loop). The rest tunes the shared Engage tactic through `EngageNavigator`, so a new mission that edits it changes J20 too.
-* **`jet_profile.has_padlock` is read but nothing branches on it** (Design 011). A boresight-only jet is still a mission-level choice today.
+* **`jet_profile.has_padlock` is read but nothing branches on it** (Design 011), and `jet_profile.active` is not the jet detected (ADR 171): a profile's `match` and `mission` pick the mission, and the other two are still read once at startup.
+* **A jet's `match` is compared with the start of its name, letters and digits only.** Name enough of the jet: `F-5` would also match an `F-51`.
 * **`mission_acs` is the scripted counterpart** (ADR 160; ADR 144 and ADR 147 are still Draft). Read its code for a worked hand-off mission, but not its ADRs as settled.
 * **`docs/missions/` files are not numbered.** The `CLAUDE.md` numbering rule for `docs/` subdirectories does not match these names; they keep the names the operator gave them.
 
@@ -285,4 +296,5 @@ before a live trial. A live trial is still needed before the ADR leaves `Draft`.
 * `docs/adr/145-mission-jas39-cloak-and-u-launches-the-configured-mission.md`: `u` and `default_mission` as the launch path
 * `docs/adr/147-mission-su30-flies-its-own-altitude-doctrine.md`: the ACS floor exception (written for su30)
 * `docs/adr/160-acs-mission-and-j20-are-the-only-missions.md`: su30 renamed ACS_MISSION; loiter, survey, F-111 and JAS39 removed
+* `docs/adr/171-the-jet-picks-the-mission-and-j20-comes-back-from-a-rearm.md`: the jet picks the mission; mission_j20's rearm cycle
 * `docs/hldd/015-target-tracking-pursuit-mode-hldd.md`: pursuit mode and its FSM seam

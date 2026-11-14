@@ -27,6 +27,8 @@ import time
 
 from . import capture_budget
 from .compass import fmt_heading
+from .crop_region import get_crop
+from .special_weapon import SpecialWeaponPresser
 from .state import GameState, BATTLE_STATES
 from .suppressed import log_suppressed
 from .terrain_loom import fmt_tau, fmt_taus
@@ -47,6 +49,7 @@ from .behavior_tree import (
     make_climb_condition,
     make_snapshot_writer,
     TACTIC_BOUNDARY_TURN,
+    TACTIC_TERRAIN_TURN,
     selected_tactic,
     tree_status_dict,
     tree_status_text,
@@ -113,6 +116,10 @@ def update_waiting_fallback(
 # Single definition lives in analyzer; aliased to keep the local name.
 _BATTLE_STATES = BATTLE_STATES
 
+# ADR 173: a low_flares special weapon without its own `flares_at` fires at the
+# low-flares reload's count.
+_LOW_FLARES_AT = 2
+
 
 
 def _fmt_incoming_age(since_incoming: float) -> str:
@@ -145,7 +152,7 @@ def _fmt_sky(sky_frac) -> str:
 def _fmt_ttg(alt, rate) -> str:
     """Predicted seconds to ground, for the BT log line (ADR 086 d2).
 
-    Logged EVERY tick, not only when the trigger fires. The 2026-08-21 19:42
+    Logged EVERY tick, not only when the trigger fires. The 2026-08-21
     review could not tell "the trigger is armed and correctly quiet" from "the
     trigger is dead" because neither state emitted anything — a safety-critical
     condition must be observable while it is silent.
@@ -502,7 +509,7 @@ class RespawnHandler:
             return
 
         # Explicit disposition of every case — ADR 061 rule 3: the one-shot
-        # event is never consumed silently (the 2026-08-01 08:00 incident lost
+        # event is never consumed silently (the 2026-08-01 incident lost
         # the only restart signal for a life to an unlogged state-gate miss).
         disposition = self._disposition_fn(
             analyzer.game_state, analyzer.alive_after_observed_death
@@ -853,7 +860,7 @@ class RespawnHandler:
                     # respawn design left the aircraft flying uncommanded after
                     # every death — the scheduled restart was GAME_BATTLE-gated
                     # and the log promised a restart that could never fire,
-                    # observed 2026-07-31 07:42.)
+                    # observed 2026-07-31.)
                     if self._live_capture is not None:
                         _cap_now = time.time()
                         self._live_capture.on_event("respawn_detected", _cap_now)
@@ -932,7 +939,7 @@ class AmmoEventsHandler:
     def __init__(self, analyzer, ctrl, mission_cfg, *, perf_tracker=None,
                  stats_tracker=None, emit_capture_event=None,
                  flare_reload_cooldown_s: float = 30.0,
-                 bt_owns_eject: bool = False):
+                 bt_owns_eject: bool = False, special_weapon_cfg=None):
         self._analyzer = analyzer
         self._ctrl = ctrl
         self._perf = perf_tracker
@@ -954,6 +961,10 @@ class AmmoEventsHandler:
         self._padlock_spread_missiles = int(mission_cfg.get("padlock_spread_missiles", 2))
 
         self._last_flare_reload_ts = 0.0
+        # ADR 173: one press policy per (ability, trigger); the jet can change
+        # between rounds, so the profile is asked each tick.
+        self._special_weapon_cfg = special_weapon_cfg or {}
+        self._special_pressers = {}
         self._zero_streak = 0
         self._battle_started_ts = 0.0
         self._ignore_until = 0.0
@@ -980,6 +991,16 @@ class AmmoEventsHandler:
                 self._ctrl.pursuit_evade_new_round()
             except Exception as exc:
                 log_suppressed(logger, "pursuit_evade_new_round", exc)
+            # ADR 172: the terrain trial draws its arm at the same round start.
+            try:
+                self._ctrl.agreement_trial_new_round()
+            except Exception as exc:
+                log_suppressed(logger, "agreement_trial_new_round", exc)
+            # Design 021 Phase 3: and the gun aim trial.
+            try:
+                self._ctrl.gun_aim_new_round()
+            except Exception as exc:
+                log_suppressed(logger, "gun_aim_new_round", exc)
         self._in_battle = in_battle
 
     def suppress_after_respawn(self, seconds: float = 10.0):
@@ -1086,6 +1107,9 @@ class AmmoEventsHandler:
         threading.Thread(target=_flare_burst, daemon=True).start()
         self._flare_roll(flares_done)
         self._pursuit_evade(alert_ts)
+        # ADR 173 D4: a jet whose special weapon answers an incoming missile (the
+        # MiG-23's flare burst) spends it here, after the flares are under way.
+        self.tick_special_weapon(incoming_edge=True)
         return True
 
     def _flare_roll(self, flares_done: threading.Event) -> None:
@@ -1114,9 +1138,15 @@ class AmmoEventsHandler:
             self._stats.on_event("missile_evade", alert_ts)
 
     def handle_low_flares(self) -> None:
-        """Press SPECIAL_ABILITY to reload flares when count reaches 2."""
+        """Press SPECIAL_ABILITY to reload flares when count reaches 2. A jet with a
+        reload point of its own is handled by `handle_jet_flare_reload` instead."""
         self._analyzer.low_flares_event.clear()
         if self._analyzer.game_state != GameState.GAME_BATTLE:
+            return
+        if self._special_weapon_profile() is not None:
+            # ADR 173 D5: a jet with a special weapon of its own spends it on its
+            # own trigger; a press here would waste a MiG-23's burst or a JAS39's
+            # cloak as a reload.
             return
         elapsed = time.time() - self._last_flare_reload_ts
         if elapsed < self._flare_reload_cooldown_s:
@@ -1210,8 +1240,82 @@ class AmmoEventsHandler:
         else:
             self._ctrl.eject_and_dive(on_complete=_on_complete)
 
+    def _special_weapon_profile(self) -> "dict | None":
+        try:
+            return self._ctrl.special_weapon_profile()
+        except Exception as exc:
+            log_suppressed(logger, "special_weapon_profile", exc)
+            return None
+
+    def _special_weapon_ready(self) -> "bool | None":
+        try:
+            return self._analyzer.special_weapon_ready()
+        except Exception as exc:
+            log_suppressed(logger, "special_weapon_ready", exc)
+            return None
+
+    def tick_special_weapon(self, incoming_edge: bool = False) -> bool:
+        """ADR 173: press the jet's special weapon on its own trigger, only while its
+        HUD icon is lit, in battle or in a pursuit, after the post-respawn grace.
+
+        Triggers: `incoming` (the MiG-23's flare burst) fires on a new incoming
+        alert; `low_flares` (the J-20's reload, operator 2026-11-02) while the flare
+        count reads `flares_at` or fewer; `ready` (the JAS39's cloak) whenever the
+        icon is lit. A jet without a `special_weapon` profile, or with the ability
+        not unlocked (no icon), gets no press. Returns True when `q` went out."""
+        sw = self._special_weapon_profile()
+        if not sw:
+            return False
+        if self._analyzer.game_state not in (GameState.GAME_BATTLE,
+                                             GameState.GAME_BATTLE_EJECT):
+            return False
+        if time.time() < self._ignore_until:
+            return False
+        trigger = sw.get("trigger")
+        ability = sw.get("ability") or "special_weapon"
+        key = (ability, trigger)
+        presser = self._special_pressers.get(key)
+        if presser is None:
+            try:
+                presser = SpecialWeaponPresser.from_config(trigger, self._special_weapon_cfg)
+            except ValueError as exc:
+                log_suppressed(logger, "special_weapon_trigger", exc)
+                return False
+            self._special_pressers[key] = presser
+        if trigger == "incoming":
+            fired = incoming_edge
+        elif trigger == "low_flares":
+            flares = self._analyzer.get_ammo_flares()
+            at = sw.get("flares_at")
+            at = _LOW_FLARES_AT if at is None else int(at)
+            fired = flares is not None and flares <= at
+        else:
+            fired = True
+        ready = self._special_weapon_ready()
+        skipped = presser.skipped_not_ready
+        press = presser.tick(time.time(), ready, fired)
+        if presser.skipped_not_ready != skipped:
+            logger.info("Special weapon %s: %s trigger with the icon %s; flares only",
+                        ability, trigger, "not lit" if ready is False else "unread")
+            if self._stats is not None:
+                self._stats.on_event("special_weapon_skipped", time.time())
+        if not press:
+            return False
+        logger.info("\033[93m✨ Special weapon %s: trigger %s, icon READY\033[0m",
+                    ability, trigger)
+        self._ctrl.activate_special_weapon()
+        now = time.time()
+        if self._stats is not None:
+            self._stats.on_event("special_weapon_used", now)
+            if ability == "flare_reload":
+                self._stats.on_event("flare_reload", now)
+        if ability == "flare_reload":
+            self._last_flare_reload_ts = now
+        return True
+
     def tick_events(self) -> None:
         """Fire the ammo event handlers whose analyzer events are set."""
+        self.tick_special_weapon()
         if self._analyzer.low_flares_event.is_set():
             self.handle_low_flares()
         if self._analyzer.no_missiles_event.is_set():
@@ -1374,7 +1478,7 @@ class BoundaryPerceptionHandler:
         boundary_raw = reading
         # A respawn SETTLE, not just a respawn gate. The overlay is still on
         # screen after the FSM clears is_respawning — measured 2026-09-04
-        # 01:33:29, one tick after respawn=False went away: dist=0.073 fwd=+0.032
+        #, one tick after respawn=False went away: dist=0.073 fwd=+0.032
         # (bearing 0.44, so the entry gate passed it) with the banner colour
         # trigger firing on the same frame. An aircraft does not respawn 0.07R
         # from the edge, so the reading is false however well-formed it looks.
@@ -1386,7 +1490,7 @@ class BoundaryPerceptionHandler:
             # suppressed in the elif — it armed the deadline while respawning
             # and let that tick's reading straight through, which is backwards:
             # the respawn screen is the least trustworthy frame there is.
-            # Measured 2026-09-04 02:13:26, respawn=True with dist=0.093 on the
+            # Measured 2026-09-04, respawn=True with dist=0.093 on the
             # same tick.
             logger.debug("BOUNDARY: reading suppressed — %s",
                          "respawning" if is_respawning
@@ -1396,7 +1500,7 @@ class BoundaryPerceptionHandler:
         # ADR 117: capture what BLINDNESS looks like.
         #
         # Measured 2026-09-04: the detector produced a reading on 514 of 2204
-        # ticks — 23%. The crossing at 22:39:10 had its last reading 14 s
+        # ticks — 23%. The crossing had its last reading 14 s
         # earlier. Every frame the corpus holds is one where detection
         # SUCCEEDED, because approach frames are written on a reading, so the
         # failure case has never been looked at.
@@ -1487,7 +1591,7 @@ class BoundaryPerceptionHandler:
         """
         try:
             # The banner only means anything while the aircraft is flying.
-            # Live 2026-08-30 06:20: the colour test fired one tick after an
+            # Live 2026-08-30: the colour test fired one tick after an
             # eject, on the fireball — bright red, centre screen, exactly where
             # the banner sits. EJECTED's dark plate does not match, but the
             # explosion does. Gate on actually being in battle and not ejecting
@@ -1970,6 +2074,12 @@ class BehaviorTreeHandler:
         self._warning_agreement = None
         self._loom_grab_fn = None
         self._shapes = None
+        # Design 020 Phase 4: None until set_terrain_service(). ADR 174: the round
+        # edge for its per-round arm, and the mission stats' intake for the tag.
+        self._terrain = None
+        self._terrain_round_note = None
+        self._terrain_in_battle = False
+        self._terrain_turn_side = None
         self._terrain_hud_cfg = (
             bool(_terrain_capture_cfg.get("enabled", False)),
             float(_terrain_capture_cfg.get("sky_min_frac", 0.55)),
@@ -2033,14 +2143,26 @@ class BehaviorTreeHandler:
             if self.active and boundary_tactic_enabled(bt_cfg):
                 actuators[TACTIC_BOUNDARY_TURN] = (self._start_boundary_turn,
                                                    ctrl.is_boundary_turning)
+            # ADR 174 revised: the terrain service's turn flies the same bank-and-pull.
+            # Selected only while the service supplies a side (map arm, live runs).
+            if self.active:
+                actuators[TACTIC_TERRAIN_TURN] = (self._start_terrain_turn,
+                                                  ctrl.is_boundary_turning)
             # ADR 147: the mission in play's own altitude doctrine (mission_acs
             # levels off at 3000 m, below the tree's floor). getattr so a
             # controller-less handler (mode off, tests) simply has none.
+            # ADR 171: BoundaryTurn sooner at speed (_boundary_speed_scale).
+            _bcfg = bt_cfg.get("boundary", {}) or {}
+            self._boundary_speed_ref = float(_bcfg.get("speed_ref_kph") or 0.0)
+            self._boundary_speed_max = float(_bcfg.get("max_speed_scale") or 1.0)
+            self._boundary_scale_last = 1.0
             self._tree = build_tree(
                 bt_cfg, actuators=actuators or None,
                 regroup_enabled=bool((minimap_cfg or {}).get("regroup_enabled", False)),
                 alt_floor_override_fn=getattr(ctrl, "altitude_floor_override_m", None),
-                sustain_suppressed_fn=getattr(ctrl, "sustain_climb_suppressed", None))
+                sustain_suppressed_fn=getattr(ctrl, "sustain_climb_suppressed", None),
+                boundary_scale_fn=(self._boundary_speed_scale
+                                   if self._boundary_speed_ref > 0 else None))
             self._writer = make_snapshot_writer()
             self._climb_emergency_fn = getattr(self._tree, "climb_emergency_fn", None)
             self._climb_hard_emergency_fn = getattr(
@@ -2074,6 +2196,71 @@ class BehaviorTreeHandler:
         """Code Review 019 cycle 25: the tracker LOOM and SHAPE switching on
         are noted in, and whose verdict rides on the snapshot."""
         self._warning_agreement = agreement
+
+    def set_terrain_service(self, service, round_note=None) -> None:
+        """Design 020 Phase 4: the terrain service, logged each battle tick. ADR 174:
+        `round_note` (the mission stats' event intake) tags each round's arm."""
+        self._terrain = service if service is not None and service.enabled else None
+        self._terrain_round_note = round_note
+        self._terrain_in_battle = False
+
+    def _terrain_round_edge(self, current_game_state) -> None:
+        """ADR 174: draw the round's arm where ADR 165 opens a round, on entering a
+        battle state from outside one; moves between battle states do not count."""
+        terrain = self._terrain
+        if terrain is None:
+            return
+        in_battle = current_game_state in _BATTLE_STATES
+        if in_battle and not self._terrain_in_battle:
+            arm = terrain.new_round()
+            if arm is not None:
+                logger.info("MAP TRIAL: round %d — %s arm (ADR 174, share %.2f)",
+                            terrain.rounds, arm, terrain.trial_share)
+                if self._terrain_round_note is not None:
+                    try:
+                        self._terrain_round_note("map_arm_" + arm, time.time())
+                    except Exception as exc:
+                        log_suppressed(logger, "map_trial_note", exc)
+        self._terrain_in_battle = in_battle
+
+    def _observe_terrain(self, frame, current_game_state, altitude, altitude_rate,
+                         hud_horizontal=None) -> "str | None":
+        """One TERRAIN: line on a battle tick of a map the service has data for.
+        Returns what to fly this tick (ADR 174 revised, `map` arm only): "climb", "left",
+        "right" or None.
+
+        Gated as the heading is: a battle state with health being read, the proof
+        that the minimap is up. The compass's north bearing turns the crop north-up;
+        the padlock camera turns the minimap but not its centre, so it does not gate
+        the fix (it only makes the heading not the aircraft's).
+        """
+        terrain = self._terrain
+        if terrain is None or current_game_state not in _BATTLE_STATES:
+            return None
+        map_name = getattr(self._analyzer, "match_map", None)
+        if not terrain.has_map(map_name) or not self._analyzer.game_battle_alive:
+            return None
+        crops = getattr(self._analyzer, "crops", None) or {}
+        if frame is None or "MINIMAP" not in crops:
+            return None
+        try:
+            started = time.monotonic()
+            heading = self._analyzer.read_compass_heading(frame)
+            bearing = None if heading is None else (360.0 - heading) % 360.0
+            crop = get_crop(frame, *crops["MINIMAP"][:4])
+            reading = terrain.observe(map_name, crop, bearing, altitude, altitude_rate, time.time(),
+                                      hud_horizontal=hud_horizontal)
+            if reading is None:
+                return None
+            warns = terrain.warns(reading)
+            act = terrain.action(reading)
+            logger.debug("TERRAIN: %s arm=%s%s act=%s ms=%.0f", reading.log_text(map_name),
+                         terrain.arm or "off", " WARN" if warns else "", act or "-",
+                         (time.monotonic() - started) * 1000.0)
+            return act
+        except Exception as exc:
+            log_suppressed(logger, "terrain_service", exc)
+            return None
 
     def set_terrain_loom(self, loom, grab_fn) -> None:
         """Wire in the Phase 2 looming measurement (HLDD 001, shadow only).
@@ -2280,6 +2467,21 @@ class BehaviorTreeHandler:
         except Exception as e:
             logger.warning("Terrain capture: failed: %s: %s", type(e).__name__, e)
 
+    def _boundary_speed_scale(self) -> float:
+        """ADR 171: BoundaryTurn's distances times the speed over speed_ref_kph, from
+        1 to max_speed_scale: a jet at 2,000 KPH covers 0.50R in seconds, and the
+        J-20 crossed 16 times with the turn already running (2026-11-02). Read by the
+        tree every tick; a stale speed keeps the last value."""
+        try:
+            snap = self._analyzer.get_telemetry() if self._analyzer is not None else None
+            if snap is not None and snap.speed_fresh() and snap.speed.stable_value:
+                self._boundary_scale_last = min(
+                    self._boundary_speed_max,
+                    max(1.0, float(snap.speed.stable_value) / self._boundary_speed_ref))
+        except Exception as exc:
+            log_suppressed(logger, "boundary_speed_scale", exc)
+        return self._boundary_scale_last
+
     def _start_boundary_turn(self) -> None:
         """BoundaryTurn start_fn. ADR 122: tell the turn which side the edge is
         on, so it rolls away from it rather than always right.
@@ -2294,6 +2496,16 @@ class BehaviorTreeHandler:
         if reading and len(reading) > 2:
             lat = reading[2]
         self._ctrl.boundary_turn_mode(lateral=lat)
+
+    def _start_terrain_turn(self) -> None:
+        """TerrainTurn start_fn (ADR 174 revised): bank and pull to the side the terrain
+        service chose this tick. boundary_turn_mode rolls LEFT for a positive lateral."""
+        side = getattr(self, "_terrain_turn_side", None)
+        if side not in ("left", "right"):
+            return
+        max_s = self._terrain.turn_max_s if self._terrain is not None else 3.0
+        logger.info("Controller: terrain turn %s (Design 020 way out, ADR 174)", side)
+        self._ctrl.boundary_turn_mode(max_s=max_s, lateral=1.0 if side == "left" else -1.0)
 
     def _start_climb(self) -> None:
         """Climb leaf start_fn (ADR 075): pick the band the selection came from.
@@ -2360,7 +2572,7 @@ class BehaviorTreeHandler:
 
     def _push_climb_emergency(self) -> None:
         """Push this tick's HARD verdict into a running climb hold, whatever leaf
-        the tree selects (ADR 148 amendment, 2026-10-02 23:36). `_update_climb`
+        the tree selects (ADR 148 amendment, 2026-10-02). `_update_climb`
         only runs while Climb is selected; once Idle won, the hold kept a stale
         emergency and flew 30 s to its cap instead of handing the chase back."""
         is_climbing = getattr(self._ctrl, "is_climbing", None)
@@ -2448,6 +2660,27 @@ class BehaviorTreeHandler:
         # Stored for _start_climb, which runs inside tree.tick() below and
         # needs the altitude the selection was made against (ADR 075).
         self._last_altitude = altitude
+        # Design 020 / ADR 174: the round's arm, then this tick's fix and path,
+        # before the snapshot so a map warning can start the climb this tick.
+        self._terrain_round_edge(current_game_state)
+        # Design 020 Phase 2: the freshest altitude, carried to now at its rate, not the
+        # smoothed one. Measured 2026-11-08 07:42:36 in a -166 m/s dive: HUD 278 m on the
+        # operator's screenshot, smoothed 627 m, and the way out came a tick too late.
+        terrain_alt = altitude
+        if snapshot_obj is not None:
+            try:
+                fresh = snapshot_obj.altitude_ahead(0.0)
+                if fresh is not None:
+                    terrain_alt = fresh
+            except Exception as exc:
+                log_suppressed(logger, "terrain_fresh_altitude", exc)
+        # ADR 174 revision 3: how fast the track is flown, from the HUD, not the fixes.
+        hud_horizontal = None
+        if speed_kph is not None and path_deg is not None:
+            hud_horizontal = speed_kph / 3.6 * math.cos(math.radians(path_deg))
+        terrain_act = self._observe_terrain(frame, current_game_state, terrain_alt, altitude_rate,
+                                            hud_horizontal)
+        self._terrain_turn_side = terrain_act if terrain_act in ("left", "right") else None
         is_respawning, _, _ = self._analyzer.get_respawn_cache_result()
         incoming, _, _ = self._analyzer.get_incoming_cache_result()
         missiles_empty_confirmed = False
@@ -2553,6 +2786,8 @@ class BehaviorTreeHandler:
             terrain_warnings_agree=(self._warning_agreement is not None
                                     and current_game_state in _BATTLE_STATES
                                     and self._warning_agreement.agreeing(now)),
+            terrain_map_warning=terrain_act == "climb",
+            terrain_turn=self._terrain_turn_side,
             altitude_now=altitude_now,
             speed_kph=speed_kph,
             path_deg=path_deg,
@@ -2692,7 +2927,7 @@ class BehaviorTreeHandler:
         # approach. Per-tick range/bearing tracking, logged as a summary once
         # the turn ends, lives on BoundaryPerceptionHandler now.
         self._boundary.record_turn_tick(selection, _b_dist, _b_fwd, _b_lat)
-        if (selection != TACTIC_BOUNDARY_TURN
+        if (selection not in (TACTIC_BOUNDARY_TURN, TACTIC_TERRAIN_TURN)
                 and self._ctrl.is_boundary_turning()):
             self._ctrl.stop_boundary_turn()
         if _may_fly and selection in (TACTIC_ENGAGE, TACTIC_REGROUP):
@@ -2724,7 +2959,21 @@ class BehaviorTreeHandler:
 
     def _actuate_engage(self, components, altitude, now, steer_only: bool = False):
         """3.1a: the Engage selection drives ring-engage geometry (ported from
-        the retired EngageNavHandler; log labels kept for parser continuity)."""
+        the retired EngageNavHandler; log labels kept for parser continuity).
+
+        ADR 171 (operator, 2026-11-01): "when padlock turns off steer towards
+        targets and if padlock is on steering continues existing trajectory". The
+        rings are read off a view the padlock camera turns away from the nose, so
+        until it is confirmed off nothing is commanded and nothing reaches the
+        navigator's smoothing. 40 to 46% of the J-20's Engage rolls on 2026-11-01
+        came with it unconfirmed. Unknown is untrusted, as `padlock_state` says.
+        Only where the padlock is in use: acs never presses it.
+        """
+        if (self._ctrl.padlock_state() is not False
+                and not self._ctrl.is_padlock_blocked()):
+            logger.debug("EngageNav: holding the trajectory, padlock camera not "
+                         "confirmed off (ADR 171)")
+            return
         intent = self._nav.update(
             components, altitude, now,
             friendly_components=getattr(self, "_friendly_components", None),
@@ -3109,7 +3358,7 @@ class UnknownAnomalyRecorder:
         Distinguishes "the dismissal failed" from "the dismissal worked but the
         screen is still unclassifiable". Without this the recorder infers
         failure from the state alone and mislabels a slow classification as a
-        failed dismissal (observed live 2026-08-20 00:33:37).
+        failed dismissal (observed live 2026-08-20).
         """
         if self._first_dismiss_ts:
             self._cleared_popups = list(self._dismiss_popups)

@@ -1,9 +1,9 @@
 """Code Review 019 cycle 19: the death's cause read from the game's kill card.
 
 The fixtures are the bottom strip (from 0.78 of the height down) of three black
-box frames of 2026-10-17: two respawn screens after enemy kills (00:42:35, a
-Meteor from [LAFB] VIPER; 00:17:29, a K-5 Alkali from [GoT] Blister1996) and one
-after the terrain crash at 00:44:18, which had no card.
+box frames of 2026-10-17: two respawn screens after enemy kills (one, a
+Meteor from [LAFB] VIPER; the other, a K-5 Alkali from [GoT] Blister1996) and one
+after the terrain crash, which had no card.
 """
 
 import threading
@@ -111,6 +111,42 @@ def test_a_death_with_a_card_is_an_enemy_kill(monkeypatch, caplog):
     assert card.verdict == "enemy"
     assert "DEATH CARD: killed by '[LAFB] VIPER' with 'Meteor' (the card on 1 of 2 reads)" in [
         rec.getMessage() for rec in caplog.records]
+
+
+def test_each_verdict_reaches_the_listener(monkeypatch):
+    """ADR 172: the round's record hears each death's verdict as it closes."""
+    script = _Script()
+    heard = []
+    r = KillCardReader(read_fn=lambda frame: script(None, frame), on_verdict=heard.append)
+    r.start()
+    try:
+        r.submit(_marked(False))
+        _settle(script, 1)
+        r.end()
+        r.submit(_marked(True))
+        _settle(script, 2)
+        r.end()
+        r.end()                                  # a death no frame reached
+    finally:
+        r.stop()
+    assert heard == ["no card", "enemy", "unread"]
+
+
+def test_a_failing_listener_costs_the_verdict_nothing(monkeypatch):
+    script = _Script()
+
+    def listener(_verdict):
+        raise RuntimeError("stats gone")
+
+    r = KillCardReader(read_fn=lambda frame: script(None, frame), on_verdict=listener)
+    r.start()
+    try:
+        r.submit(_marked(False))
+        _settle(script, 1)
+        card = r.end()
+    finally:
+        r.stop()
+    assert card.verdict == "no card"
 
 
 def test_a_death_read_without_a_card_is_no_card(monkeypatch):

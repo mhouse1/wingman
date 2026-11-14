@@ -2,7 +2,7 @@
 
 | Status | Date       | Wingman Version |
 |--------|------------|-----------------|
-| Draft  | 2026-10-29 | 1.9.3           |
+| Accepted | 2026-10-29 | 1.9.3         |
 
 Operator, 2026-10-29: "make the change", on the recommendation to run
 [ADR 163](163-the-missile-evade-flies-through-a-pursuit.md)'s trial again with the arm drawn per round
@@ -25,6 +25,15 @@ This replaces ADR 163 V3's share of 0 while this trial runs.
 `evade arm` and a `control arm` line under Round performance: rounds read, then score and K / D / A per
 round read. The log names each round's draw (`MISSILE EVADE[pursuit]: round N — <arm> arm`). ADR 163's
 engagement line and its engagement survival by arm (`pursuit trial`) are unchanged.
+
+**D4. The verdict: the share is 0 (2026-11-04).** Over 848 read rounds (431 evade, 417 control, 76
+sessions on all four prefixes), the evade arm trailed on every per-round measure: score 382 against 398
+(t -0.7), kills 1.93 against 2.07, deaths 3.58 against 3.41, assists 1.33 against 1.46 (t -1.3). It
+survived 64% of engagements against 69% (z -3.5; by round, t -2.1). The assists that reopened the trial
+did not come from the evade. The operator's request that day was to raise score per round, so this cycle
+set the share without bringing it back to them. Figures: [Performance 009](../performance/009-the-evade-trial-by-round.md).
+This replaces D2's share of 0.5. The code stays; at 0 the trial is off (`EvadeTrial.enabled`), so no round
+draws an arm and the stats file's missions carry no `trial_arm`. A share above 0 runs the trial again.
 
 ## Why
 
@@ -81,7 +90,9 @@ to score it against.
   by arm, each with its t; engagement survival by arm, also by round. 56 read rounds an arm show an assists
   gap of 0.7 with the usual 80% chance (per-round SD 1.3), about 19 hours of play at 10.5 rounds an hour
   with 55% read. Score alone would need about 317 an arm (SD 200, a 45-point gap), so it is read from its
-  parts. The operator sets the share from the result.
+  parts. The operator sets the share from the result. **Met on 2026-11-04** at 431 and 417 read rounds:
+  no measure favours the evade, and survival is worse under it (D4,
+  [Performance 009](../performance/009-the-evade-trial-by-round.md)).
 
 ## References
 

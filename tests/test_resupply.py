@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 
 from wingman.resupply import (
+    ControlledDescent,
     MissilePriority,
     ResupplyMarker,
     ResupplyMarkerMemory,
@@ -336,6 +337,18 @@ def test_a_marker_still_too_small_to_fly_through_is_not_a_pass():
                            then_missing_s=3.0)) == 1
 
 
+def test_a_marker_lost_52_px_across_is_still_a_kilometre_out():
+    """2026-11-08 17:13:32, Crimson Canyon: the marker dropped out 52 px across,
+    the pass was signed, and the climb-out pulled the aircraft off a ring still
+    about 1 km away; the marker was back half a second later. Over 11-01 to 11-08
+    the climb-outs with the marker back within 3 s were mostly 49 to 52 px; one
+    rearm in 196 had it under 53."""
+    assert _fly_marker(ResupplyPassWatch(), _APPROACH + _SWEEP, size=52,
+                       then_missing_s=3.0) == []
+    assert len(_fly_marker(ResupplyPassWatch(), _APPROACH + _SWEEP, size=53,
+                           then_missing_s=3.0)) == 1
+
+
 def test_the_next_pass_needs_its_own_approach():
     watch = ResupplyPassWatch()
     assert len(_fly_marker(watch, _APPROACH + _SWEEP, then_missing_s=1.0)) == 1
@@ -368,6 +381,37 @@ def test_the_first_count_above_zero_after_empty_shows_the_rearm_before_it_is_con
 def test_a_count_no_rack_carries_does_not_show_a_rearm(misread):
     """The single reads that jumped up and straight back on 2026-10-11 and 10-13."""
     assert not _observe(_emptied(), misread, count=1).rearm_seen
+
+
+@pytest.mark.parametrize("misread", [1, 3, 7, 8])
+def test_a_count_no_refill_gives_does_not_show_a_rearm(misread):
+    """2026-11-01 to 11-09: first reads of 8 (28), 3 (13), 7 (10) and 1 (10) started a
+    climb-out that no confirmation followed; none of 508 confirmed rearms read them."""
+    assert not _observe(_emptied(), misread, count=1).rearm_seen
+
+
+@pytest.mark.parametrize("load", [2, 4, 6])
+def test_the_loads_a_refill_gives_show_a_rearm(load):
+    assert _observe(_emptied(), load, count=1).rearm_seen
+
+
+def test_a_refill_to_another_count_still_rearms_at_the_confirmation():
+    """A load of 9 (3 of 508 confirmed rearms) is not a sign on its own read, and still
+    rearms once the reads confirm it."""
+    urgency = _emptied()
+    assert not _observe(urgency, 9, count=1).rearm_seen
+    _observe(urgency, 9, count=1)
+    assert _observe(urgency, 9, count=1).rearmed
+
+
+@pytest.mark.parametrize("misread", [19, 76, 79])
+def test_a_count_no_rack_holds_never_confirms_a_rearm(misread):
+    """2026-11-09 11:00:40: "confirmed ammo=76", the gun counter, reset the urgency
+    while every rack stayed empty. Such a count is no read at all."""
+    urgency = _emptied()
+    for _ in range(5):
+        p = _observe(urgency, misread, count=1)
+        assert not p.rearmed and not p.rearm_seen and p.empty
 
 
 def test_a_count_that_goes_back_to_zero_stops_showing_a_rearm():
@@ -461,7 +505,9 @@ def test_unreadable_ammo_breaks_a_confirmation_run_without_losing_priority():
 
 
 def test_one_ocr_read_polled_repeatedly_does_not_confirm_a_rearm():
-    """2026-10-01 15:47: one misread of 44 was polled three times and reset urgency."""
+    """2026-10-01 15:47: one misread of 44 was polled three times and reset urgency.
+    44 is now no read at all (MISSILE_COUNT_MAX); the polling rule is shown with a
+    count a rack can hold."""
     urgency = MissileUrgency(confirm_reads=3)
     for read_id in (1, 2, 3):
         urgency.observe(2, "secondary", read_id=read_id)
@@ -470,12 +516,12 @@ def test_one_ocr_read_polled_repeatedly_does_not_confirm_a_rearm():
     assert empty.empty
 
     for _ in range(5):
-        polled = urgency.observe(44, "secondary", read_id=7)
+        polled = urgency.observe(4, "secondary", read_id=7)
     assert not polled.rearmed
     assert polled.empty
 
-    urgency.observe(44, "secondary", read_id=8)
-    rearmed = urgency.observe(44, "secondary", read_id=9)
+    urgency.observe(4, "secondary", read_id=8)
+    rearmed = urgency.observe(4, "secondary", read_id=9)
     assert rearmed.rearmed
     assert not rearmed.empty
 
@@ -637,3 +683,130 @@ def test_the_pursuit_passes_the_occluded_list_to_the_resupply_scan():
     src = inspect.getsource(Controller.pursue_and_engage)
     assert "occluded=resupply_behind)" in src
     assert '"RESUPPLY", "resupply marker")' in src
+
+
+# ADR 171: mission_j20's way down to where ACS flies.
+
+def _descent(max_s=90.0):
+    return ControlledDescent(target_alt_m=3000, angle_deg=-20, tolerance_deg=5,
+                             level_angle_deg=-10, max_s=max_s, now=100.0, min_pull_kph=450)
+
+
+def test_a_shallow_nose_gets_a_pulse_down():
+    assert _descent().update(100.0, 6000.0, -2.0, 1.0) == "down"
+
+
+def test_the_nose_in_the_band_gets_nothing():
+    assert _descent().update(100.0, 6000.0, -22.0, 1.0) == "hold"
+
+
+def test_a_nose_past_the_tolerance_gets_a_pulse_up():
+    assert _descent().update(100.0, 6000.0, -26.0, 1.0) == "up"
+
+
+def test_one_pulse_per_new_sample():
+    """The angle lands about every 3 s; a second pulse on one sample is how the
+    first live pursuit went to -36 deg against a -20 deg limit (2026-09-26 01:58)."""
+    descent = _descent()
+    assert descent.update(100.0, 6000.0, -2.0, 1.0) == "down"
+    assert descent.update(100.2, 6000.0, -2.0, 1.0) == "hold"
+    assert descent.update(103.0, 5900.0, -3.0, 2.0) == "down"
+
+
+def test_at_the_altitude_it_levels_off_before_it_ends():
+    """Operator, 2026-11-01: "descend altitude level out and attack". Down at -20
+    deg with the altitude reached, the chase has not been handed anything yet."""
+    descent = _descent()
+    assert descent.update(100.0, 2990.0, -20.0, 1.0) == "up"
+    assert descent.ended is None
+    assert descent.update(101.0, 2900.0, -14.0, 2.0) == "up"
+    assert descent.update(102.0, 2850.0, -9.0, 3.0) is None
+    assert descent.ended == "level at 2850 m"
+
+
+def test_the_level_off_is_not_undone_by_coming_back_through_the_altitude():
+    descent = _descent()
+    descent.update(100.0, 2950.0, -20.0, 1.0)
+    assert descent.update(101.0, 3050.0, -15.0, 2.0) == "up"
+
+
+def test_no_fresh_altitude_presses_nothing_and_holds_the_chase_off():
+    """The search it used to hand to is safe from here; the chase is not, and an
+    aircraft that cannot read its height at 6000 m must not start one."""
+    descent = _descent()
+    assert descent.update(100.0, None, None, None) == "hold"
+    assert descent.ended is None
+
+
+def test_no_angle_presses_nothing_but_the_descent_goes_on():
+    assert _descent().update(100.0, 6000.0, None, 1.0) == "hold"
+
+
+def test_the_descent_ends_on_its_bound():
+    descent = _descent(max_s=90.0)
+    assert descent.update(189.9, 3500.0, -20.0, 1.0) == "hold"
+    assert descent.update(190.0, 3500.0, -20.0, 2.0) is None
+    assert descent.ended == "time limit at 3500 m"
+
+
+def test_the_bound_holds_with_no_altitude_too():
+    descent = _descent(max_s=90.0)
+    assert descent.update(190.0, None, None, None) is None
+    assert descent.ended == "time limit"
+
+
+def test_a_descent_that_ended_stays_ended():
+    descent = _descent()
+    descent.update(100.0, 2900.0, -5.0, 1.0)
+    assert descent.update(101.0, 6000.0, -2.0, 2.0) is None
+    assert descent.ended == "level at 2900 m"
+
+
+
+def test_a_slow_aircraft_is_not_pulled_up():
+    """2026-11-01 17:49:33: UP pulses under about 330 KPH, and the path ran from -7 to
+    -77 deg. Slow, a steep path is a stalling wing and a pull adds drag."""
+    descent = _descent()
+    assert descent.update(100.0, 6000.0, -60.0, 1.0, 240.0) == "hold"
+    assert descent.pulls_withheld == 1
+
+
+def test_the_pull_comes_back_with_the_speed():
+    descent = _descent()
+    assert descent.update(100.0, 6000.0, -60.0, 1.0, 240.0) == "hold"
+    assert descent.update(102.0, 5800.0, -60.0, 2.0, 600.0) == "up"
+
+
+def test_a_slow_aircraft_may_still_be_put_nose_down():
+    """Down is how it gets its speed back."""
+    assert _descent().update(100.0, 6000.0, 0.0, 1.0, 240.0) == "down"
+
+
+def test_the_level_off_waits_for_the_speed_too():
+    descent = _descent()
+    assert descent.update(100.0, 2900.0, -20.0, 1.0, 300.0) == "hold"
+    assert descent.ended is None
+    assert descent.update(102.0, 2800.0, -20.0, 2.0, 700.0) == "up"
+
+
+def test_an_unknown_speed_does_not_hold_the_pull_back():
+    assert _descent().update(100.0, 6000.0, -60.0, 1.0, None) == "up"
+
+
+def test_a_pulse_waits_out_the_lag_of_the_last():
+    """05:21:31: five pulses in 6 s at 2,035 KPH, the path still reading +17 to +24
+    deg, then 4,000 m lost."""
+    descent = ControlledDescent(target_alt_m=4000, angle_deg=-20, tolerance_deg=5,
+                                level_angle_deg=-10, max_s=90.0, now=100.0, min_gap_s=5.0)
+    assert descent.update(100.0, 5000.0, +18.0, 1.0) == "down"
+    assert descent.update(101.5, 4900.0, +17.0, 2.0) == "hold"
+    assert descent.update(103.0, 4800.0, +24.0, 3.0) == "hold"
+    assert descent.update(105.1, 4700.0, +10.0, 4.0) == "down"
+
+
+def test_the_gap_holds_the_level_off_too():
+    descent = ControlledDescent(target_alt_m=4000, angle_deg=-20, tolerance_deg=5,
+                                level_angle_deg=-10, max_s=90.0, now=100.0, min_gap_s=5.0)
+    assert descent.update(100.0, 3900.0, -30.0, 1.0) == "up"
+    assert descent.update(102.0, 3800.0, -30.0, 2.0) == "hold"
+    assert descent.update(105.0, 3700.0, -25.0, 3.0) == "up"

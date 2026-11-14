@@ -59,7 +59,10 @@ the row only once the page title reads LEADERBOARDS. Each step waits up to
   - the guards' safe point and the deferred `z` exit.
 - A pending `z`, standby or exit ends the navigation at its next step, and none starts then.
 
-**D6. Schedule and switch.**
+**D6. Schedule and switch.** Superseded in part by
+[ADR 170](170-a-missed-squadron-reading-falls-to-the-next-session.md): the day of the last reading
+is now saved, a day no session has read falls to the next session that day, and a navigation that
+read nothing is tried again.
 - The setting is `squadron_ranking.enabled`. It ships `false` and is turned on per machine in
   `config.local.yaml`, like the score dashboard.
 - One reading a day at most (operator, 2026-10-31). At `squadron_ranking.queue_at`, 09:38:30 local
@@ -100,7 +103,7 @@ the row only once the page title reads LEADERBOARDS. Each step waits up to
 ## Consequences
 
 - **Time.** Each reading delays the next round by the length of the trip: 6.7 to 12.2 s from
-  `opening` to the PLAY click, median 8.2 s, over the 8 trips of 2026-10-31 02:35 to 03:17. One
+  `opening` to the PLAY click, median 8.2 s, over the 8 trips of 2026-10-31. One
   round a day pays that.
 - **Gaps.** A day has no point on the charts if no session is running at `queue_at`, if the session
   ends before its next lobby, or if that day's navigation gives up.
@@ -126,8 +129,8 @@ the row only once the page title reads LEADERBOARDS. Each step waits up to
   - no match start is missed because of it.
 - **V3, the trip's cost.** The time from `opening the squadron leaderboard` to the PLAY click,
   measured from the log.
-- **V4, the open menu.** Not yet seen: whether a second click on the menu button shuts the menu
-  (D4).
+- **V4, the open menu.** Whether a second click on the menu button shuts the menu (D4). Met
+  2026-11-01 ([ADR 170](170-a-missed-squadron-reading-falls-to-the-next-session.md)).
 - **V5, the dashboard.** The readings show on the two squadron charts and on Squadron now.
 - **V6, the daily schedule.** Not yet seen live. The start of a session logs `next reading queues
   at`, naming the next 09:38:30. The first `opening the squadron leaderboard` after it comes at the
@@ -136,37 +139,37 @@ the row only once the page title reads LEADERBOARDS. Each step waits up to
 ## Trial record
 
 Code: branch `acs-terrain-avoidance` at f286e2a plus the uncommitted ADR 166 work (3598 tests
-passed, 2026-10-31 02:16). Game client: the build the operator's screenshots were taken on
-(2026-10-31 01:44). Readings at every lobby, the schedule of the time (`every_min` 0 in
+passed, 2026-10-31). Game client: the build the operator's screenshots were taken on
+(2026-10-31). Readings at every lobby, the schedule of the time (`every_min` 0 in
 `config.local.yaml`; D6 has since replaced it).
 
 | Session | Account | Navigations | Read | Matched the frame by eye | Back in the lobby | Notes |
 |---|---|---|---|---|---|---|
-| 20261031_0217, `make r1` | acct1 | 2 | 2 | 2 of 2 (659, 358,046) | 1 of 1 checked | stopped at 02:18 with `z`: two bugs, below |
-| 20261031_0235, `make r1` | acct1 | 8 | 8 | 8 of 8 | 8 of 8 | with both fixes; stopped with `z` in battle, 03:19 |
+| 2026-10-31, run 1, `make r1` | acct1 | 2 | 2 | 2 of 2 (659, 358,046) | 1 of 1 checked | stopped with `z`: two bugs, below |
+| 2026-10-31, run 2, `make r1` | acct1 | 8 | 8 | 8 of 8 | 8 of 8 | with both fixes; stopped with `z` in battle |
 
-**02:17, the first live run.**
+**Run 1, the first live run.**
 - The first navigation (measured) went lobby, menu, leaderboards, SQUADRONS tab, read, back arrow,
-  lobby. It took 8.3 s from `opening` to the reading at 02:17:50, and every step's screen came on
+  lobby. It took 8.3 s from `opening` to the reading, and every step's screen came on
   the first look. Rank 659 and 358,046 trophies match the saved frame by eye; the operator's
-  screenshot at 01:45 showed 358,032.
+  screenshot showed 358,032.
 - The reading reached the stats file, the session summary (`Squadron ranking : rank 659, trophies
   358,046`) and, through the after-session ingest, the `squadron_rankings` table, tagged `acct1`.
 - **Bug 1, readings back to back.** With `every_min` 0 a reading was due again the moment one
-  ended, so the second navigation opened at 02:17:55 in the same lobby; no round would ever have
+  ended, so the second navigation opened in the same lobby; no round would ever have
   started. Fix: at most one reading per lobby visit (`SquadronRanking.lobby_left`, called when the
   FSM leaves `GAME_LOBBY`).
-- **Bug 2, PLAY clicked during a navigation.** At 02:17:56.099 the quick-scan clicked PLAY 0.15 s
+- **Bug 2, PLAY clicked during a navigation.** The quick-scan clicked PLAY 0.15 s
   after the second navigation started. Its hold check runs at the top of each cycle, and the PLAY
   hold asked `due()`, which is false while a navigation runs. The two clicks raced: "XTest click
-  ... STILL OFF TARGET". The second reading (02:18:03, 659 and 358,046, matching its frame) was
+  ... STILL OFF TARGET". The second reading (659 and 358,046, matching its frame) was
   taken on the leaderboard over the matchmaking screen. Fix: the PLAY hold asks `holds_play()` (due
   or running); the navigation is marked active before its attempt is booked; and the quick-scan
   checks `lobby_errand_active()` again before any PLAY or READY click.
 - The session was stopped with `z` in `GAME_WAITING`, which closes the game at once (the run's own
   error: the press was not made conditional on the state).
 
-**02:35, the second run, with both fixes (measured to 03:19).** Eight lobbies, eight navigations,
+**Run 2, with both fixes (measured to its end).** Eight lobbies, eight navigations,
 one each. Every one read, came back by the back arrow, and was followed by the PLAY click and a
 battle. There was no `STILL OFF TARGET`, no ESC press, no stall count and no give-up. All 10 readings
 of the two runs match their frames by eye, which meets V1. They follow the count both ways: 358,046,
@@ -174,8 +177,8 @@ of the two runs match their frames by eye, which meets V1. They follow the count
 with the trophies unchanged, which the frames confirm. From `opening` to the reading took 5.6 to
 8.3 s, and back arrow to lobby 0.8 to 1.8 s (V3).
 
-The stop was pressed in battle at 03:19. With it pending, no navigation started in the last lobby:
-wingman reached it at 03:23:49 and exited at 03:23:52. The after-session ingest loaded the 8 readings
+The stop was pressed in battle. With it pending, no navigation started in the last lobby:
+wingman reached it and exited. The after-session ingest loaded the 8 readings
 and they show on the dashboard (V5). No match start was missed (V2).
 
 Verdict, 2026-10-31: V1, V2, V3 and V5 are met. Open: V4 (a second click on the menu button shuts the
@@ -187,6 +190,35 @@ max once perday, and at time 9:38:30 in the morning is when it queues the functi
 the next round is over". D6 now says so. `queue_at` replaces `every_min`, and `lobby_left` (Bug 1's
 fix) is gone, because a reading can no longer follow another in the same lobby.
 
-The operator's session of 05:25 (main prefix) is the first on this code. It logged `next reading
-queues at 2026-10-31 09:38:30`. Measured to 06:00: 5 lobbies, 5 PLAY clicks, no navigation and no
+The operator's next session (main prefix) is the first on this code. It logged `next reading
+queues at 2026-10-31`. Measured over its first 35 min: 5 lobbies, 5 PLAY clicks, no navigation and no
 PLAY held, so the rounds no longer pay for a trip. The queue itself has not been seen live (V6).
+
+**2026-11-06, the menu drawn smaller: 0 of 18 tries read.** Three sessions, one on acct2 and two on
+acct3, each logging `not read — the menu did not open` on every try. The last reading
+before them was 2026-11-04.
+- Measured: the saved frames show the menu open, on both accounts, but drawn smaller than on
+  2026-10-31. LEADERBOARDS sits at y 0.19 to 0.21 (x 0.82 to 0.92), above the
+  `SQ_MENU_LEADERBOARDS` crop (y 0.255 to 0.305), which now holds INBOX. acct3 read on 11-01 and 11-03, so
+  it is not the account. `Metalstorm.exe` and `UnityPlayer.dll` date from 2026-10-29, so the change
+  did not come with a client update (inferred: a server-side content update, not shown).
+- Measured: the miss also fooled the lobby check. The shrunken menu leaves PLAY in view and its
+  LEADERBOARDS outside the crop, so `_go_back` took the open menu for the lobby, and the next try's
+  menu click shut it. The saved frames alternate open and shut.
+- Fix: `SQ_MENU_LEADERBOARDS` spans the menu's column at both sizes (x 0.72 to 0.96, y 0.15 to
+  0.32), and the navigation clicks LEADERBOARDS where OCR finds it (`squadron_ranking.word_box`),
+  not the crop's middle. Real OCR on the 10-31 and 11-06 menus puts the box on the word, and finds
+  no LEADERBOARDS on either lobby or on the leaderboard page. Two frames of 11-06 join the corpus
+  (`lobby_2026-11-06.png`, `menu_2026-11-06.png`). The later steps (title, tab, row) are unchanged
+  and have not been seen at the new size.
+
+Live check of the fix, the day's fourth session (`make r3`, acct3; code: `b3941f9` plus the uncommitted work
+in the tree, 3981 tests passed; game client of 2026-10-29). Measured:
+- Try 2 read rank 623, trophies 370,856, matching its frame by eye. The clicks went
+  menu (1885, 32), LEADERBOARDS at (1679, 240) where OCR found it, SQUADRONS tab, back arrow.
+  It was back in the lobby with PLAY clicked, 13 s after `opening`, and the day was saved.
+- Try 1, 19 s after the start, failed `the menu did not open`, and its frame shows the
+  lobby with the menu shut, so this time the click on the menu button did nothing. 2026-11-04
+  and 2026-11-06 were also the first try of a session. Inferred, not shown: the game drops a
+  click this soon after it starts. The retry in the same lobby (ADR 170 D5) covers it, and it is
+  left open.

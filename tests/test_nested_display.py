@@ -136,7 +136,7 @@ def test_start_leaves_an_idle_running_display_alone():
 
 
 def test_start_refuses_to_reuse_a_server_that_is_not_the_nested_xwayland(capsys):
-    """2026-10-25 12:04 and 12:49: a pytest Xvfb left on :3 answered, no game
+    """2026-10-25, twice: a pytest Xvfb left on :3 answered, no game
     was attached, and `make r2` reused it. The game could not start on it and
     wingman captured an all-black frame for the whole session."""
     with mock.patch.object(nd, "probe_display", return_value="up"), \
@@ -166,7 +166,7 @@ def test_the_socket_owner_is_found_by_its_listening_inode(tmp_path):
 
 
 def test_start_restarts_a_display_with_a_game_still_attached():
-    """2026-09-13 05:54-06:01 (wingman.log): a display left up by STANDBY (or
+    """2026-09-13, 7 min (wingman.log): a display left up by STANDBY (or
     a Ctrl-C that deliberately 'leaves everything up') still had a live
     MetalStorm attached when a fresh `make rd` began. launch-game kills and
     relaunches the game into the SAME, unrestarted Xwayland regardless — that
@@ -209,7 +209,7 @@ def test_start_reports_failure_when_the_stale_teardown_raises():
 def test_start_refuses_a_wedged_display_instead_of_starting_a_second_one():
     """ADR 119. A server that accepts connections without answering cannot be
     used AND cannot be replaced by starting another on the same display.
-    Measured 2026-09-05 07:09: this state hung `make rd` indefinitely with no
+    Measured 2026-09-05: this state hung `make rd` indefinitely with no
     output. Fail fast and non-zero instead."""
     with mock.patch.object(nd, "probe_display", return_value="wedged"), \
          mock.patch("subprocess.Popen") as popen:
@@ -268,6 +268,23 @@ def test_snap_toolkit_overrides_are_undone():
     assert env["XDG_DATA_DIRS"] == "/usr/share/ubuntu:/usr/share"
     assert env["WAYLAND_DISPLAY"] == "wayland-0"
     assert not any(k.endswith("_VSCODE_SNAP_ORIG") for k in env)
+
+
+def test_snap_entries_in_a_saved_path_list_are_dropped():
+    """2026-11-06: the snap refresh to rev 276 restarted the editor inside rev
+    271's environment, so the saved XDG_DATA_DIRS led with rev 271's schema
+    directories and Xwayland aborted on the missing font-antialiasing key."""
+    env = nd.host_session_env({
+        "XDG_DATA_DIRS": "/snap/code/276/usr/share:/usr/share",
+        "XDG_DATA_DIRS_VSCODE_SNAP_ORIG": (
+            "/home/op/snap/code/271/.local/share:/home/op/snap/code/271:"
+            "/snap/code/271/usr/share:/usr/share/ubuntu:/usr/share/:"
+            "/var/lib/snapd/desktop"),
+        "XDG_CONFIG_DIRS": "/snap/code/276/etc/xdg",
+    })
+    assert env["XDG_DATA_DIRS"] == (
+        "/usr/share/ubuntu:/usr/share/:/var/lib/snapd/desktop")
+    assert "XDG_CONFIG_DIRS" not in env
 
 
 def test_an_empty_saved_value_means_the_variable_was_unset():

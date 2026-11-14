@@ -258,6 +258,14 @@ class _AmmoAnalyzerStub:
         self.triggers = []
         self.low_flares_event = _EventStub()
         self.no_missiles_event = _EventStub()
+        self.flares = None
+        self.special_ready = True   # ADR 173: the special weapon's ring is lit
+
+    def special_weapon_ready(self):
+        return self.special_ready
+
+    def get_ammo_flares(self):
+        return self.flares
 
     def get_respawn_cache_result(self):
         return (self._respawning, 0.0, None)
@@ -295,12 +303,25 @@ class _AmmoCtrlStub:
         self.ejects = 0
         self.pursuits = 0
         self.padlock_switches = 0
+        self.flare_at = None
+
+    def special_weapon_profile(self):
+        """ADR 173: `flare_at` stands for the J-20's low_flares special weapon."""
+        if self.flare_at is None:
+            return None
+        return {"ability": "flare_reload", "trigger": "low_flares",
+                "flares_at": self.flare_at}
+
+    def activate_special_weapon(self, block=False, ignore_cancel=True):
+        self.reloads += 1
+        self.reload_ignored_cancel = ignore_cancel
 
     def is_mission_running(self):
         return self._running
 
-    def reload_flares(self):
+    def reload_flares(self, ignore_cancel=False):
         self.reloads += 1
+        self.reload_ignored_cancel = ignore_cancel
 
     def eject_and_dive(self, on_complete=None):
         self.ejects += 1
@@ -346,6 +367,18 @@ class _AmmoCtrlStub:
         self.new_rounds += 1
         if self.new_round_error is not None:
             raise self.new_round_error
+
+    # ADR 172: the terrain trial draws at the same round start.
+    agreement_rounds = 0
+
+    def agreement_trial_new_round(self):
+        self.agreement_rounds += 1
+
+    # Design 021 Phase 3: and the gun aim trial.
+    gun_aim_rounds = 0
+
+    def gun_aim_new_round(self):
+        self.gun_aim_rounds += 1
 
 
 def _ammo(analyzer=None, ctrl=None, bt_owns_eject=False, stats=None, **cfg):
@@ -477,6 +510,42 @@ class TestFlares:
         h.handle_low_flares()
         assert c.reloads == 1
 
+    def test_a_jet_with_a_reload_point_reloads_at_one_flare_in_a_pursuit(self):
+        """Operator, 2026-11-02, for the J-20: reload at 1 flare, in battle or in a
+        pursuit (GAME_BATTLE_EJECT)."""
+        h, a, c = _ammo(_AmmoAnalyzerStub(state=GameState.GAME_BATTLE_EJECT))
+        c.flare_at = 1
+        a.flares = 2
+        h.tick_events()
+        assert c.reloads == 0
+        a.flares = 1
+        h.tick_events()
+        assert c.reloads == 1
+        assert c.reload_ignored_cancel, "a pursuit runs with the mission cancelled"
+        h.tick_events()                     # the cooldown
+        assert c.reloads == 1
+
+    def test_a_reading_that_steps_past_one_still_reloads(self):
+        h, a, c = _ammo()
+        c.flare_at = 1
+        a.flares = 0
+        h.tick_events()
+        assert c.reloads == 1
+
+    def test_without_a_reload_point_nothing_reloads_at_one(self):
+        """The twin: other jets keep the low-flares reload at exactly 2."""
+        h, a, c = _ammo(_AmmoAnalyzerStub(state=GameState.GAME_BATTLE_EJECT))
+        a.flares = 1
+        h.tick_events()
+        assert c.reloads == 0
+
+    def test_a_jet_with_a_reload_point_skips_the_reload_at_two(self):
+        h, a, c = _ammo()
+        c.flare_at = 1
+        a.flares = 2
+        h.handle_low_flares()
+        assert c.reloads == 0
+
     def test_low_flares_inert_outside_battle(self):
         h, _, c = _ammo(_AmmoAnalyzerStub(state=GameState.GAME_LOBBY))
         h.handle_low_flares()
@@ -588,6 +657,8 @@ class TestEvadeTrialRounds:
         assert c.new_rounds == 0
         h.on_state_change(GameState.GAME_BATTLE, GameState.GAME_STARTING)
         assert c.new_rounds == 1
+        assert c.agreement_rounds == 1           # ADR 172, the same round start
+        assert c.gun_aim_rounds == 1             # Design 021 Phase 3, the same
 
     def test_moves_between_battle_states_stay_in_the_round(self):
         h, _, c = _ammo()
@@ -1588,6 +1659,12 @@ class _TrackCtrlStub:
         self.orients.append(err)
         return "right"
 
+    def padlock_state(self):
+        return False
+
+    def is_padlock_blocked(self):
+        return False
+
 
 class _TrackAnalyzerStub:
     def get_ammo_missiles(self):
@@ -1694,7 +1771,7 @@ class TestUnknownAnomalyRecorder:
         return UnknownAnomalyRecorder(cfg, clock=clock)
 
     def test_the_shipped_config_captures_a_stuck_screen(self, tmp_path):
-        """2026-10-03 07:41: wingman sat on the game's Invite Players screen
+        """2026-10-03: wingman sat on the game's Invite Players screen
         for five minutes and saved nothing, because config.yaml had carried
         max_per_episode: 0 since 2026-09-21. The recorder logged "screenshot
         cap 0 reached" and the only picture was one grabbed by hand."""
@@ -1881,7 +1958,7 @@ class TestUnknownAnomalyRecorder:
     def test_popup_absent_ends_grace_and_records_cleared(self, tmp_path):
         """Popup gone but still unclassified: capture at once, blame nothing.
 
-        Regression for the live 2026-08-20 00:33:37 mislabel — the ESC HAD
+        Regression for the live 2026-08-20 mislabel — the ESC HAD
         worked (5 consecutive 'not found' scans) yet the capture claimed the
         dismissal "did NOT clear it", because failure was inferred from the
         state instead of from the popup still being on screen.
@@ -2529,7 +2606,7 @@ def test_boundary_readings_are_suppressed_after_a_respawn():
     # DURING the respawn too, not only after it. The first version armed the
     # deadline in an if and suppressed in the elif, so the respawn tick itself —
     # the least trustworthy frame there is — passed straight through. Measured
-    # 2026-09-04 02:13:26: respawn=True with dist=0.093 on the same tick.
+    # 2026-09-04: respawn=True with dist=0.093 on the same tick.
     assert "is_respawning or now < self._respawn_settle_until" in src
 
 
@@ -2702,7 +2779,7 @@ class TestBoundaryMedianFilter:
 class TestBlindFrameCapture:
     """ADR 117. Every boundary frame in the corpus is one where detection
     SUCCEEDED — approach frames are written on a reading. The detector read on
-    23% of ticks (514 of 2204), and the 22:39:10 crossing had its last reading
+    23% of ticks (514 of 2204), and the crossing had its last reading
     14 s earlier, so the failure case has never been looked at."""
 
     @staticmethod
@@ -3049,7 +3126,7 @@ class TestClimbEmergencyActuationUsesTheHardSignal:
         assert h._ctrl.emergency_calls == [True]
 
     def test_a_running_hold_hears_the_verdict_whatever_leaf_is_selected(self):
-        """2026-10-02 23:36: Idle won the selection, _update_climb stopped running,
+        """2026-10-02: Idle won the selection, _update_climb stopped running,
         and the hold kept a stale emergency for 30 s."""
         h = _climb_handler(hard_emergency=False, broad_emergency=False)
         h._ctrl.climbing = True
@@ -3177,7 +3254,7 @@ def test_seek_center_rear_commit_no_reversal_on_dead_ahead_sign_flip():
     boundary is dead ahead — the single most important case to handle well.
     A tiny lateral jitter flips its raw sign every sample; committed, the
     direction must hold (ported from EngageNavigator._steer_intent's own
-    rear-commit regression, live 2026-08-08 15:01)."""
+    rear-commit regression, live 2026-08-08)."""
     h = _seek_center_handler()
     first = h._seek_center_error_norm(-178.85)
     assert first == -1.0
@@ -3397,3 +3474,59 @@ class TestKillCardHook:
         h._kill_card = card
         h.tick_detect(object(), self._gs(False), GameState.GAME_BATTLE)
         assert card.frames == []
+
+
+def test_the_boundary_turn_scales_with_speed_to_its_cap():
+    """ADR 171: speed over speed_ref_kph, from 1 to max_speed_scale; a stale read
+    keeps the last value."""
+    import time as _time
+    from wingman.telemetry import TelemetrySignal, TelemetrySnapshot
+    from wingman.tick_handlers import BehaviorTreeHandler
+
+    class _Speed:
+        def __init__(self):
+            self.kph, self.fresh = 2000.0, True
+
+        def get_telemetry(self):
+            now = _time.time()
+            ts = now if self.fresh else now - 60.0
+            return TelemetrySnapshot(
+                speed=TelemetrySignal(value=self.kph, stable_value=self.kph, ts=ts, rate=0.0),
+                altitude=TelemetrySignal(value=5000, stable_value=5000.0, ts=ts, rate=0.0),
+                taken_at_s=now, stale_after_s=6.0)
+
+    bt = BehaviorTreeHandler.__new__(BehaviorTreeHandler)
+    bt._analyzer = _Speed()
+    bt._boundary_speed_ref, bt._boundary_speed_max, bt._boundary_scale_last = 1000.0, 1.6, 1.0
+    assert bt._boundary_speed_scale() == 1.6
+    bt._analyzer.kph = 1200.0
+    assert bt._boundary_speed_scale() == 1.2
+    bt._analyzer.kph = 800.0
+    assert bt._boundary_speed_scale() == 1.0
+    bt._analyzer.kph, bt._analyzer.fresh = 2000.0, False
+    assert bt._boundary_speed_scale() == 1.0
+
+
+def test_reload_flares_passes_ignore_cancel_to_the_press(monkeypatch):
+    """`reload_flares cancelled` in a pursuit, with the J-20 at 1 flare."""
+    from wingman.controller import Controller
+    c = Controller.__new__(Controller)
+    seen = {}
+    monkeypatch.setattr(c, "_execute_key_press", lambda key, **kw: seen.update(kw), raising=False)
+    c.reload_flares(ignore_cancel=True)
+    assert seen.get("ignore_cancel") is True
+    c.reload_flares()
+    assert seen.get("ignore_cancel") is False
+
+
+def test_the_special_weapon_presses_through_a_cancelled_mission(monkeypatch):
+    """ADR 173: the pursuit runs with the mission cancelled; the J-20's reload and
+    the MiG-23's burst must still go out there."""
+    from wingman.controller import Controller
+    c = Controller.__new__(Controller)
+    seen = {}
+    monkeypatch.setattr(c, "_execute_key_press", lambda key, **kw: seen.update(kw, key=key),
+                        raising=False)
+    c.activate_special_weapon()
+    assert seen.get("ignore_cancel") is True
+    assert seen.get("key") == "q"

@@ -520,6 +520,8 @@ def test_the_turn_rolls_away_from_the_boundary():
         # while its own thread raised would be reading the assertions before
         # the crash, so thread exceptions are errors here.
         c._climb_exit_push = mock.MagicMock()
+        # ADR 171: the J-20's pull limit, stubbed at the method for the same reason.
+        c._boundary_pull_limit = mock.MagicMock(return_value=None)
         c._climb_stop = threading.Event()
         # Everything else the turn thread touches, enumerated from the code
         # rather than discovered one AttributeError at a time.

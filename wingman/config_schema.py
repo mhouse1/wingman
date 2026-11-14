@@ -106,9 +106,26 @@ _CROP = Section(
 )
 
 
+# The missions a launch can name; ADR 160 leaves acs (was su30) and j20.
+_MISSIONS = ("j20", "acs")
+
 # Design 011 (ACS Mode) step 1. Profile names are caller-defined (like
 # `crops:`), not fixed schema keys — MapOf, not Section, for the same reason.
-_JET_PROFILE = Section(children={"has_padlock": BOOL})
+# ADR 171: `match` is the start of the jet's name on the lobby label, and a jet
+# it matches flies `mission` instead of mission.default_mission.
+_JET_PROFILE = Section(children={
+    "has_padlock": BOOL,
+    "match": STR,
+    "mission": Leaf(types=(str,), choices=_MISSIONS),
+    # ADR 173: the jet's special weapon on `q` and the trigger that spends it.
+    # `flares_at` is the low_flares trigger's count (the J-20's flare reload at 1,
+    # operator, 2026-11-02). Absent: no special-weapon press on this jet.
+    "special_weapon": Section(children={
+        "ability": STR,
+        "trigger": Leaf(types=(str,), choices=("incoming", "low_flares", "ready")),
+        "flares_at": _int(0),
+    }, required=frozenset({"ability", "trigger"})),
+})
 
 # capture_budget: 0 = unlimited for that dimension.
 _CAPTURE_BUDGET = Section(children={"max_files": _int(0), "max_mb": _num(0)})
@@ -152,7 +169,7 @@ SCHEMA = Section(
         # of the screen with the own icon at its true place (wingman/full_map.py).
         # Sizes are fractions of the frame height (radius_frac) or of the disc's
         # radius; areas are fractions of the radius squared. Measured on two
-        # pictures at 1920 by 1200, 2026-10-04 03:19 and 16:43.
+        # pictures at 1920 by 1200, two of 2026-10-04.
         "full_map": Section(children={
             "enabled": Leaf(types=(bool,), default=True),
             "radius_frac": Leaf(types=NUMBER, minimum=0.1, maximum=0.5, default=0.3944),
@@ -274,6 +291,26 @@ SCHEMA = Section(
             }),
         }),
 
+        # ADR 173: the special weapon's ring reader and press policy.
+        "special_weapon": Section(children={
+            "enabled": Leaf(types=(bool,), default=True),
+            "sectors": Leaf(types=(int,), minimum=4, default=16),
+            "min_lit_sectors": Leaf(types=(int,), minimum=1, default=14),
+            # A ring partly under a coloured HUD marker: this many lit, and the
+            # covered sectors making up min_lit_sectors, also reads READY.
+            "min_lit_when_covered": Leaf(types=(int,), minimum=1, default=13),
+            "min_value": Leaf(types=NUMBER, minimum=0, maximum=255, default=200),
+            "max_saturation": Leaf(types=NUMBER, minimum=0, maximum=255, default=60),
+            "inside_margin": Leaf(types=NUMBER, minimum=0, default=40),
+            "outside_margin": Leaf(types=NUMBER, minimum=0, default=8),
+            "stale_after_s": Leaf(types=NUMBER, minimum=0, default=5.0),
+            "press_retry_s": Leaf(types=NUMBER, minimum=0, default=3.0),
+            "max_presses": Leaf(types=(int,), minimum=1, default=2),
+            # Crops of a READY dropping to a partial ring (a press or a misread).
+            "capture_dir": Leaf(types=(str,), default="test_screenshots/special_weapon/live"),
+            "capture_max": Leaf(types=(int,), minimum=0, default=40),
+        }),
+
         "fuel": Section(children={
             "stale_after_s": SECONDS,
             "rearm_margin_pct": _num(0, 100),
@@ -309,7 +346,7 @@ SCHEMA = Section(
             "j20_turn_guard_s": SECONDS,   # ADR 132
             # ADR 144: which mission battle entry launches; ADR 145 makes the
             # 'u' hotkey launch it too; ADR 160 leaves acs (was su30) and j20
-            "default_mission": Leaf(types=(str,), choices=("j20", "acs")),
+            "default_mission": Leaf(types=(str,), choices=_MISSIONS),
             "padlock_spread_missiles": _int(0),
             # ADR 137 D5, pre_crash_buffer_s/pre_crash_freshness_s/
             # pre_crash_lookback_s added D8
@@ -364,6 +401,26 @@ SCHEMA = Section(
             "coarse_min_hold_s": SECONDS,
             "coarse_max_hold_s": SECONDS,
             "coarse_cooldown_s": SECONDS,
+            # ADR 171: mission_j20's rearm cycle
+            "resupply_return": Leaf(types=(bool,), default=True),
+            "descent_alt_m": Leaf(types=NUMBER, minimum=0, default=4000),
+            "descent_angle_deg": Leaf(types=NUMBER, minimum=-90, maximum=0, default=-20),
+            "descent_tolerance_deg": Leaf(types=NUMBER, minimum=0, default=5),
+            "descent_pulse_s": Leaf(types=NUMBER, minimum=0, default=0.6),
+            "descent_max_s": Leaf(types=NUMBER, minimum=0, default=90.0),
+            "descent_min_pull_kph": Leaf(types=NUMBER, minimum=0, default=450),
+            "descent_observe_s": Leaf(types=NUMBER, minimum=0, default=5.0),
+            "resume_alt_m": Leaf(types=NUMBER, minimum=0, default=4000),
+            "climb_back_max_s": Leaf(types=NUMBER, minimum=0, default=90.0),
+            "ceiling_alt_m": Leaf(types=NUMBER, minimum=0, default=5500),
+            "ceiling_path_deg": Leaf(types=NUMBER, minimum=0, default=5),
+            "climb_max_pitch_deg": Leaf(types=NUMBER, minimum=0, maximum=90, default=35),
+            "climb_max_rate": Leaf(types=NUMBER, minimum=0, default=250),
+            "climb_pulse_s": Leaf(types=NUMBER, minimum=0, default=0.5),
+            "ceiling_pulse_s": Leaf(types=NUMBER, minimum=0, default=0.4),
+            "burner_max_kph": Leaf(types=NUMBER, minimum=0, default=1500),
+            "burner_rearm_kph": Leaf(types=NUMBER, minimum=0, default=1300),
+            "acs_share": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.0),
         }),
 
         # ADR 144: mission_acs, ACS_MISSION (mission_su30 until ADR 160)
@@ -433,6 +490,10 @@ SCHEMA = Section(
                 "min_clear_frac": FRACTION,
                 "blind_ticks": _int(0),
                 "entry_ratio": FRACTION,
+                # ADR 171: the distances above times the speed over speed_ref_kph,
+                # to max_speed_scale; 0 turns it off.
+                "speed_ref_kph": Leaf(types=NUMBER, minimum=0, default=0),
+                "max_speed_scale": Leaf(types=NUMBER, minimum=1, default=1.6),
             }),
             "climb": Section(children={
                 "enabled": BOOL,
@@ -501,6 +562,10 @@ SCHEMA = Section(
                     "shadow": Leaf(types=(bool,), default=True),
                     "window_s": Leaf(types=NUMBER, minimum=0, maximum=10, default=1.0),
                     "hold_s": Leaf(types=NUMBER, minimum=0, maximum=30, default=3.0),
+                    # ADR 172: the share of rounds in which the agreement does not
+                    # break off a resupply approach; 0 is cycle 25 as it was.
+                    "resupply_holdoff_share": Leaf(types=NUMBER, minimum=0, maximum=1,
+                                                   default=0.0),
                 }),
                 # Code Review 019 cycle 32 (HLDD 001 part 2): the emergency climb
                 # starts when a pull-out started reaction_s from now would bottom
@@ -562,7 +627,7 @@ SCHEMA = Section(
                 # Pieces of the markers that sit on the rim are orange too and
                 # measure 0.0006 to 0.0015: with the floor at 0.0006 they
                 # counted as second candidates and the heading went unread,
-                # for 56 s on 2026-10-04 18:15. The floor is above them now.
+                # for 56 s on 2026-10-04. The floor is above them now.
                 "letter_min_area_frac": Leaf(types=NUMBER, minimum=0, default=0.002),
                 "letter_max_area_frac": Leaf(types=NUMBER, minimum=0, default=0.005),
             }),
@@ -706,6 +771,7 @@ SCHEMA = Section(
         # ADR 167: each round's jet, read off the lobby.
         "jet_name": Section(children={
             "capture": Leaf(types=(bool,), default=False),
+            "recheck_s": Leaf(types=(int, float), default=3.0, minimum=1.0),    # ADR 168
         }),
         # Design 018: the score dashboard (Grafana and Postgres, `make grafana`).
         # Off unless the operator turns it on in config.local.yaml.
@@ -907,6 +973,49 @@ SCHEMA = Section(
             # is within gun_centre_err of the screen centre on both axes.
             "gun_on_centre": Leaf(types=(bool,), default=False),
             "gun_centre_err": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.05),
+            # Operator, 2026-11-13: the gun only while the target is under this
+            # range, read off its nameplate (target_range.py). 0 turns the gate off.
+            "gun_max_range_km": Leaf(types=NUMBER, minimum=0, default=2.0),
+            "gun_range_max_age_s": Leaf(types=NUMBER, minimum=0, default=1.5),
+            # Design 021 Phase 1 (shadow): the gun lead ring and the damage text
+            # are read and logged; nothing flies on them.
+            "gun_lead": Section(children={
+                "enabled": Leaf(types=(bool,), default=True),
+                # Searched only while the tracked target reads under this range.
+                "search_max_km": Leaf(types=NUMBER, minimum=0, default=2.0),
+                # Half-width of the search window around the marker, px at 1200 high.
+                "search_px": Leaf(types=NUMBER, minimum=20, default=450),
+                "min_score": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.45),
+                "crosshair_pct": Leaf(types=(list,), item_types=NUMBER, length=2,
+                                      default=[0.4997, 0.508]),
+                # Phase 3: the share of rounds whose chase steers the crosshair
+                # onto the ring and fires on it. 0 = every round on the marker.
+                "steer_share": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.0),
+                # The ring's largest distance from the crosshair for the gun to
+                # open, px at 1200 high.
+                "fire_px": Leaf(types=NUMBER, minimum=1, default=40),
+                # The ring stays the aim point this long after it was last confirmed.
+                "ring_memory_s": Leaf(types=NUMBER, minimum=0, default=0.45),
+                # Dots found on the line to the marker for the ring to be this target's.
+                "ring_min_dots": Leaf(types=(int,), minimum=0, maximum=4, default=2),
+                # The chase steers on a ring only while the tracked target reads
+                # under this range; the shadow still searches to search_max_km.
+                "steer_max_km": Leaf(types=NUMBER, minimum=0, default=1.2),
+            }),
+            # Design 021 Phase 5 (shadow): where the tracked target is going,
+            # logged and drawn on the HUD. Nothing flies on it.
+            "target_projection": Section(children={
+                "enabled": Leaf(types=(bool,), default=True),
+                # Seconds of the target's own motion the point leads by, for
+                # each km of range, on x and y.
+                "lead_s_per_km": Leaf(types=(list,), item_types=NUMBER, length=2,
+                                      default=[0.51, 0.37]),
+                # Where the point sits with the target still, from the marker,
+                # px at 1200 high.
+                "offset_px": Leaf(types=(list,), item_types=NUMBER, length=2,
+                                  default=[14, 4]),
+                "smooth_s": Leaf(types=NUMBER, minimum=0, default=0.4),
+            }),
             "empty_confirm_reads": _int(1),
             "steer_interval_s": SECONDS,    # CR-018-01
             "engage_interval_s": SECONDS,   # CR-018-01
@@ -933,7 +1042,7 @@ SCHEMA = Section(
                     "min_off_centre_px": Leaf(types=NUMBER, minimum=0, default=35),
                     "min_outward_px": Leaf(types=NUMBER, default=5),
                     "lined_up_px": Leaf(types=NUMBER, minimum=0, default=120),
-                    "min_size_px": Leaf(types=NUMBER, minimum=0, default=50),
+                    "min_size_px": Leaf(types=NUMBER, minimum=0, default=53),
                 }),
                 # The frame in which a resupply marker first appears, saved to
                 # tests/test-output/target_tracking, two per pursuit at most.
@@ -1015,6 +1124,11 @@ SCHEMA = Section(
                 # still says. null: the score alone decides.
                 "level_band_deg": Leaf(types=NUMBER, minimum=0, maximum=45,
                                        allow_none=True, default=None),
+                # Operator, 2026-11-03: an icon below the horizon pushes only
+                # within this many degrees of straight down; further to the side
+                # it turns toward its side. null: every such icon pushes.
+                "push_cone_deg": Leaf(types=NUMBER, minimum=0, maximum=90,
+                                      allow_none=True, default=None),
             }),
         }),
 
@@ -1107,6 +1221,10 @@ SCHEMA = Section(
             "nose_direction_deadband_mps": _num(0),   # ADR 123
             "max_speed_mph": _num(0),
             "max_altitude_ft": _num(0),
+            # Design 020: the HUD shows the map mesh's height, signed; it reads -206 m
+            # over Crimson Canyon's water. The lowest geometry on any map is Crucible's
+            # kill floor at -1,480 m (measured 2026-11-07).
+            "min_altitude_m": Leaf(types=NUMBER, maximum=0, default=-1600.0),
             "max_speed_change_mph_s": _num(0),
             "max_altitude_change_fps": _num(0),
             "plausibility_margin": _num(0),
@@ -1148,6 +1266,66 @@ SCHEMA = Section(
                 "heatdive_enabled": BOOL,
                 "heatdive_padlock_verify": BOOL,
                 "telemetry_confirm_polls": _int(0),
+            }),
+        }),
+
+        # Design 020 Phase 4 (shadow): position on the map from the minimap and time to
+        # impact against the game's collision meshes. Logged as TERRAIN:, steers nothing.
+        "terrain_service": Section(children={
+            "enabled": Leaf(types=(bool,), default=True),
+            # MATCH map name -> its minimap texture and height map, built offline
+            # (test_screenshots/terrain/tools/). A map with no entry, or missing
+            # files, gets no reading.
+            # mpp_at_320px, per map (optional): the game zooms some minimaps differently.
+            # Crucible: 0 fixes in 13 rounds at the shared 34; 10 of 12 live grabs fixed at
+            # 19 to 23 (Design 020, 2026-11-08).
+            "maps": MapOf(Section(children={"minimap": STR, "height": STR,
+                                            "mpp_at_320px": Leaf(types=NUMBER, minimum=1)})),
+            # ttc_m: the path must clear the ground by this much (Design 020, 39 live
+            # crashes: 0 m warned 67% at 4.6% of ordinary ticks, 150 m 85% at 6.6%).
+            "clearance_margin_m": Leaf(types=NUMBER, minimum=0, default=150.0),
+            # ADR 174: ttc_y at or under warn_s is a map warning; in the `map` arm,
+            # drawn per round with this share, it starts the emergency climb.
+            "warn_s": Leaf(types=NUMBER, minimum=0.1, maximum=10, default=2.0),
+            "trial_share": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.5),
+            # Design 020 way_out (shadow): how far each candidate manoeuvre is projected
+            # on a warning tick (the offline check over 93 crashes used 5 s).
+            "way_out_horizon_s": Leaf(types=NUMBER, minimum=1, maximum=10, default=5.0),
+            # ADR 174 revised: in the `map` arm, fly the way out once the straight path
+            # meets the ground within this many seconds (offline, 107 crashes: a clear way
+            # out at 5 s for 62, at 2 s for 12; about two acts a round).
+            "decide_s": Leaf(types=NUMBER, minimum=0.5, maximum=10, default=5.0),
+            # How long the bank-and-pull of a terrain turn may run before it re-decides.
+            "turn_max_s": Leaf(types=NUMBER, minimum=0.5, maximum=10, default=3.0),
+            # Metres per pixel of the MINIMAP crop at 320 px wide (measured: 34).
+            "mpp_at_320px": Leaf(types=NUMBER, minimum=1, default=34.0),
+            # A fix needs this correlation, and this margin over the best match
+            # more than 1 km away (Design 020 Phase 1: 0.4 and 0.15).
+            "min_score": Leaf(types=NUMBER, minimum=-1, maximum=1, default=0.4),
+            "min_gap": Leaf(types=NUMBER, minimum=0, maximum=2, default=0.15),
+            "horizon_s": Leaf(types=NUMBER, minimum=0.1, maximum=10, default=3.0),
+            "track_spread_deg": Leaf(types=NUMBER, minimum=0, maximum=90, default=15.0),
+            # Two fixes further apart than this give no ground speed.
+            "max_fix_gap_s": Leaf(types=NUMBER, minimum=0.2, default=2.0),
+            # With a fix that recent, search this far round it before the whole map
+            # (cost: about 40 ms a tick for the whole map, measured 2026-11-07).
+            "search_window_m": Leaf(types=NUMBER, minimum=500, default=2500.0),
+            # Blur the crop and the texture by this much before matching (Stone Forest's
+            # trees: 0 of 55 recorded crops fixed unblurred, 50 of 55 at 100 m).
+            "match_blur_m": Leaf(types=NUMBER, minimum=0, maximum=500, default=100.0),
+            # Design 020 Phase 7 (ADR 176, shadow): the chase's own pitch and roll command,
+            # projected through the height map on every steering tick before it is flown.
+            # pitch_deg_s: how fast a held nose-down steepens the path (the emergency climb's
+            # nose-up measured a median 7.6 deg/s on 2026-11-08). turn_deg_s: the bank's
+            # measured turn rate. decide_s: a command whose path meets the ground within this
+            # is one the guard would withhold or flip. max_fix_age_s: no verdict on an older
+            # fix (the fix is carried forward along its track meanwhile).
+            "steer_guard": Section(children={
+                "enabled": Leaf(types=(bool,), default=True),
+                "pitch_deg_s": Leaf(types=NUMBER, minimum=1, maximum=45, default=10.0),
+                "turn_deg_s": Leaf(types=NUMBER, minimum=1, maximum=45, default=12.0),
+                "decide_s": Leaf(types=NUMBER, minimum=0.5, maximum=10, default=3.0),
+                "max_fix_age_s": Leaf(types=NUMBER, minimum=0.2, maximum=10, default=2.0),
             }),
         }),
 

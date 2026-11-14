@@ -72,8 +72,8 @@ def test_the_account_comes_from_the_run_id_suffix():
 
 
 @pytest.mark.parametrize("run_id, pilot", [
-    ("20261031_023505_acct1", "mobius0"),     # its end screen at 03:16 reads MOBIUS0
-    ("20261030_162007", "mobius1"),           # its end screen at 16:25 reads MOBIUS1
+    ("20261031_023505_acct1", "mobius0"),     # its end screen reads MOBIUS0
+    ("20261030_162007", "mobius1"),           # its end screen reads MOBIUS1
     ("20261031_043634_acct2", "mobius2"),
     ("20261030_223038_acct3", "mobius3"),
     ("20261031_043634_acct4", "acct4")])      # not named yet: it keeps its tag
@@ -117,7 +117,7 @@ _LOG = [
     _line("03:09:16", "ROUND PERFORMANCE: not read — no KDA on any of 4 frames: kda ''"),
     _line("03:09:17", "ROUND PERFORMANCE: shadow — page 2: kda ''"),
     _line("03:09:20", "🎮 Game state: GAME_END_B → GAME_LOBBY"),
-    # 2026-10-28 00:56: a second click-through of the same end screens.
+    # 2026-10-28: a second click-through of the same end screens.
     _line("03:09:29", "ROUND PERFORMANCE: not read (4 frame(s), no two read alike)"),
 ]
 
@@ -131,7 +131,7 @@ def test_a_log_gives_one_row_per_round_read_or_not():
 
 
 def test_a_reading_with_no_end_screen_before_it_is_not_a_round():
-    assert len(rs.rows_from_log(_LOG, "x")) == 2, "the 03:09:29 second click-through"
+    assert len(rs.rows_from_log(_LOG, "x")) == 2, "the second click-through"
 
 
 def test_a_log_time_in_the_repeated_hour_is_read_as_daylight_time():
@@ -162,6 +162,15 @@ def test_a_log_keeps_a_jet_until_the_next_read():
     assert [r.tags.get("jet") for r in rs.rows_from_log(log, "x")] == ["SU-35 SUPER FLANKER", None]
 
 
+def test_a_jet_changed_in_the_wait_reaches_a_log_round():
+    """ADR 168: both lines are wingman's, the click's then the recheck's. The recheck's
+    own note must not read as a failed reading."""
+    log = [_line("02:49:00", "✈️ JET NAME: F-14 TOMCAT"),
+           _line("02:49:30", "Jet recheck: the wait's label changed, was F-14 TOMCAT"),
+           _line("02:49:30", "✈️ JET NAME: SU-27 FLANKER")] + _LOG
+    assert rs.rows_from_log(log, "x")[0].tags["jet"] == "SU-27 FLANKER"
+
+
 def test_a_log_keeps_a_jet_with_a_slash_or_a_dot():
     for jet in ("F/A-18F SUPER HORNET", "M.III"):
         log = [_line("02:50:00", f"✈️ JET NAME: {jet}")] + _LOG
@@ -175,7 +184,7 @@ def test_a_lobby_that_failed_to_read_gives_a_log_round_no_jet():
 
 
 def test_a_log_takes_its_account_from_the_run_file_line():
-    """2026-10-30 07:25: a `make r2` session the shutdown watchdog ended wrote no
+    """2026-10-30: a `make r2` session the shutdown watchdog ended wrote no
     stats file, and its 12 rounds showed as "no account"."""
     named = _LOG + [_line("03:10:00", "PerformanceTracker: session data written to "
                                       "docs/performance/current/run_20261029_025030_acct2.json")]
@@ -296,11 +305,14 @@ def test_no_squadron_panel_depends_on_the_account():
     assert sqls and not any("tags" in sql or "account" in sql for sql in sqls)
 
 
-def test_the_squadron_charts_sit_right_under_score_per_round():
+def test_the_jet_ranges_then_the_squadron_charts_sit_right_under_score_per_round():
+    """Operator, 2026-11-03: the jet ranges go under Score per round."""
     dashboard = json.loads(Path("grafana/dashboards/score-per-round.json").read_text(encoding="utf-8"))
     place = {p["title"].split(" (")[0]: p["gridPos"] for p in dashboard["panels"]}
     score = place["Score per round: wingman and manual takeover"]
-    below = score["y"] + score["h"]
+    jets = place["Score range by jet"]
+    assert jets["y"] == score["y"] + score["h"]
+    below = jets["y"] + jets["h"]
     assert place["Squadron rank per reading"]["y"] == below
     assert place["Squadron trophies per reading"]["y"] == below
 
@@ -308,6 +320,25 @@ def test_the_squadron_charts_sit_right_under_score_per_round():
 def test_the_schema_keeps_the_trophies():
     schema = Path("grafana/schema.sql").read_text(encoding="utf-8")
     assert "ALTER TABLE squadron_rankings ADD COLUMN IF NOT EXISTS trophies bigint;" in schema
+
+
+def test_the_schema_names_each_jet_once_by_its_letters_and_digits():
+    """Operator, 2026-11-08: F-106 DELTA DART and F106 DELTA DART were two jets on
+    the dashboard. The view keys a spelling the way `jet_name.same_jet` does, and is
+    replaced on every load, as the schema is applied before each one."""
+    schema = Path("grafana/schema.sql").read_text(encoding="utf-8")
+    assert "CREATE OR REPLACE VIEW jet_names AS" in schema
+    assert "regexp_replace(upper(tags->>'jet'), '[^A-Z0-9]', '', 'g')" in schema
+
+
+def test_every_panel_that_names_a_jet_names_it_through_the_view():
+    """A panel that groups by the spelling read splits one jet in two again."""
+    by_jet = [(title, sql) for title, sql in _dashboard_sql() if "tags->>'jet'" in sql]
+    assert len(by_jet) == 3
+    for title, sql in by_jet:
+        assert "JOIN jet_names ON spelling = tags->>'jet'" in sql, title
+        assert "tags->>'jet' AS" not in sql and "coalesce(tags->>'jet'" not in sql, title
+        assert "GROUP BY tags->>'jet'" not in sql, title
 
 
 # -- the dashboard ----------------------------------------------------------------
@@ -382,7 +413,7 @@ def test_an_overlay_that_does_not_validate_is_refused(tmp_path):
 # -- a manual takeover (operator, 2026-10-29) ---------------------------------------
 
 def test_a_round_with_a_manual_takeover_is_kept_with_its_count():
-    """The dashboard charts it apart from wingman's own: 2026-10-29 17:40, round 6,
+    """The dashboard charts it apart from wingman's own: 2026-10-29, round 6,
     four takeovers."""
     rows = rs.rows_from_stats(_stats([_mission(0, performance=_READ),
                                       _mission(1, performance=_READ, manual_takeover_count=4),
@@ -418,6 +449,11 @@ def _score_per_round():
     return [sql for title, sql in _dashboard_sql() if title.startswith("Score per round")]
 
 
+def _score_panel():
+    dashboard = json.loads(Path("grafana/dashboards/score-per-round.json").read_text(encoding="utf-8"))
+    return next(p for p in dashboard["panels"] if p["title"].startswith("Score per round"))
+
+
 def test_every_round_panel_but_score_per_round_is_wingman_only():
     others = [sql for title, sql in _dashboard_sql()
               if not title.startswith("Score per round") and "FROM rounds" in sql]
@@ -427,12 +463,48 @@ def test_every_round_panel_but_score_per_round_is_wingman_only():
 def test_score_per_round_draws_each_account_and_the_takeovers_apart():
     """Operator, 2026-10-29: a dot colour per account, wingman's moving average,
     and the rounds with a manual takeover with their own."""
-    dots, wingman, taken_over = _score_per_round()
+    _hover, dots, wingman, taken_over = _score_per_round()
     assert "AS metric" in dots and "tags->>'account'" in dots
     assert "AND manual_takeovers = 0" in dots and "AND manual_takeovers = 0" in wingman
     assert '"wingman, moving average"' in wingman
     assert "NOT manual_takeovers = 0" in taken_over
     assert '"manual takeover"' in taken_over and '"manual takeover, moving average"' in taken_over
+
+
+def test_hovering_a_dot_names_the_rounds_account_jet_and_kda():
+    """Operator, 2026-11-01. A time series tooltip shows a series' name and value and
+    nothing else from its row, so each account, jet and K/D/A is its own series."""
+    hover, *_ = _score_per_round()
+    assert "AS metric" in hover and "score AS value" in hover
+    for part in ("tags->>'account'", "coalesce(jet,", "K/D/A ", "kills", "deaths", "assists"):
+        assert part in hover
+    assert "manual_takeovers = 0 AND" not in hover, "an orange dot has its details too"
+
+
+def test_a_round_with_no_jet_keeps_its_details():
+    """In SQL a NULL jet would blank the whole name, and 548 read rounds have none."""
+    hover, *_ = _score_per_round()
+    assert "coalesce(jet, 'jet not recorded')" in hover
+    assert "LEFT JOIN jet_names" in hover
+
+
+def test_the_hover_series_win_a_tie_with_the_account_dots():
+    """Both draw the round at one spot and the first series wins the tie. Queried after
+    the account dots, the tooltip read `mobius3 300` with no details."""
+    assert _score_panel()["targets"][0]["refId"] == "D"
+
+
+def test_the_hover_series_draw_nothing_so_the_legend_still_isolates_an_account():
+    """A legend click leaves alone any series hidden from the legend. Drawn as dots, every
+    account stayed on screen when one was isolated. These must also stay out of the
+    legend: 460 of them on 2026-11-01."""
+    (hover,) = [o for o in _score_panel()["fieldConfig"]["overrides"]
+                if o["matcher"] == {"id": "byFrameRefID", "options": "D"}]
+    props = {q["id"]: q["value"] for q in hover["properties"]}
+    assert props["custom.hideFrom"] == {"legend": True, "tooltip": False, "viz": False}
+    assert props["custom.drawStyle"] == "line"
+    assert props["custom.lineWidth"] == 0
+    assert props["custom.showPoints"] == "never"
 
 
 def test_both_moving_averages_are_lines_and_the_takeover_one_shows_its_points():
@@ -464,7 +536,8 @@ def test_the_jet_panel_ranks_wingmans_rounds_and_shows_how_much_it_rests_on():
 def test_rounds_without_a_jet_are_shown_but_never_ranked_among_the_jets():
     sql = _by_jet()["targets"][0]["rawSql"]
     assert "'not recorded'" in sql
-    assert sql.index("tags->>'jet' IS NULL") < sql.index('"Mean score" DESC')
+    assert "LEFT JOIN jet_names" in sql
+    assert sql.index("ORDER BY jet IS NULL") < sql.index('"Mean score" DESC')
 
 
 def test_a_jet_with_few_rounds_cannot_top_the_jets_that_have_many():
@@ -483,12 +556,80 @@ def test_the_jet_panels_bars_are_one_colour_not_good_and_bad():
     assert properties["color"] == {"mode": "fixed", "fixedColor": "blue"}
 
 
-def test_the_accounts_have_their_own_colours():
+def _jet_ranges():
     dashboard = json.loads(Path("grafana/dashboards/score-per-round.json").read_text(encoding="utf-8"))
-    panel = next(p for p in dashboard["panels"] if p["title"].startswith("Score per round"))
-    named = {o["matcher"]["options"] for o in panel["fieldConfig"]["overrides"]}
-    assert {"mobius0", "mobius1", "mobius2", "mobius3", "no account"} <= named
-    assert not {"main", "acct1", "acct2", "acct3"} & named
+    return next(p for p in dashboard["panels"] if p["title"].startswith("Score range by jet"))
+
+
+def _hide_from(panel):
+    """The `custom.hideFrom` each override sets, by its matcher's options."""
+    return {o["matcher"]["options"]: q["value"] for o in panel["fieldConfig"]["overrides"]
+            for q in o["properties"] if q["id"] == "custom.hideFrom"}
+
+
+def test_the_jet_ranges_are_one_bar_per_jet_from_its_lowest_to_its_highest():
+    """Operator, 2026-11-03: a candlestick of score by jet, the wick from the lowest
+    score to the highest and a tick at the mean. Grafana's candlestick panel draws
+    time along the bottom, so the bars stack: an empty base up to the lowest, then
+    up to the tick, the tick, and on to the highest."""
+    panel = _jet_ranges()
+    assert panel["type"] == "barchart"
+    assert panel["options"]["xField"] == "Jet" and panel["options"]["stacking"] == "normal"
+    sql = panel["targets"][0]["rawSql"]
+    stack = ['"below the lowest"', '"lowest to mean"', '"mean tick"', '"mean to highest"']
+    assert [sql.index(name) for name in stack] == sorted(sql.index(name) for name in stack)
+    (base,) = [o for o in panel["fieldConfig"]["overrides"]
+               if o["matcher"] == {"id": "byName", "options": "below the lowest"}]
+    assert {"id": "custom.fillOpacity", "value": 0} in base["properties"]
+
+
+def test_the_jet_ranges_put_the_jet_with_the_most_rounds_on_the_left():
+    """Operator, 2026-11-03: the most rounds on the left, the fewest on the right."""
+    sql = _jet_ranges()["targets"][0]["rawSql"]
+    assert "ORDER BY rounds DESC, mean DESC" in sql
+
+
+def test_the_jet_ranges_leave_out_rounds_with_no_jet():
+    """Those rounds flew every jet, so their range would be no jet's."""
+    assert "tags->>'jet' IS NOT NULL" in _jet_ranges()["targets"][0]["rawSql"]
+
+
+def test_hovering_a_jets_bar_shows_its_figures_not_the_stack():
+    """The stacked segments' values are lengths, so they stay out of the tooltip; the
+    figures ride along hidden from the chart, and the tooltip lists them."""
+    hide = _hide_from(_jet_ranges())
+    assert hide["/^(below the lowest|lowest to mean|mean tick|mean to highest)$/"] == {
+        "legend": True, "tooltip": True, "viz": False}
+    assert hide["/^(Highest|Mean score|Lowest|Rounds read)$/"] == {
+        "legend": True, "tooltip": False, "viz": True}
+
+
+def test_the_dashboard_is_at_schema_42_so_hidden_figures_stay_in_the_tooltip():
+    """Grafana 12.2 migrates a dashboard below schema 42 by hiding from the tooltip
+    every field hidden from the chart (`migrateHideFromFunctionality`). At 39 the jet
+    ranges' tooltip showed the jet's name and nothing else."""
+    dashboard = json.loads(Path("grafana/dashboards/score-per-round.json").read_text(encoding="utf-8"))
+    assert dashboard["schemaVersion"] >= 42
+
+
+def _colours(name):
+    """The colours the name-pattern overrides give a series called `name`."""
+    return [p["value"]["fixedColor"] for o in _score_panel()["fieldConfig"]["overrides"]
+            if o["matcher"]["id"] == "byRegexp"
+            and re.search(o["matcher"]["options"].strip("/"), name)
+            for p in o["properties"] if p["id"] == "color"]
+
+
+def test_the_accounts_have_their_own_colours():
+    """The hover series take their account's colour, so the ring on a hovered dot does too."""
+    colours = [_colours(a) for a in ("mobius0", "mobius1", "mobius2", "mobius3", "no account")]
+    assert all(len(c) == 1 for c in colours) and len({c[0] for c in colours}) == 5
+    assert _colours("mobius2, J35 DRAKEN, K/D/A 0/5/0") == _colours("mobius2")
+    assert not any(_colours(name) for name in ("main", "acct1", "acct2", "acct3"))
+
+
+def test_a_taken_over_rounds_hover_series_stays_orange():
+    assert _colours("manual takeover, mobius2, J35 DRAKEN, K/D/A 0/5/0") == ["orange"]
 
 
 # -- Phase 2: the ingest after a session ---------------------------------------------

@@ -43,8 +43,8 @@ Default hotkeys are defined in `wingman/controller.py`.
 
 | Key | Action |
 |-----|--------|
-| `n` | Start unattended mode (clicks play, waits for game start, auto-launches the mission `mission.default_mission` names: `acs` as shipped, or `j20`) |
-| `u` | Start the configured mission (`mission.default_mission`) manually |
+| `n` | Start unattended mode (clicks play, waits for game start, auto-launches the mission for the jet: `j20` on a J-20, otherwise the one `mission.default_mission` names, `acs` as shipped) |
+| `u` | Start the mission for the jet on record manually |
 | `o` | Start ACS_MISSION manually (takes over from a running mission) |
 | `end` | Cancel current mission |
 | `backspace` | Exit script |
@@ -70,7 +70,9 @@ Main config file: `wingman/config.yaml`
 | `respawn_detection.ocr_cooldown` | OCR scheduling interval |
 | `mission.restart_delay_after_unlock` | Delay before mission restart after respawn (default 4s) |
 | `mission.weapon_loop_interval` | Firing loop interval |
-| `mission.default_mission` | Mission launched at battle entry, by `u` and by the no-prior-mission restart: `acs` (ACS_MISSION, shipped) or `j20` (ADR 160). A respawn restarts whichever ran last (`_last_mission`) |
+| `mission.default_mission` | Mission launched at battle entry, by `u` and by the no-prior-mission restart, for a jet with no mission of its own: `acs` (ACS_MISSION, shipped) or `j20` (ADR 160). A respawn restarts whichever ran last (`_last_mission`) |
+| `jet_profile.profiles` | Per jet (ADR 171): `match`, the start of the name on the lobby label, and `mission`, which that jet flies instead of `mission.default_mission` |
+| `j20_mission` | `mission_j20`'s cycle: `resupply_return`, `descent_angle_deg`, `resume_alt_m` (ADR 171). The rest of the block tunes the shared Engage tactic |
 | `acs_mission` | ACS_MISSION numbers: level-off `climb_alt_m`, nose angle, `alt_floor_m` (ADR 147 per-mission floor), `yield_to_target` |
 
 If detection is unstable, verify the capture region and grid indices first.

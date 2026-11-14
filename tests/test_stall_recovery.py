@@ -86,6 +86,9 @@ class TestStallGate:
         STALL_INVITE_PLAYERS (2026-10-11) meets the original argument: the
         screen is identified by its title and the action is one ESC, the same
         ESC that already closed it once the ADR 093 ceiling passed.
+
+        STALL_PARTS_SELECT (Anomaly 004) is not on this gate: it waits for
+        the liveness guard's stall (TestPartsToSecondJet).
         """
         analyzer._stall_state_since = 0.0
         analyzer._lobby_blackout_since = time.time() - (analyzer._stall_action_after_s + 1.0)
@@ -522,3 +525,111 @@ class TestChooseRewards:
 
         assert _choose_middle_reward(ctrl, self._Analyzer(crops), logging.getLogger("test")) is None
         assert ctrl.clicks == []
+
+
+class TestPartsToSecondJet:
+    """Anomaly 004: the second jet, then CONFIRM (operator, 2026-11-10)."""
+
+    _NAMES = ("STALL_PARTS_SELECT", "STALL_PARTS_PICK", "STALL_PARTS_CONFIRM")
+
+    @classmethod
+    def _crops(cls):
+        crops = load_config()["crops"]
+        return {name: crops[name] for name in cls._NAMES}
+
+    def test_the_pick_crop_is_inside_the_second_card(self):
+        """Second card on every archived 1920x1200 frame: x 541-981, y 485-787 px."""
+        (x1, y1), (x2, y2) = self._crops()["STALL_PARTS_PICK"]["coords"]
+        assert 541 / 1920 < x1 < x2 < 981 / 1920
+        assert 485 / 1200 < y1 < y2 < 787 / 1200
+
+    def test_confirm_sits_below_the_cards(self):
+        (_, cy1), _ = self._crops()["STALL_PARTS_CONFIRM"]["coords"]
+        assert cy1 > 787 / 1200
+
+    def test_the_title_is_what_detects_the_screen(self):
+        crops = self._crops()
+        assert crops["STALL_PARTS_SELECT"].get("text"), "the title crop needs matchers"
+        assert not crops["STALL_PARTS_PICK"].get("text"), "a card is clicked, not read"
+
+    @pytest.mark.parametrize("state", [GameState.GAME_LOBBY, GameState.GAME_UNKNOWN,
+                                       GameState.GAME_STARTING_STALLED])
+    def test_waits_for_the_liveness_stall_however_long_the_screen_is_up(
+            self, analyzer, state):
+        """Operator, 2026-11-13: an operator at the desk picks the jet first."""
+        analyzer._stall_state_since = time.time() - 9999.0
+        analyzer._lobby_blackout_since = time.time() - 9999.0
+        analyzer.note_liveness_stall(False)
+        assert "STALL_PARTS_SELECT" not in analyzer._stall_recovery_targets(state)
+
+    @pytest.mark.parametrize("state", [GameState.GAME_LOBBY, GameState.GAME_UNKNOWN,
+                                       GameState.GAME_STARTING_STALLED])
+    def test_the_liveness_stall_opens_it_first(self, analyzer, state):
+        analyzer._stall_state_since = 0.0
+        analyzer._lobby_blackout_since = 0.0
+        analyzer.note_liveness_stall(True)
+        targets = analyzer._stall_recovery_targets(state)
+        assert targets[0] == "STALL_PARTS_SELECT"
+
+    @pytest.mark.parametrize("state", [GameState.GAME_BATTLE, GameState.GAME_WAITING,
+                                       GameState.GAME_STARTING, GameState.GAME_END_B])
+    def test_the_liveness_stall_never_opens_it_outside_the_lobby_states(
+            self, analyzer, state):
+        analyzer.note_liveness_stall(True)
+        assert "STALL_PARTS_SELECT" not in analyzer._stall_recovery_targets(state)
+
+    def test_progress_closes_it_again(self, analyzer):
+        analyzer.note_liveness_stall(True)
+        analyzer.note_liveness_stall(False)
+        assert "STALL_PARTS_SELECT" not in analyzer._stall_recovery_targets(
+            GameState.GAME_LOBBY)
+
+    def test_the_main_loop_feeds_the_liveness_verdict_to_the_analyzer(self):
+        src = Path("wingman/main.py").read_text(encoding="utf-8")
+        assert "analyzer.note_liveness_stall(liveness.check())" in src
+
+    def test_it_is_not_on_the_15_second_dwell_list(self):
+        assert "STALL_PARTS_SELECT" not in STALL_RECOVERY_CROPS
+
+    def test_clicks_the_second_card_then_confirm(self):
+        import logging
+        from wingman.main import _give_parts_to_second_jet
+        ctrl = TestChooseRewards._Ctrl()
+        analyzer = TestChooseRewards._Analyzer(self._crops())
+
+        thread = _give_parts_to_second_jet(ctrl, analyzer, logging.getLogger("test"),
+                                           delay_s=0.05)
+
+        assert [name for name, _ in ctrl.clicks] == ["STALL_PARTS_PICK"], (
+            "CONFIRM is inert until a card is chosen")
+        thread.join(timeout=2.0)
+        assert [name for name, _ in ctrl.clicks] == ["STALL_PARTS_PICK", "STALL_PARTS_CONFIRM"]
+
+    def test_confirm_is_dropped_when_the_game_has_moved_on(self):
+        import logging
+        from wingman.main import _give_parts_to_second_jet
+        ctrl = TestChooseRewards._Ctrl()
+        analyzer = TestChooseRewards._Analyzer(self._crops())
+
+        thread = _give_parts_to_second_jet(ctrl, analyzer, logging.getLogger("test"),
+                                           delay_s=0.05)
+        analyzer.game_state = GameState.GAME_BATTLE
+        thread.join(timeout=2.0)
+
+        assert [name for name, _ in ctrl.clicks] == ["STALL_PARTS_PICK"]
+
+    def test_nothing_is_clicked_without_both_crops(self):
+        import logging
+        from wingman.main import _give_parts_to_second_jet
+        crops = self._crops()
+        del crops["STALL_PARTS_PICK"]
+        ctrl = TestChooseRewards._Ctrl()
+
+        assert _give_parts_to_second_jet(
+            ctrl, TestChooseRewards._Analyzer(crops), logging.getLogger("test")) is None
+        assert ctrl.clicks == []
+
+    def test_the_handler_is_wired_to_the_title_crop(self):
+        src = Path("wingman/main.py").read_text(encoding="utf-8")
+        branch = src[src.index('if crop == "STALL_PARTS_SELECT":'):]
+        assert "_give_parts_to_second_jet(" in branch[:branch.index("return")]

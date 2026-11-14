@@ -2,8 +2,8 @@
 
 After an enemy kill the respawn screen carries a card along its bottom edge,
 "KILLED BY | AIRCRAFT | WEAPON | HEALTH | ASSIST", naming the killer and the
-weapon. After the terrain crash at 2026-10-17 00:44:18 (a dive after an A-4 into
-canyon spires) the screen had none. Of the 17 deaths since 00:14 that the black
+weapon. After the terrain crash at 2026-10-17 (a dive after an A-4 into
+canyon spires) the screen had none. Of the 17 deaths that the black
 box kept, 16 had a card naming an enemy and a weapon (guns, R-77, AIM-54, Meteor,
 MICA, AIM-7); the session summary's own count (ADR 143, from missile-alert and
 dive-emergency recency) had put terrain at 7 of 34 armed deaths the session
@@ -98,11 +98,16 @@ class KillCardReader:
     `read_fn(frame)` returns `read_card`'s (heading seen, killer, weapon) for
     one frame, or None when it could not read it; it blocks, on the reader's
     own thread.
+
+    `on_verdict(verdict)`, when given, hears each death's verdict as `end()`
+    closes it ("enemy", "no card" or "unread"), so the round is credited with it
+    (ADR 172).
     """
 
-    def __init__(self, read_fn, enabled: bool = True) -> None:
+    def __init__(self, read_fn, enabled: bool = True, on_verdict=None) -> None:
         self.enabled = bool(enabled)
         self._read_fn = read_fn
+        self._on_verdict = on_verdict
         self._lock = threading.Lock()
         self._wake = threading.Event()
         self._stop = threading.Event()
@@ -151,6 +156,11 @@ class KillCardReader:
                         "a crash or self-inflicted", card.reads)
         else:
             logger.info("DEATH CARD: not read (no respawn-screen frame reached the reader)")
+        if self._on_verdict is not None:
+            try:
+                self._on_verdict(card.verdict)
+            except Exception as exc:
+                logger.debug("DEATH CARD: verdict listener failed: %s", exc)
         return card
 
     def summary(self) -> "str | None":

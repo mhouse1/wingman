@@ -613,7 +613,7 @@ def test_incoming_beats_sustain_climb(sustain_harness):
 class TestTimeToGroundRecovery:
     """ADR 086 d2/d3/d4 — dive recovery triggers on predicted time to ground.
 
-    Replays the 2026-08-21 18:41 crash: the aircraft mushed at 9203 m and dived
+    Replays the 2026-08-21 crash: the aircraft mushed at 9203 m and dived
     to 2301 m in 27 s with 2 missiles aboard while the tree kept selecting
     Engage. The altitude band never opened, because every altitude on the way
     down was far ABOVE `enter_below_alt` until it was much too late.
@@ -799,7 +799,7 @@ class TestTerrainAheadTrigger:
 class TestDiveRecoveryRespawnGuard:
     """ADR 086 d2: a respawn is an altitude discontinuity, not a descent.
 
-    Live false positive 2026-08-21 21:28:49 — DIVE RECOVERY fired "2s to
+    Live false positive 2026-08-21 — DIVE RECOVERY fired "2s to
     ground" at a smoothed 324 m while the newly respawned aircraft was at 10 m
     and climbing away at +513 m/s. The smoothed value had carried the dead
     aircraft's fall across the respawn boundary.
@@ -1501,7 +1501,9 @@ def test_deselection_stops_the_actuation():
     from wingman.tick_handlers import BehaviorTreeHandler
     src = inspect.getsource(BehaviorTreeHandler)
     assert "stop_boundary_turn()" in src
-    assert "selection != TACTIC_BOUNDARY_TURN" in src
+    # ADR 174 revised: the terrain turn flies the same bank-and-pull, so leaving either
+    # leaf stops it, and moving between the two does not.
+    assert "selection not in (TACTIC_BOUNDARY_TURN, TACTIC_TERRAIN_TURN)" in src
 
 
 def test_recession_does_not_release_while_still_on_the_edge():
@@ -1583,7 +1585,7 @@ def test_outside_battle_clears_the_turn():
 
 
 def test_mission_not_running_clears_the_turn():
-    """ADR 138. Measured live 2026-09-10 03:03:26: the respawn screen cleared
+    """ADR 138. Measured live 2026-09-10: the respawn screen cleared
     (is_respawning -> False) up to ~1.5s before mission_j20 actually
     restarted (the ADR 059 stability window) — and mission_j20 restarting is
     what arms the ADR 132 turn guard. is_respawning alone did not close this
@@ -1898,7 +1900,7 @@ def test_boundary_condition_state_is_introspectable_via_named_attributes():
 
 # --- ADR 147: a mission's own altitude doctrine -------------------------------
 #
-# Measured 2026-09-24 18:59:27-28: mission_acs stopped its climb at 3192 m
+# Measured 2026-09-24, over 1 s: mission_acs stopped its climb at 3192 m
 # ("altitude 3192 m at or above 3000 m", "climb complete") and the tree started
 # a new climb to 5000 m 1.3 s later, because 3192 m is under both the 4000 m
 # floor and the 4000 m armed sustain band. The -10 degree step then waited behind
@@ -2011,7 +2013,7 @@ class TestSustainSuppression:
 
 
 class TestAcsLevelOffIsNotRestartedByTheTree:
-    """The 2026-09-24 18:59:27 altitude (3192 m, armed, mission running)."""
+    """The 2026-09-24 altitude (3192 m, armed, mission running)."""
 
     def test_the_trees_own_doctrine_restarts_the_climb_as_measured(self):
         tree, writer = _doctrine_tree(_Doctrine())
@@ -2068,3 +2070,33 @@ def test_the_handler_gives_the_tree_the_controllers_acs_doctrine(monkeypatch):
     ctrl._set_last_mission("acs")
     assert selected(make_snap(altitude=3192.0)) != TACTIC_CLIMB
     assert selected(make_snap(altitude=2900.0)) == TACTIC_CLIMB
+
+
+# ---------------------------------------------------------------------------
+# ADR 171: BoundaryTurn sooner at speed
+# ---------------------------------------------------------------------------
+
+def test_a_fast_jet_enters_the_turn_sooner():
+    """The J-20 crossed 25 times in about 36 missions on 2026-11-02, 16 with the turn
+    already running: 0.50R is seconds at 2,000 KPH. Scaled 1.6, it enters at 0.80R."""
+    c = _bcond(scale_fn=lambda: 1.6)
+    assert c(_bsnap(0.70, +0.65)) is True
+
+
+def test_unscaled_the_same_reading_does_not_turn():
+    """The twin: a slower jet keeps 0.50R."""
+    c = _bcond(scale_fn=lambda: 1.0)
+    assert c(_bsnap(0.70, +0.65)) is False
+
+
+def test_a_failing_scale_reads_as_one():
+    def broken():
+        raise RuntimeError("no telemetry")
+    c = _bcond(scale_fn=broken)
+    assert c(_bsnap(0.70, +0.65)) is False
+    assert c(_bsnap(0.40, +0.35)) is True
+
+
+def test_a_scale_under_one_is_one():
+    c = _bcond(scale_fn=lambda: 0.2)
+    assert c(_bsnap(0.40, +0.35)) is True

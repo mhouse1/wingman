@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 # GAME_BATTLE_EJECT is a mid-mission excursion (missiles empty -> dive), not a
 # mission boundary. Omitting it made every eject read as a mission end and the
-# return from it as a new mission start: the 2026-07-30 16:27 session reported
+# return from it as a new mission start: the 2026-07-30 session reported
 # "7 missions, avg 1m30s" for 3 real rounds (avg ~4m57s), and undercounted
 # manual takeovers 1-of-4 because _in_mission was already False when the
 # EJECT -> MANUAL transitions arrived.
@@ -167,6 +167,9 @@ class MissionStatsTracker:
         self._total_respawns = 0
         self._total_flare_bursts = 0
         self._total_flare_reloads = 0
+        # ADR 173: special-weapon presses, and triggers dropped with the icon unlit.
+        self._total_special_weapon_used = 0
+        self._total_special_weapon_skipped = 0
         self._total_manual_takeovers = 0
         self._total_missile_evades = 0
         # ADR 137: respawns where the aircraft was NOT in a deliberate eject
@@ -207,6 +210,9 @@ class MissionStatsTracker:
         # ADR 166: each reading of the squadron leaderboard, in order.
         self._squadron_rankings: list = []
         self._jet: "str | None" = None      # ADR 167: read in the lobby, for the next round
+        # ADR 171 mission trial and ADR 172 terrain trial: an arm drawn before its
+        # round opened, and when, by the tag it goes under.
+        self._tags_pending: "dict[str, tuple[str, float]]" = {}
         self._rounds_read = 0
         self._rounds_unread = 0
         self._round_totals = {"score": 0, "kills": 0, "deaths": 0, "assists": 0}
@@ -261,6 +267,14 @@ class MissionStatsTracker:
         finally:
             self._lock.release()
 
+    def _tag_round(self, tag: str, arm: str, ts: float) -> None:
+        """A trial's arm for this round, or for the next one to open within 10 s
+        when drawn just before it (ADR 171, ADR 172)."""
+        if self._in_mission:
+            self._current.setdefault("tags", {})[tag] = arm
+        else:
+            self._tags_pending[tag] = (arm, ts)
+
     def _on_event_locked(self, event_name: str, ts: float) -> None:
         if event_name == "respawn_detected":
             self._total_respawns += 1
@@ -313,6 +327,32 @@ class MissionStatsTracker:
                 self._current["missile_evade_count"] += 1
             self._mark_engagement_evaded(ts)
 
+        elif event_name in ("mission_arm_j20", "mission_arm_acs"):
+            # ADR 171 mission trial: the round's mission. Drawn at battle entry, just
+            # after the round opens; one drawn before it waits for the round.
+            self._tag_round("mission", event_name.rsplit("_", 1)[1], ts)
+
+        elif event_name in ("agree_arm_holdoff", "agree_arm_override"):
+            # ADR 172 terrain trial: whether the agreement may break off this
+            # round's resupply approaches. Drawn at the same round start.
+            self._tag_round("agree_resupply", event_name.rsplit("_", 1)[1], ts)
+
+        elif event_name in ("map_arm_map", "map_arm_control"):
+            # ADR 174 map trial: whether the terrain service's warning starts the
+            # emergency climb this round. Drawn at the same round start.
+            self._tag_round("map_warning", event_name.rsplit("_", 1)[1], ts)
+
+        elif event_name in ("gun_arm_ring", "gun_arm_marker"):
+            # Design 021 Phase 3: whether the chase steers on the lead ring this
+            # round. Drawn at the same round start.
+            self._tag_round("gun_aim", event_name.rsplit("_", 1)[1], ts)
+
+        elif event_name == "death_card_no_card":
+            # ADR 172: the kill card's verdict per round, the trial's crash count.
+            # "No card" is a crash or self-inflicted, and sometimes a missed card.
+            if self._in_mission:
+                self._current["no_card_deaths"] += 1
+
         elif event_name in ("evade_trial_evade", "evade_trial_control"):
             arm = event_name.rsplit("_", 1)[1]
             self._mark_engagement_arm(ts, arm)
@@ -320,6 +360,15 @@ class MissionStatsTracker:
             # the first one it sees.
             if self._in_mission and self._current.get("trial_arm") is None:
                 self._current["trial_arm"] = arm
+
+        elif event_name == "special_weapon_used":
+            self._total_special_weapon_used += 1
+            if self._in_mission:
+                self._current["special_weapon_count"] = (
+                    self._current.get("special_weapon_count", 0) + 1)
+
+        elif event_name == "special_weapon_skipped":
+            self._total_special_weapon_skipped += 1
 
         elif event_name == "flare_reload":
             self._total_flare_reloads += 1
@@ -366,7 +415,7 @@ class MissionStatsTracker:
                 # nothing. Since GAME_BATTLE_EJECT became an in-mission state,
                 # "missiles_empty" is a MID-mission signal that survives to the
                 # real end of the round, and checking it first shadowed the
-                # terminal click_to: the 2026-07-30 18:51 session booked all 10
+                # terminal click_to: the 2026-07-30 session booked all 10
                 # missions as "missiles empty (100%)" despite 10 logged
                 # CLICK TO CONTINUE finishes.
                 if trigger_name == "click_to_detected":
@@ -383,7 +432,7 @@ class MissionStatsTracker:
         # transition that opens a mission (e.g. GAME_BATTLE_EJECT ->
         # GAME_BATTLE_MANUAL on the first tick after startup), and checking
         # _in_mission before _start_mission ran dropped 3 of 4 takeovers in the
-        # 2026-07-30 16:27 session.
+        # 2026-07-30 session.
         if next_state == "GAME_BATTLE_MANUAL" and prev_state != "GAME_BATTLE_MANUAL":
             if self._in_mission:
                 self._total_manual_takeovers += 1
@@ -493,6 +542,8 @@ class MissionStatsTracker:
             "total_respawns": self._total_respawns,
             "total_flare_bursts": self._total_flare_bursts,
             "total_flare_reloads": self._total_flare_reloads,
+            "total_special_weapon_used": self._total_special_weapon_used,
+            "total_special_weapon_skipped": self._total_special_weapon_skipped,
             "total_manual_takeovers": self._total_manual_takeovers,
             "total_missile_evades": self._total_missile_evades,
             "total_crashes_with_missiles": self._total_crashes_with_missiles,
@@ -577,6 +628,9 @@ class MissionStatsTracker:
             f"Total respawns    : {s['total_respawns']}",
             f"Total flare bursts: {s['total_flare_bursts']}{bursts_per}",
             f"Flare reloads     : {s['total_flare_reloads']}",
+            f"Special weapon    : {s.get('total_special_weapon_used', 0)} used, "
+            f"{s.get('total_special_weapon_skipped', 0)} triggers with the icon unlit "
+            f"(ADR 173)",
             f"Missile evades    : {s.get('total_missile_evades', 0)}",
             f"Manual takeovers  : {s['total_manual_takeovers']}",
             f"Died armed        : {s.get('total_crashes_with_missiles', 0)}  "
@@ -750,13 +804,20 @@ class MissionStatsTracker:
         return by_arm
 
     def record_jet(self, name: "str | None") -> None:
-        """The jet on the lobby as PLAY was clicked (ADR 167), for the rounds from
-        that click on. None drops the last one: a lobby whose read fails leaves its
-        round without a jet, not under the previous round's. A mission that starts
-        with no click keeps it: a jet changes only in the lobby, and the operator's
-        double `n` restarts a mission in the same round (2026-10-31 07:09:39)."""
+        """The jet on the lobby as PLAY was clicked (ADR 167), or a new one read
+        through the wait for a match (ADR 168), for the rounds from then on. None
+        drops the last one: a lobby whose read fails leaves its round without a jet,
+        not under the previous round's. A mission that starts with no click keeps
+        it: a jet changes only in the lobby, and the operator's double `n` restarts
+        a mission in the same round (2026-10-31)."""
         with self._lock:
             self._jet = name
+
+    @property
+    def jet(self) -> "str | None":
+        """The jet on record (ADR 168). Off the main loop: it takes the lock."""
+        with self._lock:
+            return self._jet
 
     def _start_mission(self, ts: float) -> None:
         self._in_mission = True
@@ -769,14 +830,20 @@ class MissionStatsTracker:
             "respawn_count": 0,
             "flare_burst_count": 0,
             "flare_reload_count": 0,
+            "special_weapon_count": 0,
             "missile_evade_count": 0,
             "no_missiles_abort": False,
             "manual_takeover_count": 0,
+            "no_card_deaths": 0,        # ADR 172: deaths the kill card read no card for
             "outcome": "unknown",
             "performance": None,
             "trial_arm": None,          # ADR 165: the evade trial's arm for this round
             "tags": {"jet": self._jet} if self._jet else {},    # ADR 167
         }
+        pending, self._tags_pending = self._tags_pending, {}
+        for tag, (arm, drawn_ts) in pending.items():
+            if ts - drawn_ts <= 10.0:
+                self._current["tags"][tag] = arm
 
     def _end_mission(self, ts: float, outcome: str) -> None:
         self._current["duration_s"] = round(ts - self._mission_start_ts, 1)

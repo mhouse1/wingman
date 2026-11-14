@@ -12,14 +12,18 @@ reading takes two frames alike, as the PERFORMANCE panel's does.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import NamedTuple
 
 import cv2
+
+from .crop_region import CropCoords
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +44,18 @@ CROPS = (MENU, MENU_LEADERBOARDS, BOARD_TITLE, BACK, TAB_SQUADRONS, BOARD_HEADER
 # Where `squadron_ranking.capture` saves the frames: the one each reading was
 # taken from, and the last one of a navigation that gave up.
 CAPTURE_DIR = "test_screenshots/squadron_ranking"
+
+# The day of the last reading (ADR 170). Per machine, and one file for every
+# account: the figures are the squadron's, whoever reads them.
+LAST_READ_FILE = os.path.expanduser("~/.config/wingman/squadron_ranking.json")
+
+# A navigation that read nothing is tried again at once, with PLAY held, up to
+# TRIES_PER_LOBBY tries. Then PLAY goes ahead, so a route that fails cannot hold
+# up the rounds, and the first lobby RETRY_AFTER_S later tries again. A session
+# stops at MAX_TRIES and waits for the next day (ADR 170).
+TRIES_PER_LOBBY = 3
+RETRY_AFTER_S = 120.0
+MAX_TRIES = 9
 
 # A step's screen is looked for this often, until the step's time is up.
 POLL_S = 0.4
@@ -82,6 +98,25 @@ def parse_count(text: str) -> "int | None":
     return int(grouped.replace(",", "")) if _COUNT_RE.fullmatch(grouped) else None
 
 
+def load_last_read(path: str) -> "date | None":
+    """The day of the last reading, or None. A damaged file reads as None: the
+    worst of that is a second reading that day."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return date.fromisoformat(json.load(f)["last_read"])
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        logger.warning("SQUADRON RANKING: could not read %s (%s)", path, e)
+        return None
+
+
+def save_last_read(path: str, day: date) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"last_read": day.isoformat()}, f)
+
+
 def _crop(frame, crop, scale: float = 1.0):
     h, w = frame.shape[:2]
     region = frame[int(crop.y1 * h):int(crop.y2 * h), int(crop.x1 * w):int(crop.x2 * w)]
@@ -122,6 +157,28 @@ def shows(reader, frame, crop, word: str) -> bool:
     return letters(word) in letters(crop_text(reader, frame, crop))
 
 
+def word_box(reader, frame, crop, word: str) -> "CropCoords | None":
+    """Where the word reads inside the crop, as fractions of the frame, or None.
+
+    The open menu is drawn at more than one size: on 2026-11-06 LEADERBOARDS sat
+    at y 0.19-0.21, above the crop measured on 2026-10-31 (0.255-0.305), and every
+    reading failed. The crop now spans the menu's column, and the click goes where
+    the word is, not to the crop's middle."""
+    gray = _crop(frame, crop)
+    if gray is None:
+        return None
+    h, w = frame.shape[:2]
+    factor = max(1.0, 1920.0 / max(1, w))      # _crop's own scale
+    left, top = int(crop.x1 * w), int(crop.y1 * h)
+    target = letters(word)
+    for box, text, _conf in reader.readtext(gray, detail=1, paragraph=False, workers=0):
+        if target in letters(str(text)):
+            xs, ys = [p[0] for p in box], [p[1] for p in box]
+            return CropCoords((left + min(xs) / factor) / w, (top + min(ys) / factor) / h,
+                              (left + max(xs) / factor) / w, (top + max(ys) / factor) / h)
+    return None
+
+
 def read_row(reader, frame, crops, squadron: str) -> RowRead:
     """One frame's read of our squadron's row: only on the SQUADRONS tab (the
     first tab, TOTAL TROPHIES, pins our own player's row in the same place) and
@@ -157,7 +214,8 @@ class Navigation:
 
     `grab_frame()` gives a fresh frame or None; `ocr(fn, *args)` runs
     `fn(reader, *args)` with an EasyOCR reader and returns its answer, or None;
-    `click(crop_name)` clicks a crop; `stop()` is true once wingman must leave.
+    `click(crop_name, coords=None)` clicks a crop, or `coords` inside it where
+    OCR found the word; `stop()` is true once wingman must leave.
     """
 
     def __init__(self, crops, grab_frame, ocr, click, stop, squadron: str,
@@ -200,6 +258,18 @@ class Navigation:
 
     def _wait_for(self, crop: str, word: str) -> bool:
         return self._wait_until(lambda frame: self._shows(frame, crop, word))
+
+    def _wait_for_box(self, crop: str, word: str) -> "CropCoords | None":
+        """Where the word shows once a fresh frame shows it; None when the step's
+        time runs out."""
+        found = []
+
+        def check(frame) -> bool:
+            box = self.ocr(word_box, frame, self.crops[crop], word)
+            if box is not None:
+                found.append(box)
+            return box is not None
+        return found[-1] if self._wait_until(check) else None
 
     def _read(self) -> "SquadronReading | None":
         previous = None
@@ -247,9 +317,10 @@ class Navigation:
             if not self._wait_until(self._in_lobby, timeout_s=0.0):
                 return None, "the lobby is not on screen"
             self.click(MENU)
-            if not self._wait_for(MENU_LEADERBOARDS, "LEADERBOARDS"):
+            entry = self._wait_for_box(MENU_LEADERBOARDS, "LEADERBOARDS")
+            if entry is None:
                 return None, self._back("the menu did not open")
-            self.click(MENU_LEADERBOARDS)
+            self.click(MENU_LEADERBOARDS, entry)
             if not self._wait_for(BOARD_TITLE, "LEADERBOARDS"):
                 return None, self._back("the leaderboards did not open")
             self.click(TAB_SQUADRONS)
@@ -269,26 +340,52 @@ class Navigation:
 class SquadronRanking:
     """When the next reading is queued, and the one navigation in flight.
 
-    One reading a day (operator, 2026-10-31): `queue_at`, local time, queues it,
-    and it stays queued until a lobby takes it, so a round being flown ends
-    first. Starting it books the next day's, read or not. Nothing is saved
-    between sessions: a session started after `queue_at` waits for the next
-    day's, which is what keeps restarts from reading twice in a day.
+    One reading a calendar day (operator, 2026-10-31): `queue_at`, local time,
+    queues it, and it stays queued until a lobby takes it, so a round being flown
+    ends first. A reading books the next day's; a navigation that read nothing is
+    tried again (`_book_next`).
+
+    `last_read_file` keeps the day of the last reading between sessions (ADR
+    170), so a day's reading no session has taken is owed to the next session
+    that day, from its first lobby, and a restart cannot read twice. Only a
+    reading counts, so a day a session gave up on is still owed to a new one.
+    Without the file (None), nothing carries over.
+
     While one is due or running, the lobby's PLAY click waits (`holds_play`);
     while one runs, the lobby quick-scan, the escape loop and the deferred exit
     wait too (`active`)."""
 
-    def __init__(self, enabled: bool, queue_at: str, now=datetime.now):
+    def __init__(self, enabled: bool, queue_at: str, now=datetime.now,
+                 last_read_file: "str | None" = None):
         self.enabled = enabled
         self.queue_at = datetime.strptime(queue_at, "%H:%M:%S").time()
         self.now = now
-        self.next_queue = self._after(now())
+        self.last_read_file = last_read_file
+        today = now().date()
+        read_today = last_read_file is not None and load_last_read(last_read_file) == today
+        self.next_queue = self._queue_on(today + timedelta(days=1) if read_today else today)
+        self._tries = 0
         self._active = threading.Event()
 
-    def _after(self, moment: datetime) -> datetime:
-        """The first `queue_at` after `moment`."""
-        today = datetime.combine(moment.date(), self.queue_at)
-        return today if moment < today else today + timedelta(days=1)
+    def _queue_on(self, day: date) -> datetime:
+        return datetime.combine(day, self.queue_at)
+
+    def _book_next(self, day: date, read: bool) -> str:
+        """Queue what follows a navigation started on `day`, and say what that is
+        for the log. Called while the navigation still counts as active: a moment
+        later, a navigation just finished would look due and could start another."""
+        self._tries += 1
+        tries = self._tries
+        if read or tries >= MAX_TRIES:
+            self._tries = 0
+            self.next_queue = self._queue_on(day + timedelta(days=1))
+            return f"try {tries} of {MAX_TRIES} did not read; next at {self.next_queue}"
+        if tries % TRIES_PER_LOBBY:
+            self.next_queue = self.now()
+            return f"try {tries} of {MAX_TRIES} did not read; due again now"
+        self.next_queue = self.now() + timedelta(seconds=RETRY_AFTER_S)
+        return (f"try {tries} of {MAX_TRIES} did not read; PLAY goes ahead and a lobby "
+                f"after {self.next_queue:%H:%M:%S} tries again")
 
     def due(self) -> bool:
         return self.enabled and not self._active.is_set() and self.now() >= self.next_queue
@@ -301,23 +398,32 @@ class SquadronRanking:
 
     def start(self, navigation: Navigation, on_done) -> threading.Thread:
         """Run the navigation on a thread of its own; `on_done(reading, why,
-        navigation)` gets its answer. The attempt counts from now, so a
-        navigation that gives up is not retried before the next day's. Active
-        first: `holds_play` must not drop for an instant between a reading being
-        due and its navigation running (2026-10-31 02:17:56, the quick-scan
-        clicked PLAY in that gap)."""
+        navigation)` gets its answer. Active first: `holds_play` must not drop for
+        an instant between a reading being due and its navigation running
+        (2026-10-31, the quick-scan clicked PLAY in that gap)."""
         self._active.set()
-        self.next_queue = self._after(self.now())
+        day = self.now().date()
 
         def _run():
+            reading, why = None, "the navigation failed"
             try:
                 reading, why = navigation.run()
             except Exception:
                 logger.exception("SQUADRON RANKING: the navigation failed")
-                reading, why = None, "the navigation failed"
             finally:
+                next_step = self._book_next(day, reading is not None)
                 self._active.clear()
             on_done(reading, why, navigation)
+            if reading is None:
+                logger.info("SQUADRON RANKING: %s (ADR 170)", next_step)
+            # After on_done: a day saved over a reading that was lost would stop
+            # the next session from taking it.
+            elif self.last_read_file is not None:
+                try:
+                    save_last_read(self.last_read_file, day)
+                except OSError as e:
+                    logger.warning("SQUADRON RANKING: could not save the day of this "
+                                   "reading (%s); a restart reads again", e)
 
         thread = threading.Thread(target=_run, daemon=True, name="squadron-ranking")
         thread.start()

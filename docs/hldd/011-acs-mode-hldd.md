@@ -150,12 +150,51 @@ jet_profile:
       has_padlock: false
 ```
 
-`has_padlock` is read once at mission start and stored on the snapshot
+The block now also picks the mission (Jet detection, below). `has_padlock` is
+read once at mission start and stored on the snapshot
 (`AnalyzerSnapshot.has_padlock: bool`), the same way `mission_running` or
 `survival_hold` already gate tactics at the actuation layer per ADR 110's
 precedent (condition stays evaluated for diagnostics; actuation is what's
 gated). `MissileEvade`, `BoundaryTurn`, `Climb`, `Eject`, `RespawnWait` read
 nothing new — they are correct for any airframe today and stay untouched.
+
+### Jet detection and per-jet missions
+
+Built by ADR 171, on the jet read off the lobby (ADR 167, ADR 168). ACS is the
+default for every jet, and a jet with a mission of its own is the exception.
+
+```yaml
+jet_profile:
+  profiles:
+    j20:
+      has_padlock: true
+      match: J-20        # the start of the name on the lobby label
+      mission: j20       # flown instead of mission.default_mission
+```
+
+```mermaid
+flowchart TD
+    L[Lobby jet label read by PLAY and through the wait] --> R[Jet on record]
+    R --> B[Battle entry or the u hotkey]
+    B --> Q{Does a profile match the jet}
+    Q -->|yes| M[The mission that profile names]
+    Q -->|no match or no jet read| D[The default mission, shipped as acs]
+```
+
+Fallback if the diagram does not render: the jet read in the lobby is compared
+with each profile at launch; a match flies that profile's mission, and anything
+else flies `mission.default_mission`.
+
+- **J-20.** `mission_j20`: the padlock path, then ACS. When the primaries run
+  out it descends to acs's altitude, levels out and attacks as ACS does, on the
+  secondary. It then resupplies, climbs back and resumes search and destroy
+  (`docs/missions/j20.md`).
+- **Future jets.** A custom mission needs a profile and the wiring in
+  `docs/missions/README.md` section 6. A jet's special ability is a mission
+  bullet, as the removed JAS39 cloak was, with `activate_special_weapon`.
+- **Not done.** `has_padlock` and `jet_profile.active` are still read once at
+  startup, so the detected jet does not drive `BoresightEngage`, which is not
+  built.
 
 ### New and changed tactics
 
@@ -394,9 +433,9 @@ effort:
    since it activates automatically (no new hotkey or operator action) and
    only touches the J20 (`has_padlock: true`, no jet-profile branching
    involved) during a sequence already scoped to that one airframe.
-5. **No game-mode or per-jet config exists yet.** `jet_profile` and the
-   air-superiority/CTF objective crops above are all new config surface,
-   none calibrated. Standard calibration-tooling work
+5. **No game-mode config exists yet.** `jet_profile` now exists and picks the
+   mission (ADR 171). The air-superiority/CTF objective crops above are
+   new config surface, none calibrated. Standard calibration-tooling work
    (`make calibrate-crop`), not a design risk, but real effort before any
    of this runs against a live match.
 6. **Design 004's base-ownership crops were placeholders.** ("crop
@@ -547,7 +586,11 @@ project's proven method for landing a new tactic without a live regression:
 1. Should `has_padlock` be detected automatically (from which mission-start
    key/UI the game shows) or configured manually per session? Automatic
    detection avoids operator error but adds another OCR dependency to an
-   already OCR-heavy startup path.
+   already OCR-heavy startup path. **Partly answered by ADR 167 and ADR 171:**
+   the jet is detected from the lobby at no new startup cost, and it picks the
+   mission. What remains is reading `has_padlock` from the profile of the jet
+   detected instead of `jet_profile.active`, which matters once
+   `BoresightEngage` exists.
 2. Is a single boresight lock-cone sufficient for the first target airframe,
    or does its HUD expose distinct "in range" vs. "tone" cues that should be
    modeled as separate states rather than one `ToneWait`?
@@ -588,6 +631,9 @@ project's proven method for landing a new tactic without a live regression:
   nose-orientation and weapon-mode work Design 005 also cites.
 - `docs/adr/070-missile-evade-tactic.md`, `docs/adr/073-*-climb-tactic*.md` —
   rollout template this design's Rollout Plan follows.
+- `docs/adr/171-the-jet-picks-the-mission-and-j20-comes-back-from-a-rearm.md`
+  — the jet detection phase of this design: the jet picks the mission, and
+  mission_j20's rearm cycle.
 - `docs/adr/136-heatseeker-dive-invokable-mode.md` — config-gated addition
   to the existing eject dive that exercises Design 005's tracker and roll
   controller directly, ahead of and independent from `BoresightEngage`; see

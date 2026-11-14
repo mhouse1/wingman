@@ -65,6 +65,8 @@ class Perception(Protocol):
 
     def note_battle_event(self) -> None: ...
 
+    def stop_if_lobby_on_screen(self) -> None: ...
+
 
 # The members above, by name, for the structural test.
 PERCEPTION_MEMBERS = frozenset(

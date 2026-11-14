@@ -45,11 +45,20 @@ class MissilePriority:
 
 
 RESUPPLY_MIN_MISSILES_SPENT = 2
-# The largest count one read may show and still be taken as the first sign of a
-# rearm. No rack carries more, and the single reads that jumped up and straight
-# back in the sessions of 2026-10-11 and 10-13 showed 9, 10, 14, 18, 19 and 47
-# (35 of 37; the other two read 6 and 5).
-REARM_SIGN_MAX_COUNT = 8
+# The counts one read may show and still be taken as the first sign of a rearm:
+# the loads a refill gives. The single reads that jumped up and straight back in
+# the sessions of 2026-10-11 and 10-13 showed 9, 10, 14, 18, 19 and 47 (35 of 37;
+# the other two read 6 and 5). Over 2026-11-01 to 11-09 the 508 confirmed rearms
+# read 6, 4 or 2 (501), 9 (3) or a misread (4), never 8, 7, 3 or 1, while first
+# reads of 8 (28), 3 (13), 7 (10) and 1 (10) started a climb-out no confirmation
+# followed (inferred: an empty rack's 0 read as 8). A refill to another count still
+# rearms; its climb-out waits for the confirmation, about 3 s.
+REARM_SIGN_COUNTS = frozenset({2, 4, 6})
+# No rack carries more missiles than this; a larger count is a misread and is
+# treated as no read. Over 2026-11-01 to 11-09 the largest confirmed refill read 9,
+# and four confirmations read 19, 76, 79 and (2026-11-09 11:00:40) 76 again: the
+# gun counter ("59/76"), which reset the urgency while every rack stayed empty.
+MISSILE_COUNT_MAX = 12
 RESUPPLY_MARKER_HOLD_S = 0.5
 # Where a marker counts when the caller names no region: [x1, y1, x2, y2] in
 # frame fractions. The pursuit passes the tracker's acquisition region.
@@ -337,6 +346,13 @@ class ResupplyPassWatch:
     it last seen 53 px across or more; the other two (26 and 34 px) were not
     signed as passes either.
 
+    And the floor is 53 px, not 50. 2026-11-08 17:13:32, Crimson Canyon: the
+    marker dropped out 52 px across, about 1 km short of the ring, the pass was
+    signed, and the climb-out broke the dive; the marker was back below the nose
+    half a second later. Over the logs of 2026-11-01 to 11-08, the climb-outs
+    with the marker back within 3 s had it 49 to 52 px across in 34 of 59 with a
+    size; of 196 followed by a rearm, one had it under 53 (50 px).
+
     No I/O and no clock of its own: `update` is called once per steering tick.
     """
 
@@ -347,7 +363,7 @@ class ResupplyPassWatch:
 
     def __init__(self, *, missing_s: float = 0.5, min_off_centre_px: float = 35.0,
                  min_outward_px: float = 5.0, lined_up_px: float = 120.0,
-                 min_size_px: float = 50.0, min_approach_s: float = 2.0) -> None:
+                 min_size_px: float = 53.0, min_approach_s: float = 2.0) -> None:
         self.missing_s = max(0.0, float(missing_s))
         self.min_off_centre_px = float(min_off_centre_px)
         self.min_outward_px = float(min_outward_px)
@@ -398,6 +414,84 @@ class ResupplyPassWatch:
         return ResupplyPass(last_off, outward, now - last_t)
 
 
+class ControlledDescent:
+    """What the pitch does on the way down to where ACS flies, and the level-off
+    there (ADR 171).
+
+    mission_j20 runs out of primaries at 5000 to 7000 m and the pursuit it hands to
+    was made at 3000 m. On 2026-11-01 it followed its target down from there with
+    nothing to stop it: the dive brake acts under 3000 m and the crash recovery
+    waits while a target is in view, so of four pursuits three passed -300 m/s,
+    against 8% of the 5,381 pursuits begun under 3500 m. The worst reached -791 m/s
+    at 2,978 KPH with the pull-out predicted to end at -9,688 m, and crashed. So the
+    aircraft is brought down first, and the pursuit starts where it always has.
+
+    The flight-path angle lands about every 3 s, so this asks for one pulse per new
+    sample and never a hold: a held key overshoots on a lagging reading (ADR
+    068/069). And no sooner than `min_gap_s` after the last: at 2,035 KPH on
+    2026-11-02 05:21:31 five pulses in 6 s all read +17 to +24 deg, and the aircraft
+    lost 4,000 m in the next 10 s. With no fresh altitude it presses nothing and
+    waits, up to `max_s`:
+    the chase it would hand to is what a blind aircraft at 6000 m must not start.
+
+    Nothing pulls up under `min_pull_kph`. Slow, a steep path means a stalling wing,
+    not a low nose, and a pull adds drag and steepens it. On 2026-11-01 three of four
+    descents did that, UP pulses under about 330 KPH with the path running from -7 to
+    -77 deg (17:49:33), and the fourth sent none and stayed under -94 m/s. So the nose
+    is left to fall and the speed to come back.
+
+    No I/O and no clock of its own: `update` is called once per steering tick.
+    """
+
+    def __init__(self, *, target_alt_m: float, angle_deg: float, tolerance_deg: float,
+                 level_angle_deg: float, max_s: float, now: float,
+                 min_pull_kph: float = 0.0, min_gap_s: float = 0.0) -> None:
+        self.target_alt_m = float(target_alt_m)
+        self.angle_deg = float(angle_deg)
+        self.tolerance_deg = float(tolerance_deg)
+        self.level_angle_deg = float(level_angle_deg)
+        self.min_pull_kph = float(min_pull_kph)
+        self.min_gap_s = float(min_gap_s)
+        self._last_pulse_at: "float | None" = None
+        self.pulls_withheld = 0
+        self._deadline = now + float(max_s)
+        self._sample_ts: "float | None" = None
+        self._levelling = False
+        self.ended: "str | None" = None   # why it is over
+
+    def update(self, now: float, alt: "float | None", angle: "float | None",
+               sample_ts: "float | None", speed_kph: "float | None" = None) -> "str | None":
+        """`alt`, `angle` and `speed_kph` are fresh readings or None. "down" or "up":
+        one pulse for this new sample. "hold": still flying the descent, with
+        nothing to press this tick. None: it is over, and `ended` says why."""
+        if self.ended is not None:
+            return None
+        if now >= self._deadline:
+            self.ended = "time limit" + ("" if alt is None else " at %.0f m" % alt)
+            return None
+        if alt is None or angle is None:
+            return "hold"
+        self._levelling = self._levelling or alt <= self.target_alt_m
+        if self._levelling and angle >= self.level_angle_deg:
+            self.ended = "level at %.0f m" % alt
+            return None
+        if self._last_pulse_at is not None and now - self._last_pulse_at < self.min_gap_s:
+            return "hold"
+        if sample_ts == self._sample_ts:
+            return "hold"
+        self._sample_ts = sample_ts
+        if not self._levelling and angle > self.angle_deg:
+            self._last_pulse_at = now
+            return "down"
+        if not self._levelling and angle >= self.angle_deg - self.tolerance_deg:
+            return "hold"
+        if speed_kph is not None and speed_kph < self.min_pull_kph:
+            self.pulls_withheld += 1
+            return "hold"
+        self._last_pulse_at = now
+        return "up"
+
+
 class MissileUrgency:
     """Confirm ammo changes and retain spent-missile urgency for one pursuit."""
 
@@ -439,7 +533,7 @@ class MissileUrgency:
             self._rack = rack
             self._candidate = None
             self._candidate_reads = 0
-        if ammo is None or int(ammo) < 0:
+        if ammo is None or int(ammo) < 0 or int(ammo) > MISSILE_COUNT_MAX:
             self._candidate = None
             self._candidate_reads = 0
             return self.snapshot()
@@ -460,7 +554,7 @@ class MissileUrgency:
             self._candidate_reads += 1
         previous = self._ammo_by_rack.get(rack)
         # The same test the confirmed rearm makes below, on this one read.
-        rearm_seen = (0 < ammo <= REARM_SIGN_MAX_COUNT and rises
+        rearm_seen = (ammo in REARM_SIGN_COUNTS and rises
                       and (self._empty or (resupply_seeking and previous is not None
                                            and ammo > previous)))
         if self._candidate_reads < self._confirm_reads:
