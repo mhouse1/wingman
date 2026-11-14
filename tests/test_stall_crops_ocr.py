@@ -34,6 +34,9 @@ STALL_CASES = [
     ("STALL_PROFILE",         "STALL_PROFILE.png",         "PROFILE"),
     # Anomaly 004: parts-distribution overlay opened on a normal round-end.
     ("STALL_PARTS_CONFIRM",   "STALL_PARTS_CONFIRM.png",   "CONFIRM"),
+    # Anomaly 004: the same overlay's title, on the operator's frame of
+    # 2026-11-10 (the second jet, then CONFIRM).
+    ("STALL_PARTS_SELECT",    "STALL_PARTS_SELECT.png",    "RECEIVEPARTS"),
     # Anomaly 005: reward-crate screen at session start, same parts flow.
     ("STALL_PARTS_CRATE",     "STALL_PARTS_CRATE.png",     "PARTS"),
     # Anomaly 006: the CHOOSE REWARDS overlay. The reference frame is a

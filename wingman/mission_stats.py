@@ -342,6 +342,11 @@ class MissionStatsTracker:
             # emergency climb this round. Drawn at the same round start.
             self._tag_round("map_warning", event_name.rsplit("_", 1)[1], ts)
 
+        elif event_name in ("gun_arm_ring", "gun_arm_marker"):
+            # Design 021 Phase 3: whether the chase steers on the lead ring this
+            # round. Drawn at the same round start.
+            self._tag_round("gun_aim", event_name.rsplit("_", 1)[1], ts)
+
         elif event_name == "death_card_no_card":
             # ADR 172: the kill card's verdict per round, the trial's crash count.
             # "No card" is a crash or self-inflicted, and sometimes a missed card.

@@ -374,6 +374,12 @@ class _AmmoCtrlStub:
     def agreement_trial_new_round(self):
         self.agreement_rounds += 1
 
+    # Design 021 Phase 3: and the gun aim trial.
+    gun_aim_rounds = 0
+
+    def gun_aim_new_round(self):
+        self.gun_aim_rounds += 1
+
 
 def _ammo(analyzer=None, ctrl=None, bt_owns_eject=False, stats=None, **cfg):
     from wingman.tick_handlers import AmmoEventsHandler
@@ -652,6 +658,7 @@ class TestEvadeTrialRounds:
         h.on_state_change(GameState.GAME_BATTLE, GameState.GAME_STARTING)
         assert c.new_rounds == 1
         assert c.agreement_rounds == 1           # ADR 172, the same round start
+        assert c.gun_aim_rounds == 1             # Design 021 Phase 3, the same
 
     def test_moves_between_battle_states_stay_in_the_round(self):
         h, _, c = _ammo()

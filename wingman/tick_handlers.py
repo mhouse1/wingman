@@ -996,6 +996,11 @@ class AmmoEventsHandler:
                 self._ctrl.agreement_trial_new_round()
             except Exception as exc:
                 log_suppressed(logger, "agreement_trial_new_round", exc)
+            # Design 021 Phase 3: and the gun aim trial.
+            try:
+                self._ctrl.gun_aim_new_round()
+            except Exception as exc:
+                log_suppressed(logger, "gun_aim_new_round", exc)
         self._in_battle = in_battle
 
     def suppress_after_respawn(self, seconds: float = 10.0):
@@ -2218,7 +2223,8 @@ class BehaviorTreeHandler:
                         log_suppressed(logger, "map_trial_note", exc)
         self._terrain_in_battle = in_battle
 
-    def _observe_terrain(self, frame, current_game_state, altitude, altitude_rate) -> "str | None":
+    def _observe_terrain(self, frame, current_game_state, altitude, altitude_rate,
+                         hud_horizontal=None) -> "str | None":
         """One TERRAIN: line on a battle tick of a map the service has data for.
         Returns what to fly this tick (ADR 174 revised, `map` arm only): "climb", "left",
         "right" or None.
@@ -2242,7 +2248,8 @@ class BehaviorTreeHandler:
             heading = self._analyzer.read_compass_heading(frame)
             bearing = None if heading is None else (360.0 - heading) % 360.0
             crop = get_crop(frame, *crops["MINIMAP"][:4])
-            reading = terrain.observe(map_name, crop, bearing, altitude, altitude_rate, time.time())
+            reading = terrain.observe(map_name, crop, bearing, altitude, altitude_rate, time.time(),
+                                      hud_horizontal=hud_horizontal)
             if reading is None:
                 return None
             warns = terrain.warns(reading)
@@ -2667,7 +2674,12 @@ class BehaviorTreeHandler:
                     terrain_alt = fresh
             except Exception as exc:
                 log_suppressed(logger, "terrain_fresh_altitude", exc)
-        terrain_act = self._observe_terrain(frame, current_game_state, terrain_alt, altitude_rate)
+        # ADR 174 revision 3: how fast the track is flown, from the HUD, not the fixes.
+        hud_horizontal = None
+        if speed_kph is not None and path_deg is not None:
+            hud_horizontal = speed_kph / 3.6 * math.cos(math.radians(path_deg))
+        terrain_act = self._observe_terrain(frame, current_game_state, terrain_alt, altitude_rate,
+                                            hud_horizontal)
         self._terrain_turn_side = terrain_act if terrain_act in ("left", "right") else None
         is_respawning, _, _ = self._analyzer.get_respawn_cache_result()
         incoming, _, _ = self._analyzer.get_incoming_cache_result()

@@ -140,14 +140,22 @@ class MinimumHold(py_trees.decorators.Decorator):
     anti-flapping hold ADR 024 assigns to EVADE and DISENGAGE. The child is
     still ticked every cycle, so a genuinely persisting condition simply
     refreshes the hold.
+
+    ``release_fn(snapshot)``, when given, ends the hold early on a tick it returns
+    True (ADR 174 revision 4: a terrain turn gives way at once to the map's climb).
     """
 
     def __init__(self, name: str, child: py_trees.behaviour.Behaviour,
-                 hold_s: float, clock=time.time):
+                 hold_s: float, clock=time.time, release_fn=None):
         super().__init__(name=name, child=child)
         self._hold_s = float(hold_s)
         self._clock = clock
         self._held_until = 0.0
+        self._release_fn = release_fn
+        self._bb = None
+        if release_fn is not None:
+            self._bb = py_trees.blackboard.Client(name=f"{name}HoldClient")
+            self._bb.register_key(key=SNAPSHOT_KEY, access=py_trees.common.Access.READ)
 
     def update(self) -> py_trees.common.Status:
         now = self._clock()
@@ -155,6 +163,10 @@ class MinimumHold(py_trees.decorators.Decorator):
         if status == py_trees.common.Status.RUNNING:
             self._held_until = now + self._hold_s
             return status
+        if self._release_fn is not None and now < self._held_until:
+            if self._release_fn(self._bb.get(SNAPSHOT_KEY)):
+                self._held_until = 0.0
+                return status
         if now < self._held_until:
             return py_trees.common.Status.RUNNING
         return status
@@ -1415,11 +1427,17 @@ def _build_terrain_turn_slot(ctx: "_BuildContext"):
     fns = ctx.actuators.get(TACTIC_TERRAIN_TURN)
     if fns is None:
         return None
+    # ADR 174 revision 4: the turn's 2 s hold gives way at once when the map's call
+    # becomes a climb. 2026-11-08: during 49 terrain turns the call became a climb 31
+    # times; the climb took over a median 1.5 s later, and 11 of the 31 were followed by
+    # a crash within 20 s (Icebound 20:09:52.9: the left turn hit at 2.5 s, the climb
+    # started at 20:09:54.5 with every way out at 0.3 s).
     return MinimumHold(
         TACTIC_TERRAIN_TURN,
         ConditionTactic(f"{TACTIC_TERRAIN_TURN}Condition", is_terrain_turn,
                         start_fn=fns[0], is_running_fn=fns[1]),
         hold_s=2.0, clock=ctx.clock,
+        release_fn=lambda snap: bool(getattr(snap, "terrain_map_warning", False)),
     )
 
 

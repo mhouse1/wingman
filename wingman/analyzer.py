@@ -88,6 +88,13 @@ STALL_RECOVERY_CROPS = ("STALL_PROFILE", "STALL_INVITE_PLAYERS", "STALL_PARTS_CR
                         "STALL_CHOOSE_REWARDS", "STALL_RETRY", "STALL_EXIT_TO_DESKTOP",
                         "STALL_AIRCRAFT")
 
+# Anomaly 004: the parts dialog is handled only once the liveness guard reports
+# a stall (ADR 093 soft limit), so an operator at the desk has that long to pick
+# the jet themselves (operator, 2026-11-13). These are the states it opens in.
+STALL_PARTS_CROP = "STALL_PARTS_SELECT"
+STALL_PARTS_STATES = (GameState.GAME_LOBBY, GameState.GAME_UNKNOWN,
+                      GameState.GAME_STARTING_STALLED)
+
 # Gated on UNREADY dwell rather than state dwell: UNREADY makes
 # scan_region_for_play_button return None, which makes _classify_unknown_state
 # fail forever, so this screen strands the FSM without ever looking like a popup.
@@ -1292,6 +1299,7 @@ class GameStateAnalyzer:
         self._blackout_esc_ceiling_s = float(
             _blk_cfg.get("blackout_esc_ceiling_s", 120.0))
         self._lobby_blackout_since = 0.0   # ADR 087: sustained GAME_LOBBY blackout
+        self._liveness_stalled = False     # ADR 093 soft limit, set by the main loop
         self._exit_dialog_seen_ts = 0.0    # ADR 087: Exit-to-Desktop modal on screen
         self._stall_unready_dwell_s = float(_stall_cfg.get("unready_dwell_s", 30.0))
         self._stall_scan_interval_s = float(_stall_cfg.get("scan_interval_s", 5.0))
@@ -3609,6 +3617,14 @@ class GameStateAnalyzer:
         except RuntimeError as e:
             logger.debug("Analyzer: lobby read not submitted (%s)", e)
 
+    def note_liveness_stall(self, stalled: bool) -> None:
+        """Record whether the liveness guard reports a stall (ADR 093 soft limit).
+
+        Called by the main loop every tick. Gates the parts dialog (Anomaly 004),
+        which waits for this so an operator who is present picks the jet first.
+        """
+        self._liveness_stalled = bool(stalled)
+
     def _stall_recovery_targets(self, state):
         """Return the stall-recovery crops eligible to act right now (ADR 084).
 
@@ -3670,18 +3686,18 @@ class GameStateAnalyzer:
                 and "STALL_INVITE_PLAYERS" in self.crops
                 and "STALL_INVITE_PLAYERS" not in targets):
             targets.append("STALL_INVITE_PLAYERS")
-        # Anomaly 004 (2026-09-13): STALL_PARTS_CONFIRM is calibrated (below,
-        # config.yaml) and OCR-verified (tests/test_stall_crops_ocr.py) for
-        # DETECTION, but deliberately NOT added to this auto-click gate yet.
-        # Unlike STALL_PROFILE's close-X and STALL_EXIT_TO_DESKTOP's Cancel —
-        # both a strictly de-escalating dismiss, which is this gate's whole
-        # documented invariant (see test_lobby_blackout_past_dwell_opens_
-        # only_de_escalating_crops) — clicking CONFIRM here commits an
-        # in-game action (100 parts assigned to whichever aircraft the game
-        # has pre-selected). Low-stakes, but a real policy widening, not a
-        # same-shape addition, so it's left for the operator to decide rather
-        # than crossed autonomously. See docs/anomaly/004-parts-distribution-
-        # overlay-lobby-stall.md.
+        # Anomaly 004: the "SELECT AN AIRCRAFT TO RECEIVE PARTS" overlay opens
+        # over a lobby that still classifies as GAME_LOBBY (2026-11-04, 9 min by
+        # hand; 2026-11-09, the 900 s liveness limit ended the session) and at a
+        # start in GAME_UNKNOWN (2026-11-10). Not de-escalating: it assigns the
+        # parts, on the operator's rule of 2026-11-10 (the second jet, then
+        # CONFIRM). Gated on the liveness guard's stall, not on the 15 s dwell,
+        # so an operator who is present has that long to choose (2026-11-13).
+        if (self._liveness_stalled
+                and state in STALL_PARTS_STATES
+                and STALL_PARTS_CROP in self.crops
+                and STALL_PARTS_CROP not in targets):
+            targets.insert(0, STALL_PARTS_CROP)
         # Independent gate: a stuck UNREADY blocks classification outright, so it
         # is timed from the UNREADY read itself rather than from the state.
         if (self._unready_since

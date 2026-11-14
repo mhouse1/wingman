@@ -383,6 +383,37 @@ def test_a_count_no_rack_carries_does_not_show_a_rearm(misread):
     assert not _observe(_emptied(), misread, count=1).rearm_seen
 
 
+@pytest.mark.parametrize("misread", [1, 3, 7, 8])
+def test_a_count_no_refill_gives_does_not_show_a_rearm(misread):
+    """2026-11-01 to 11-09: first reads of 8 (28), 3 (13), 7 (10) and 1 (10) started a
+    climb-out that no confirmation followed; none of 508 confirmed rearms read them."""
+    assert not _observe(_emptied(), misread, count=1).rearm_seen
+
+
+@pytest.mark.parametrize("load", [2, 4, 6])
+def test_the_loads_a_refill_gives_show_a_rearm(load):
+    assert _observe(_emptied(), load, count=1).rearm_seen
+
+
+def test_a_refill_to_another_count_still_rearms_at_the_confirmation():
+    """A load of 9 (3 of 508 confirmed rearms) is not a sign on its own read, and still
+    rearms once the reads confirm it."""
+    urgency = _emptied()
+    assert not _observe(urgency, 9, count=1).rearm_seen
+    _observe(urgency, 9, count=1)
+    assert _observe(urgency, 9, count=1).rearmed
+
+
+@pytest.mark.parametrize("misread", [19, 76, 79])
+def test_a_count_no_rack_holds_never_confirms_a_rearm(misread):
+    """2026-11-09 11:00:40: "confirmed ammo=76", the gun counter, reset the urgency
+    while every rack stayed empty. Such a count is no read at all."""
+    urgency = _emptied()
+    for _ in range(5):
+        p = _observe(urgency, misread, count=1)
+        assert not p.rearmed and not p.rearm_seen and p.empty
+
+
 def test_a_count_that_goes_back_to_zero_stops_showing_a_rearm():
     urgency = _emptied()
     assert _observe(urgency, 4, count=1).rearm_seen
@@ -474,7 +505,9 @@ def test_unreadable_ammo_breaks_a_confirmation_run_without_losing_priority():
 
 
 def test_one_ocr_read_polled_repeatedly_does_not_confirm_a_rearm():
-    """2026-10-01 15:47: one misread of 44 was polled three times and reset urgency."""
+    """2026-10-01 15:47: one misread of 44 was polled three times and reset urgency.
+    44 is now no read at all (MISSILE_COUNT_MAX); the polling rule is shown with a
+    count a rack can hold."""
     urgency = MissileUrgency(confirm_reads=3)
     for read_id in (1, 2, 3):
         urgency.observe(2, "secondary", read_id=read_id)
@@ -483,12 +516,12 @@ def test_one_ocr_read_polled_repeatedly_does_not_confirm_a_rearm():
     assert empty.empty
 
     for _ in range(5):
-        polled = urgency.observe(44, "secondary", read_id=7)
+        polled = urgency.observe(4, "secondary", read_id=7)
     assert not polled.rearmed
     assert polled.empty
 
-    urgency.observe(44, "secondary", read_id=8)
-    rearmed = urgency.observe(44, "secondary", read_id=9)
+    urgency.observe(4, "secondary", read_id=8)
+    rearmed = urgency.observe(4, "secondary", read_id=9)
     assert rearmed.rearmed
     assert not rearmed.empty
 

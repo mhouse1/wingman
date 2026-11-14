@@ -1140,6 +1140,21 @@ class TestMissionTrialTag:
         assert first["tags"] == {"map_warning": "map", "agree_resupply": "override"}
         assert second["tags"] == {"map_warning": "control"}
 
+    def test_the_gun_aim_trial_arm_tags_the_round(self, tmp_path):
+        """Design 021 Phase 3: the gun aim arm tags each round, beside the others."""
+        t = _tracker(tmp_path)
+        t._startup_done = True
+        t.on_event("gun_arm_ring", 99.6)
+        _enter_battle(t, ts=100.0)
+        t.on_event("map_arm_map", 100.1)
+        _leave_battle(t, ts=400.0)
+        _enter_battle(t, ts=500.0)
+        t.on_event("gun_arm_marker", 500.1)
+        _leave_battle(t, ts=800.0)
+        first, second = t.finalize()["missions"]
+        assert first["tags"] == {"gun_aim": "ring", "map_warning": "map"}
+        assert second["tags"] == {"gun_aim": "marker"}
+
     def test_no_card_deaths_are_counted_by_round(self, tmp_path):
         """ADR 172: the kill card's verdict per round, the trial's crash count."""
         t = _tracker(tmp_path)

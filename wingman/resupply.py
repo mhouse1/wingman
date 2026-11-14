@@ -45,11 +45,20 @@ class MissilePriority:
 
 
 RESUPPLY_MIN_MISSILES_SPENT = 2
-# The largest count one read may show and still be taken as the first sign of a
-# rearm. No rack carries more, and the single reads that jumped up and straight
-# back in the sessions of 2026-10-11 and 10-13 showed 9, 10, 14, 18, 19 and 47
-# (35 of 37; the other two read 6 and 5).
-REARM_SIGN_MAX_COUNT = 8
+# The counts one read may show and still be taken as the first sign of a rearm:
+# the loads a refill gives. The single reads that jumped up and straight back in
+# the sessions of 2026-10-11 and 10-13 showed 9, 10, 14, 18, 19 and 47 (35 of 37;
+# the other two read 6 and 5). Over 2026-11-01 to 11-09 the 508 confirmed rearms
+# read 6, 4 or 2 (501), 9 (3) or a misread (4), never 8, 7, 3 or 1, while first
+# reads of 8 (28), 3 (13), 7 (10) and 1 (10) started a climb-out no confirmation
+# followed (inferred: an empty rack's 0 read as 8). A refill to another count still
+# rearms; its climb-out waits for the confirmation, about 3 s.
+REARM_SIGN_COUNTS = frozenset({2, 4, 6})
+# No rack carries more missiles than this; a larger count is a misread and is
+# treated as no read. Over 2026-11-01 to 11-09 the largest confirmed refill read 9,
+# and four confirmations read 19, 76, 79 and (2026-11-09 11:00:40) 76 again: the
+# gun counter ("59/76"), which reset the urgency while every rack stayed empty.
+MISSILE_COUNT_MAX = 12
 RESUPPLY_MARKER_HOLD_S = 0.5
 # Where a marker counts when the caller names no region: [x1, y1, x2, y2] in
 # frame fractions. The pursuit passes the tracker's acquisition region.
@@ -524,7 +533,7 @@ class MissileUrgency:
             self._rack = rack
             self._candidate = None
             self._candidate_reads = 0
-        if ammo is None or int(ammo) < 0:
+        if ammo is None or int(ammo) < 0 or int(ammo) > MISSILE_COUNT_MAX:
             self._candidate = None
             self._candidate_reads = 0
             return self.snapshot()
@@ -545,7 +554,7 @@ class MissileUrgency:
             self._candidate_reads += 1
         previous = self._ammo_by_rack.get(rack)
         # The same test the confirmed rearm makes below, on this one read.
-        rearm_seen = (0 < ammo <= REARM_SIGN_MAX_COUNT and rises
+        rearm_seen = (ammo in REARM_SIGN_COUNTS and rises
                       and (self._empty or (resupply_seeking and previous is not None
                                            and ammo > previous)))
         if self._candidate_reads < self._confirm_reads:

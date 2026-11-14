@@ -41,6 +41,27 @@ terrain service's warning flies, judged by arms drawn per round.
     and does not hand back for one.
   - The hold-off for an objective in view is unchanged: breaking it would abort resupply approaches.
   - Rounds before this revision are scored apart from those after it.
+- **D7 (revision 3, 2026-11-08) — the path is flown at the HUD's speed along the fixes' track.**
+  - The horizontal speed from successive fixes matched the HUD on average: a median of 1.05 times
+    speed times the cosine of the path angle, over 8,554 readings from 10:00 to 19:30.
+  - It was 1.5 times or more on 11% of readings, and 0.83 or less on 10%.
+  - At 19:32:44 the fixes gave 185 m/s while the aircraft climbed at +55 deg and 356 kph (57 m/s
+    across the ground). The map projected 590 m instead of 180 m and called a climb at +55 deg and
+    356 kph, inviting a stall.
+  - Now the fixes give only the direction, and the HUD gives the speed when it is fresh.
+  - A HUD speed under 0.25 or over 2 times the fixes' is taken as a misread, and the fixes' speed
+    stands. A 148 kph misread in a 900 kph dive would otherwise fly the path too slowly and warn late.
+  - The TERRAIN line logs both: `speed=57(fix 185)`.
+- **D8 (revision 4, 2026-11-08) — a terrain turn gives way at once to the map's climb.** The
+  TerrainTurn leaf holds for at least 2 s and ranks above Climb (D5).
+  - In today's logs there were 49 terrain turns. During 31 of them the map's call became a climb,
+    and Climb took over a median 1.5 s later.
+  - 11 of those 31 were followed by a no-kill-card death within 20 s. The base rate for a random
+    20 s battle window is about 6%.
+  - Icebound, 20:09:52.9: the left turn hit at 2.5 s and the call became a climb. The climb started
+    at 20:09:54.5, with every way out at 0.3 s.
+  - Now the turn's hold ends on the tick the map warning asks for the climb. A tick with no call
+    keeps the hold.
 - **D4 — the verdict.**
   - First: no-kill-card deaths per round, by arm, over at least 40 rounds per arm on maps with data.
   - Then: score per round by arm. Score is too noisy to judge on anything but arms drawn per round

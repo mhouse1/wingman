@@ -973,6 +973,49 @@ SCHEMA = Section(
             # is within gun_centre_err of the screen centre on both axes.
             "gun_on_centre": Leaf(types=(bool,), default=False),
             "gun_centre_err": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.05),
+            # Operator, 2026-11-13: the gun only while the target is under this
+            # range, read off its nameplate (target_range.py). 0 turns the gate off.
+            "gun_max_range_km": Leaf(types=NUMBER, minimum=0, default=2.0),
+            "gun_range_max_age_s": Leaf(types=NUMBER, minimum=0, default=1.5),
+            # Design 021 Phase 1 (shadow): the gun lead ring and the damage text
+            # are read and logged; nothing flies on them.
+            "gun_lead": Section(children={
+                "enabled": Leaf(types=(bool,), default=True),
+                # Searched only while the tracked target reads under this range.
+                "search_max_km": Leaf(types=NUMBER, minimum=0, default=2.0),
+                # Half-width of the search window around the marker, px at 1200 high.
+                "search_px": Leaf(types=NUMBER, minimum=20, default=450),
+                "min_score": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.45),
+                "crosshair_pct": Leaf(types=(list,), item_types=NUMBER, length=2,
+                                      default=[0.4997, 0.508]),
+                # Phase 3: the share of rounds whose chase steers the crosshair
+                # onto the ring and fires on it. 0 = every round on the marker.
+                "steer_share": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.0),
+                # The ring's largest distance from the crosshair for the gun to
+                # open, px at 1200 high.
+                "fire_px": Leaf(types=NUMBER, minimum=1, default=40),
+                # The ring stays the aim point this long after it was last confirmed.
+                "ring_memory_s": Leaf(types=NUMBER, minimum=0, default=0.45),
+                # Dots found on the line to the marker for the ring to be this target's.
+                "ring_min_dots": Leaf(types=(int,), minimum=0, maximum=4, default=2),
+                # The chase steers on a ring only while the tracked target reads
+                # under this range; the shadow still searches to search_max_km.
+                "steer_max_km": Leaf(types=NUMBER, minimum=0, default=1.2),
+            }),
+            # Design 021 Phase 5 (shadow): where the tracked target is going,
+            # logged and drawn on the HUD. Nothing flies on it.
+            "target_projection": Section(children={
+                "enabled": Leaf(types=(bool,), default=True),
+                # Seconds of the target's own motion the point leads by, for
+                # each km of range, on x and y.
+                "lead_s_per_km": Leaf(types=(list,), item_types=NUMBER, length=2,
+                                      default=[0.51, 0.37]),
+                # Where the point sits with the target still, from the marker,
+                # px at 1200 high.
+                "offset_px": Leaf(types=(list,), item_types=NUMBER, length=2,
+                                  default=[14, 4]),
+                "smooth_s": Leaf(types=NUMBER, minimum=0, default=0.4),
+            }),
             "empty_confirm_reads": _int(1),
             "steer_interval_s": SECONDS,    # CR-018-01
             "engage_interval_s": SECONDS,   # CR-018-01
@@ -1233,7 +1276,11 @@ SCHEMA = Section(
             # MATCH map name -> its minimap texture and height map, built offline
             # (test_screenshots/terrain/tools/). A map with no entry, or missing
             # files, gets no reading.
-            "maps": MapOf(Section(children={"minimap": STR, "height": STR})),
+            # mpp_at_320px, per map (optional): the game zooms some minimaps differently.
+            # Crucible: 0 fixes in 13 rounds at the shared 34; 10 of 12 live grabs fixed at
+            # 19 to 23 (Design 020, 2026-11-08).
+            "maps": MapOf(Section(children={"minimap": STR, "height": STR,
+                                            "mpp_at_320px": Leaf(types=NUMBER, minimum=1)})),
             # ttc_m: the path must clear the ground by this much (Design 020, 39 live
             # crashes: 0 m warned 67% at 4.6% of ordinary ticks, 150 m 85% at 6.6%).
             "clearance_margin_m": Leaf(types=NUMBER, minimum=0, default=150.0),
@@ -1266,6 +1313,20 @@ SCHEMA = Section(
             # Blur the crop and the texture by this much before matching (Stone Forest's
             # trees: 0 of 55 recorded crops fixed unblurred, 50 of 55 at 100 m).
             "match_blur_m": Leaf(types=NUMBER, minimum=0, maximum=500, default=100.0),
+            # Design 020 Phase 7 (ADR 176, shadow): the chase's own pitch and roll command,
+            # projected through the height map on every steering tick before it is flown.
+            # pitch_deg_s: how fast a held nose-down steepens the path (the emergency climb's
+            # nose-up measured a median 7.6 deg/s on 2026-11-08). turn_deg_s: the bank's
+            # measured turn rate. decide_s: a command whose path meets the ground within this
+            # is one the guard would withhold or flip. max_fix_age_s: no verdict on an older
+            # fix (the fix is carried forward along its track meanwhile).
+            "steer_guard": Section(children={
+                "enabled": Leaf(types=(bool,), default=True),
+                "pitch_deg_s": Leaf(types=NUMBER, minimum=1, maximum=45, default=10.0),
+                "turn_deg_s": Leaf(types=NUMBER, minimum=1, maximum=45, default=12.0),
+                "decide_s": Leaf(types=NUMBER, minimum=0.5, maximum=10, default=3.0),
+                "max_fix_age_s": Leaf(types=NUMBER, minimum=0.2, maximum=10, default=2.0),
+            }),
         }),
 
         # Performance 008 — periodic RESOURCE line for long-session leak diagnosis.

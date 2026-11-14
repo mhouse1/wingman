@@ -492,6 +492,22 @@ def test_a_stale_map_climb_does_not_start_the_recovery_on_a_climbing_path(monkey
     assert any("crash recovery not started" in r.getMessage() for r in caplog.records)
 
 
+def test_every_map_climb_held_off_for_an_objective_is_logged(monkeypatch, caplog):
+    """ADR 174: the hold-off for a target or the resupply marker in view still stands for a map
+    climb, and each one is logged (the throttled line logged one in four), so the trade can be
+    counted. 2026-11-08 19:36:53 and 19:38:16, Stormbreak: both held off, both crashed."""
+    ctrl = _crash_ctrl(monkeypatch, _Analyzer(altitude=900.0, angle=-20.0))
+    ctrl.set_terrain_service(_MapSaysClimb())
+    ctrl._pursuing.set()
+    ctrl._note_pursuit_objective("resupply marker")
+    with caplog.at_level(logging.INFO, logger="wingman.controller"):
+        for _ in range(3):
+            ctrl.climb_mode(emergency=True)
+    assert not ctrl.is_climbing()
+    held = [r.getMessage() for r in caplog.records if "map climb held off" in r.getMessage()]
+    assert len(held) == 3 and "resupply marker" in held[0]
+
+
 def test_the_shipped_config_enables_crash_recovery():
     import pathlib
 
@@ -990,3 +1006,93 @@ def test_the_threshold_comes_from_the_climb_config(monkeypatch):
                       config=ControllerConfig(simulate_os_input=True, disable_hotkeys=True,
                                               climb=dict(_CLIMB, pullout={"bypass_holdoff_below_m": 250})))
     assert ctrl._pullout_bypass_below_m == 250
+
+
+# --- ADR 159 for the rearm climb-out (2026-11-08) ------------------------------------
+
+class _TelemetryAnalyzer(_Analyzer):
+    """The real TelemetrySnapshot: the path angle from speed and altitude rate."""
+
+    def __init__(self, speed_kph, path_deg):
+        super().__init__(state=GameState.GAME_BATTLE)
+        import math as _m
+        from wingman.telemetry import TelemetrySignal, TelemetrySnapshot
+        now = time.time()
+        rate = speed_kph / 3.6 * _m.sin(_m.radians(path_deg))
+        self._snap = TelemetrySnapshot(
+            speed=TelemetrySignal(value=int(speed_kph), ts=now, stable_value=speed_kph),
+            altitude=TelemetrySignal(value=1500, ts=now, stable_value=1500.0, rate=rate),
+            taken_at_s=now)
+
+    def get_telemetry(self):
+        return self._snap
+
+
+@pytest.mark.parametrize("speed_kph, path_deg, brakes", [
+    (826, -42.0, True),    # Stormbreak 00:19:28.9: steeper than the -40 deg limit
+    (1000, -15.0, True),   # a shallow dive at 900 kph or more is a fast dive
+    (650, -15.0, False),   # a mild dive keeps the afterburner
+    (650, 10.0, False),    # climbing
+])
+def test_the_climb_out_brakes_in_a_steep_or_fast_dive(monkeypatch, speed_kph, path_deg, brakes):
+    """2026-11-08: climb-outs started at the pass in a dive steeper than -20 deg were
+    followed by a crash 18 to 28% of the time against 4% from a shallower path, with the
+    afterburner lit at once; at 00:19:28.9 the nose went from -42 to -61 deg under it.
+    The climb-out now takes the emergency climb's ADR 159 rule."""
+    ctrl = _ctrl(monkeypatch, _TelemetryAnalyzer(speed_kph, path_deg))
+    # The shipped thresholds (config.yaml): the schema's default leaves the fast dive off.
+    ctrl._climb_brake_above_kph, ctrl._climb_brake_release_kph = 900, 750
+    ctrl._rearm_climb_throttle(True)
+    keys = _keys(ctrl)
+    assert (("key_press", AIRBRAKE_KEY) in keys) is brakes
+    assert (("key_press", AFTERBURNER_KEY) in keys) is (not brakes)
+    ctrl._rearm_climb_throttle(False)                      # the climb-out is over
+    keys = _keys(ctrl)
+    if brakes:
+        assert keys[-1] == ("key_release", AIRBRAKE_KEY)
+    assert not ctrl._rearm_brake_held and not ctrl._rearm_ab_held
+
+
+# --- Design 020 Phase 7 (ADR 176): the steer guard logs, flies nothing ---------------------
+
+def _wall_service(tmp_path):
+    """A real TerrainService on a 1,400 m wall 800 m east, the chase at the origin flying east."""
+    import numpy as np
+    from tests.test_terrain_service import _write_map
+    from wingman.terrain_service import TerrainService
+    rng = np.random.default_rng(3)
+    texture = (rng.random((512, 512)) * 255).astype(np.uint8)
+    top = np.full((1600, 1600), -232.3, np.float32)
+    top[:, 850:] = 1400.0
+    svc = TerrainService({"maps": {"M": _write_map(tmp_path, texture, top)},
+                          "steer_guard": {"decide_s": 5.0}})
+    svc._steer_state = ("M", time.time(), 0.0, 0.0, 250.0, 0.0)
+    return svc
+
+
+def test_the_steer_guard_shadow_logs_the_verdict_and_presses_nothing(monkeypatch, caplog, tmp_path):
+    """Level at 1,500 m, a held nose-down meets the 1,400 m wall within 5 s: the guard says
+    it would withhold the push, once, and says so again only when the verdict changes."""
+    ctrl = _ctrl(monkeypatch, _TelemetryAnalyzer(700, 0.0))
+    ctrl.set_terrain_service(_wall_service(tmp_path))
+    before = len(_keys(ctrl))
+    with caplog.at_level(logging.DEBUG, logger="wingman.controller"):
+        ctrl._pitch_held, ctrl._roll_held = "down", None
+        ctrl._steer_guard_shadow()
+        ctrl._steer_guard_shadow()
+        ctrl._pitch_held = None
+        ctrl._steer_guard_shadow()                 # nothing held: no line, verdict reset
+        ctrl._pitch_held = "down"
+        ctrl._steer_guard_shadow()
+    text = "\n".join(r.getMessage() for r in caplog.records)
+    assert text.count("STEER GUARD would withhold nose-down") == 2
+    assert text.count("STEERGUARD: pitch=down") == 3
+    assert len(_keys(ctrl)) == before, "the shadow pressed a key"
+
+
+def test_the_steer_guard_shadow_is_quiet_without_a_service_or_a_command(monkeypatch, caplog):
+    ctrl = _ctrl(monkeypatch, _TelemetryAnalyzer(700, 0.0))
+    with caplog.at_level(logging.DEBUG, logger="wingman.controller"):
+        ctrl._pitch_held = "down"
+        ctrl._steer_guard_shadow()                 # no terrain service wired
+    assert "STEERGUARD" not in caplog.text

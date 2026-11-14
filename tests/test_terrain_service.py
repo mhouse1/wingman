@@ -419,3 +419,158 @@ def test_climb_wanted_remembers_the_last_climb_for_two_seconds(monkeypatch):
     service.trial_share = 0.5
     service.new_round()
     assert not service.climb_wanted()
+
+
+def _wall_east(tmp_path, texture):
+    top = np.full((1600, 1600), -232.3, np.float32)
+    top[:, 800 + 800 // 16:] = 1000.0                       # a 1,000 m wall from x = 800 m eastward
+    return TerrainService({"maps": {"M": _write_map(tmp_path, texture, top)}, "horizon_s": 3.0})
+
+
+def test_the_hud_speed_flies_the_fixes_track(tmp_path, texture):
+    """ADR 174 revision 3, 2026-11-08 19:32:44: the fixes gave 185 m/s while the HUD read +55 deg at
+    356 kph (57 m/s across the ground), and the map called a climb for a mountain it would not
+    reach. Here the fixes say 300 m/s east toward a wall 800 m off: within the 3 s horizon. At the
+    HUD's 100 m/s it is 8 s away, and the reading is clear."""
+    svc = _wall_east(tmp_path, texture)
+    svc.observe("M", _crop(texture, -300, 0, 90), 90, 500.0, 0.0, now=10.0)
+    r = svc.observe("M", _crop(texture, 0, 0, 90), 90, 500.0, 0.0, now=11.0, hud_horizontal=100.0)
+    assert r.speed == pytest.approx(100.0)
+    assert r.fix_speed == pytest.approx(300, abs=60)
+    assert r.ttc_y is None
+    assert "speed=100(fix " in r.log_text("M")
+    # Without the HUD the fixes' speed flies it, and the wall is inside the horizon.
+    (tmp_path / "b").mkdir()
+    svc2 = _wall_east(tmp_path / "b", texture)
+    svc2.observe("M", _crop(texture, -300, 0, 90), 90, 500.0, 0.0, now=10.0)
+    r2 = svc2.observe("M", _crop(texture, 0, 0, 90), 90, 500.0, 0.0, now=11.0)
+    assert r2.ttc_y == pytest.approx(800 / r2.speed, abs=0.3)
+
+
+def test_a_hud_speed_far_from_the_fixes_is_a_misread(tmp_path, texture):
+    """148 kph read in a 900 kph dive would fly the path too slowly and warn late: a HUD speed under
+    a quarter of the fixes' is a misread, and the fixes' speed is kept."""
+    svc = _wall_east(tmp_path, texture)
+    svc.observe("M", _crop(texture, -300, 0, 90), 90, 500.0, 0.0, now=10.0)
+    r = svc.observe("M", _crop(texture, 0, 0, 90), 90, 500.0, 0.0, now=11.0, hud_horizontal=41.0)
+    assert r.speed == pytest.approx(r.fix_speed)
+    assert r.ttc_y is not None
+
+
+def test_a_terrain_turn_gives_way_at_once_to_the_maps_climb():
+    """ADR 174 revision 4, Icebound 20:09:52.9: the turn's 2 s hold kept the airframe for
+    1.5 s after the map's call became a climb; the climb started with every way out at 0.3 s.
+    The hold still stands against a silent tick, and ends on a tick the map warns."""
+    import py_trees
+    from tests.test_behavior_tree import make_snap
+    from wingman.behavior_tree import (SNAPSHOT_KEY, TACTIC_CLIMB, TACTIC_TERRAIN_TURN,
+                                       build_tree, selected_tactic)
+    with open(CONFIG_PATH, encoding="utf-8") as f:
+        bt_cfg = yaml.safe_load(f)["behavior_tree"]
+    writer = py_trees.blackboard.Client(name="TestWriterHold")
+    writer.register_key(key=SNAPSHOT_KEY, access=py_trees.common.Access.WRITE)
+
+    def fresh_tree():
+        return build_tree(bt_cfg, actuators={TACTIC_TERRAIN_TURN: (lambda: None, lambda: True)})
+
+    held = fresh_tree()
+    writer.set(SNAPSHOT_KEY, make_snap(altitude=300.0, terrain_turn="left"))
+    held.tick()
+    assert selected_tactic(held) == TACTIC_TERRAIN_TURN
+    writer.set(SNAPSHOT_KEY, make_snap(altitude=300.0))                 # the map says nothing
+    held.tick()
+    assert selected_tactic(held) == TACTIC_TERRAIN_TURN                 # the hold stands
+
+    released = fresh_tree()
+    writer.set(SNAPSHOT_KEY, make_snap(altitude=300.0, terrain_turn="left"))
+    released.tick()
+    writer.set(SNAPSHOT_KEY, make_snap(altitude=300.0, terrain_map_warning=True))   # now a climb
+    released.tick()
+    assert selected_tactic(released) == TACTIC_CLIMB
+
+
+def _crop_at(texture, x, z, north_bearing, mpp, size=320):
+    """`_crop` at another minimap zoom: `mpp` metres per pixel at 320 px."""
+    s = texture.shape[0] / SPAN
+    centre = ((x + SPAN / 2) * s, (SPAN / 2 - z) * s)
+    side = int(round(size * mpp * s))
+    patch = cv2.getRectSubPix(texture, (side, side), centre)
+    north_up = cv2.resize(patch, (size, size), interpolation=cv2.INTER_LINEAR)
+    turn = cv2.getRotationMatrix2D(((size - 1) / 2, (size - 1) / 2), -north_bearing, 1.0)
+    return cv2.cvtColor(cv2.warpAffine(north_up, turn, (size, size)), cv2.COLOR_GRAY2BGR)
+
+
+def test_a_map_zoomed_differently_fixes_at_its_own_scale(tmp_path, texture):
+    """Design 020, 2026-11-08: Crucible's minimap is drawn at about 21 m/px, not the shared 34;
+    0 fixes in 13 rounds until its entry carried its own mpp_at_320px."""
+    paths = _write_map(tmp_path, texture)
+    crop = _crop_at(texture, 1500, -2500, 30, mpp=21.0)
+    shared = TerrainService({"maps": {"M": paths}})
+    own = TerrainService({"maps": {"M": dict(paths, mpp_at_320px=21.0)}})
+    assert shared.fix("M", crop, 30, now=1.0) is None
+    fx = own.fix("M", crop, 30, now=1.0)
+    assert fx is not None and abs(fx.x - 1500) < 100 and abs(fx.z + 2500) < 100
+
+
+# --- Design 020 Phase 7 (ADR 176): the chase's steer guard, shadow ------------------------
+
+def _guard_service(tmp_path, texture, top, **steer):
+    cfg = {"maps": {"M": _write_map(tmp_path, texture, top)}, "steer_guard": dict(decide_s=5.0, **steer)}
+    svc = TerrainService(cfg)
+    svc._steer_state = ("M", 10.0, 0.0, 0.0, 250.0, 0.0)      # at the origin, east at 250 m/s
+    return svc
+
+
+def _wall_east_top(height=1000.0, from_x=800):
+    top = np.full((1600, 1600), -232.3, np.float32)
+    top[:, 800 + from_x // 16:] = height
+    return top
+
+
+def test_a_held_nose_down_into_a_wall_is_withheld_while_the_level_path_is_clear(tmp_path, texture):
+    """Level at 1,100 m toward a 1,000 m wall 800 m ahead the path is clear; held nose-down at
+    10 deg/s puts it into the wall in about 3.3 s. The guard withholds the push and nothing else."""
+    svc = _guard_service(tmp_path, texture, _wall_east_top())
+    v = svc.steer_check("down", None, 1100.0, 0.0, now=10.0)
+    assert v.hold is None and v.no_push is None
+    assert v.commanded is not None and v.commanded <= 5.0
+    assert v.withhold_down and not v.flip_roll
+    assert "verdict=withhold-down" in v.log_text()
+
+
+def test_a_roll_toward_high_ground_is_flipped_when_the_other_side_is_clear(tmp_path, texture):
+    """East at 1,100 m with the ground at 2,000 m north of z = 300: a left bank (toward north)
+    meets it in under 5 s, a right bank does not. Flip the roll, leave the pitch."""
+    top = np.full((1600, 1600), -232.3, np.float32)
+    top[800 + 300 // 16:, :] = 2000.0          # rows run south to north: z above 300 m
+    svc = _guard_service(tmp_path, texture, top)
+    v = svc.steer_check(None, "left", 1100.0, 0.0, now=10.0)
+    assert v.commanded is not None and v.other_roll is None and v.hold is None
+    assert v.flip_roll and not v.withhold_down
+    assert svc.steer_check(None, "right", 1100.0, 0.0, now=10.0).flip_roll is False
+
+
+def test_open_ground_raises_no_verdict_and_a_stale_or_absent_fix_gives_none(tmp_path, texture):
+    svc = _guard_service(tmp_path, texture, np.full((1600, 1600), -232.3, np.float32))
+    v = svc.steer_check("down", "left", 1100.0, 0.0, now=10.0)
+    assert v is not None and not v.withhold_down and not v.flip_roll and v.commanded is None
+    assert svc.steer_check("down", "left", 1100.0, 0.0, now=13.0) is None    # fix 3 s old
+    assert svc.steer_check("down", "left", None, 0.0, now=10.0) is None      # no altitude
+    off = _guard_service(tmp_path, texture, _wall_east_top(), enabled=False)
+    assert off.steer_check("down", None, 1100.0, 0.0, now=10.0) is None
+
+
+def test_the_fix_is_carried_forward_along_its_track_between_map_ticks(tmp_path, texture):
+    """The state comes from observe(): two fixes give the track, and steer_check projects from
+    where the aircraft is now, not from the last fix."""
+    top = _wall_east_top(from_x=1200)
+    svc = TerrainService({"maps": {"M": _write_map(tmp_path, texture, top)},
+                          "steer_guard": {"decide_s": 5.0}})
+    svc.observe("M", _crop(texture, -300, 0, 90), 90, 1100.0, 0.0, now=10.0)
+    svc.observe("M", _crop(texture, 0, 0, 90), 90, 1100.0, 0.0, now=11.0)
+    assert svc._steer_state is not None and svc._steer_state[4] > 200       # eastward track
+    at_fix = svc.steer_check("down", None, 1100.0, 0.0, now=11.0)
+    later = svc.steer_check("down", None, 1100.0, 0.0, now=12.5)
+    assert at_fix.commanded is not None and later.commanded is not None
+    assert later.commanded < at_fix.commanded                                 # nearer the wall
+    assert abs(later.fix_age_s - 1.5) < 0.01

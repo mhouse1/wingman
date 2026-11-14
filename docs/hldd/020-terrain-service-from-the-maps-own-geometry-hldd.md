@@ -766,9 +766,121 @@ a track in the 8 s before, 14,544 ordinary ticks):
   - **False pass climb-outs, fixed.** Across the 11-01 to 11-08 logs, 36 of the 62 climb-outs whose
     marker came back within 3 s had it 52 px across or less. Only 1 of the 196 climb-outs a re-arm
     followed had it under 53. `pass_trigger.min_size_px` goes from 50 to 53.
-  - **Next: plan the descent to the known ring height.** Start the descent from the fix at no more
-    than about 15 deg and under about 700 kph, and level at the ring's height. The map warning should
-    then judge that planned path, not the straight dive extended past the ring.
+  - **Next: plan the descent to the known ring height.** The map warning should judge the planned
+    path to the ring, not the straight dive extended past it.
+  - **The approach limits are measured, not guessed (2026-11-08 18:45).** The first draft of this plan
+    said "no more than about 15 deg, under about 700 kph". The data contradicts it. Crimson runs where
+    the marker took the steering, 11-01 to 11-08, 240 runs:
+
+    | Steepest dive | Runs | Re-arm | Crash | Killed |
+    |---|---|---|---|---|
+    | 0 to 10 deg | 47 | 21% | 34% | 45% |
+    | 10 to 20 deg | 47 | 28% | 30% | 43% |
+    | 20 to 30 deg | 47 | 34% | 30% | 36% |
+    | 30 to 45 deg | 43 | 44% | 28% | 28% |
+    | over 45 deg | 56 | 29% | 43% | 29% |
+
+    - Under 700 kph, 11 to 14% re-armed and 50 to 57% were killed. At 900 kph and up, 38 to 41%
+      re-armed.
+    - Part of this is selection (inferred): the runs that got close to the ring are the fast, steep
+      ones.
+    - Even so, slowing down and flying shallow are not supported. The supported limit is a dive no
+      steeper than about 45 deg.
+- **The chase is the next risk, not the recovery (2026-11-08 19:20, measured, open).**
+  - **Hand-backs raise the risk.** A climb handed back because a target or the ring came into view was
+    followed by a no-kill-card death 3 to 22 s later 13% of the time (176 of 1,369, 11-01 to 11-08).
+    A climb that ended because the crash was cleared: 5%. A random battle tick: 6%.
+  - **Nothing measured at the hand-back separates the bad ones.**
+
+    | Measured at the hand-back | Crash rate afterwards |
+    |---|---|
+    | Path angle, any band | 7 to 14% |
+    | Height above the map ground | 5 to 17%, small samples |
+    | Map's straight path clear for 5 s | 10% (n = 227) |
+    | Map's straight path hits within 2.5 s | 17% (n = 12) |
+
+  - **Inferred:** the danger is the chase's next dive or turn. Stone Forest, 18:52: the map read clear
+    3 s before impact, the chase turned about 15 deg into a pillar, and the next reading was 2 s for
+    every way out.
+  - **Lead:** check the chase's intended dive and turn against the map before flying it, not only the
+    straight path.
+  - **D6 (map climb on a climbing path) flew once live**, 19:14:00 on Stone Forest: level at 1,714 m,
+    1,156 m ground 1 s ahead. It climbed, the map cleared, it handed back after 2 s, and the aircraft
+    lived.
+- **Crucible is blind (2026-11-08 20:40, measured, open).**
+  - Since the service went live there has been 1 fix in about 1,800 Crucible readings. All 13 of
+    today's Crucible rounds had none.
+  - Crucible rounds count as rounds with map data in the ADR 174 trial, yet neither arm can act in
+    them.
+  - The live minimap draws dark navy sea where `crucible-minimap.png` has light blue.
+  - Inverting the brightness does not help. On four full-resolution live grabs (`grab_minimap.py`),
+    the best score was 0.38 to 0.50 either way, with a runner-up within 0.09, at random places.
+  - The stored texture has the same size and range-ring spacing as Crimson's (4,096 px, 204 px), so
+    the stored scale is consistent. What the game draws differs: a different zoom on this map, or a
+    different picture.
+  - The bundle lists a `top-down-lightmap-map-crucible-night-scene.png`, and the minimap background
+    is drawn by a shader (`ui-minimap-background-shader`).
+  - Next, with the game closed: extract the night lightmap and the shader, and measure the live
+    minimap's metres per pixel on Crucible from its range rings.
+  - **Cause found the same evening (20:45, measured): the game zooms Crucible's minimap in.**
+    - A sweep of the scale over live full-resolution grabs (`grab_minimap.py`, shipped acceptance
+      thresholds) fixed 10 of 12 grabs from 19 to 23 m/px, 8 at 24, 2 at 25, and none at the shared
+      34.
+    - At 22 m/px two consecutive grabs scored 0.81 and 0.75 against runners-up near 0.50, 50 m apart.
+    - No textures were needed: the dark sea is a tint the masked correlation tolerates once the
+      scale is right.
+    - `terrain_service.maps.<name>.mpp_at_320px` now overrides the shared value per map, and
+      Crucible's entries carry 21.
+- **Getting the ring, then the canyon floor (2026-11-08 21:30, measured).**
+  - The tool counted a run that re-armed and crashed seconds later as a re-arm.
+  - Over 11-01 to 11-08, 6 of 116 Crimson re-arms had a crash card within 15 s. Elsewhere it was 1
+    of 333.
+  - Crimson Canyon Sunrise, 21:28: the north-west ring was 2.9 km off at a 15 deg descent. Wingman
+    dove to -37 deg at up to 1,320 kph and took the ring at 397 m. Every way out then hit, the best
+    being a climb at 4.6 s. It crashed into the canyon floor 2 s after the confirmation.
+  - `resupply_runs.py` now reports these as `rearm+crash`.
+  - **A dive cap alone is not supported (22:45, measured).** The evening's cases looked like "too
+    steep at the ring", but 198 runs at known ring sites crash at the same rate however much
+    steeper the dive was than the ring needed:
+    - within 15 deg: 33% (n = 124);
+    - 15 to 35 deg steeper: 28% (n = 40);
+    - over 35 deg steeper: 35% (n = 34).
+
+    The cases share no exit after the ring, which depends on the site and the approach direction.
+    The next measurement: pickups made with every way out under 3 s, and how many of those crash.
+    That is the signal a pass plan would act on.
+  - **The map's exit at the pickup does not separate the crashes either (22:50, measured).** Over
+    158 pickups with a map reading (11-07 to 11-08), a crash card followed within 15 s:
+    - straight path clear: 12% (n = 111);
+    - a way out clear: 8% (n = 24);
+    - every way out under 3 s: 10% (n = 20).
+
+    About 1 pickup in 9 is followed by a crash whatever the dive angle or the map's exit says.
+    Neither signal yet supports a pass plan. Open: what does separate them (the site, the approach
+    heading, the speed at the ring, or the climb-out itself).
+  - The tool also folds lighting variants (SUNRISE, NIGHT) into their base map, so the ring sites
+    apply.
+
+### Phase 7: the chase asks the map before it dives or turns (design, 2026-11-09)
+
+- **The gap (measured, 11-08 and 11-09).** The chase steers at a target by screen error and never
+  consults the map. Its dives went from -15 to -90 deg inside one 1.5 s map reading, with the
+  straight path reading clear 3 s before impact; a climb handed back to the chase crashed 13% of
+  the time against a 6% base rate, and nothing at the hand-back separates the bad ones. The reflex
+  layer (ADR 174, D1 to D8) is tuned to its limit.
+- **The design ([ADR 176](../adr/176-the-chase-asks-the-map-before-it-dives-or-turns.md)).** On
+  the chase's own tick, project the held pitch and roll through the height map from the last fix
+  carried forward along its track, four ways: as commanded, nose-down withheld, roll flipped, no
+  command. A command that meets the ground within 3 s while the withheld or flipped one stays
+  clear is a verdict. The pitch is withheld, never pulled.
+- **Step 1, shadow (this revision):** `TerrainService.steer_check` and
+  `Controller._steer_guard_shadow`, called after the steering block each tick. `STEERGUARD:` on
+  every tick with a command, one INFO line per verdict change. No key is pressed.
+- **Step 2:** actuate under the ADR 174 arm draw, once the shadow shows the verdicts precede
+  crashes and says what the withheld pushes would cost the chase.
+- **Validation:** no-kill-card deaths 3 to 15 s after a verdict tick against ticks left alone,
+  per map (Stone Forest apart: fixes there score 0.5 to 0.6), over 40 verdicts; the share of chase
+  ticks changed, per round.
 
 ## All six arenas (2026-11-07)
 

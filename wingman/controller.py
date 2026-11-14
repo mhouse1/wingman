@@ -8,6 +8,7 @@ import random
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import replace
 from pathlib import Path
 from typing import Callable, NamedTuple
@@ -29,6 +30,10 @@ from .hotkeys import register_hotkeys as _register_hotkeys
 from .controller_config import ControllerConfig
 from .suppressed import log_suppressed
 from .clear_path import PathGoal
+from .gun_damage import GunDamageLog
+from .lead_ring import LeadRingWatch, RingAimTrial, crosshair
+from .target_projection import TargetProjection
+from .target_range import TargetRangeReader
 from .crop_region import CropCoords, crop_centre
 from .icon_steering import IconPoints, IconSteeringConfig, find_ring_icons
 from .jet_name import mission_for_jet, profile_for_jet
@@ -599,6 +604,8 @@ class Controller:
         # flag below.
         self._sustained_hold_enabled = bool((_c.tracking or {}).get("sustained_hold_enabled", False))
         self._roll_held: "str | None" = None
+        # ADR 176 (shadow): the steer guard's last (withhold_down, flip_roll), for edge logging.
+        self._steer_guard_verdict: "tuple[bool, bool] | None" = None
         # Which of "search" (no target — operator directive, hold
         # ROLL_LEFT_KEY until one reappears) or "target" (holding toward a
         # real, currently-visible target) the roll hold above is for — needed
@@ -936,6 +943,65 @@ class Controller:
             _pm.get("gun_centre_err", schema_default("pursuit_mode.gun_centre_err")))
         self._gun_held_since: "float | None" = None
         self._gun_fired_s = 0.0
+        # Operator, 2026-11-13: and only while the target is under
+        # gun_max_range_km, read off its nameplate (target_range.py). 0 = no gate.
+        self._gun_max_range_km = float(
+            _pm.get("gun_max_range_km", schema_default("pursuit_mode.gun_max_range_km")))
+        self._gun_range_max_age_s = float(
+            _pm.get("gun_range_max_age_s", schema_default("pursuit_mode.gun_range_max_age_s")))
+        self._target_range = (TargetRangeReader()
+                              if self._pursuit_gun_on_centre and self._gun_max_range_km > 0
+                              else None)
+        self._gun_cluster: "tuple[float, float] | None" = None
+        # Design 021 Phase 1 (shadow): the gun lead ring and the damage text,
+        # read and logged on each pursuit steering tick; nothing flies on them.
+        _gl = _pm.get("gun_lead") or {}
+
+        def _gl_get(key):
+            return _gl.get(key, schema_default("pursuit_mode.gun_lead." + key))
+        self._lead_ring: "LeadRingWatch | None" = None
+        self._gun_damage: "GunDamageLog | None" = None
+        self._lead_search_max_km = float(_gl_get("search_max_km"))
+        self._gun_ring_px: "float | None" = None
+        if self._target_range is not None and bool(_gl_get("enabled")):
+            self._lead_ring = LeadRingWatch(_gl_get("search_px"), _gl_get("min_score"),
+                                            _gl_get("crosshair_pct"))
+            self._gun_damage = GunDamageLog()
+            self._target_range.damage_log = self._gun_damage
+        # Design 021 Phase 5 (shadow): where the tracked target is going, from
+        # the marker's motion with the chase's own keys taken out. Logged and
+        # drawn on the HUD; nothing flies on it.
+        _tp = _pm.get("target_projection") or {}
+
+        def _tp_get(key):
+            return _tp.get(key, schema_default("pursuit_mode.target_projection." + key))
+        self._target_projection: "TargetProjection | None" = None
+        if self._target_range is not None and bool(_tp_get("enabled")):
+            self._target_projection = TargetProjection(
+                _tp_get("lead_s_per_km"), _tp_get("offset_px"), _tp_get("smooth_s"))
+        # Its misses against the game's own ring, px at 1200 high, for the
+        # shutdown line; the newest 5,000.
+        self._projection_misses: "deque[float]" = deque(maxlen=5000)
+        self._projection_logged_ts: "float | None" = None
+        # Design 021 Phase 3: in a share of rounds the chase steers the crosshair
+        # onto the ring and fires while it is within fire_px of it.
+        self._ring_aim_trial = RingAimTrial(
+            float(_gl_get("steer_share")) if self._lead_ring is not None else 0.0)
+        self._ring_fire_px = float(_gl_get("fire_px"))
+        self._ring_memory_s = float(_gl_get("ring_memory_s"))
+        self._ring_min_dots = int(_gl_get("ring_min_dots"))
+        self._ring_steer_max_km = float(_gl_get("steer_max_km"))
+        # The tracked target's range the shadow searched on this tick; None
+        # without a fresh reading of it.
+        self._lead_km: "float | None" = None
+        # The ring's distance from the crosshair, px at 1200 high, while the
+        # chase aims at it this picture; None while it aims at the marker.
+        self._ring_aim_px: "float | None" = None
+        self._ring_aim_was = False
+        # Phase 3's measure, by arm: new pictures under 1.2 km with a tracked
+        # target, and of them those with a confirmed ring within fire_px.
+        self._ring_on_tally: "dict[str, list[int]]" = {}
+        self._ring_tally_ts: "float | None" = None
         # mission_acs defers SWITCH_WEAPON until the selected weapon runs out
         # (ADR 144 D4, 2026-09-24). The key is a toggle, so this many
         # consecutive ammo==0 reads are required before pressing it. At the
@@ -1043,6 +1109,9 @@ class Controller:
         # Operator, 2026-10-13: the climb-out holds the afterburner too. True
         # while it has its lease on AFTERBURNER_KEY (owner `rearm_climb`).
         self._rearm_ab_held = False
+        # ADR 159 for the climb-out (2026-11-08): in a steep or fast dive it holds
+        # the airbrake instead of the afterburner. True while it holds it.
+        self._rearm_brake_held = False
         # The climb-out at the pass (Action Item 003): started when the marker
         # the pursuit was flying at is lost while moving outward, without
         # waiting for the missile count. `enabled` watches and logs; `actuate`
@@ -1988,6 +2057,48 @@ class Controller:
         for a path that is already climbing (`_map_climb_wanted`)."""
         self._terrain_service = service
 
+    def _steer_guard_shadow(self) -> None:
+        """Design 020 Phase 7 (ADR 176), shadow: project the pitch and roll the chase holds
+        this tick through the terrain service and log what a steer guard would have done.
+        Flies nothing. One DEBUG line per tick with a command, one INFO line per change of
+        verdict, so the offline pass can count crashes 3 to 15 s after each verdict."""
+        service = getattr(self, "_terrain_service", None)
+        if service is None or not getattr(service, "steer_guard_enabled", False):
+            return
+        pitch, roll = self._pitch_held, self._roll_held
+        if pitch is None and roll is None:
+            if self._steer_guard_verdict is not None:
+                self._steer_guard_verdict = None
+            return
+        altitude = rate = None
+        if self._analyzer is not None:
+            try:
+                snap = self._analyzer.get_telemetry()
+                if snap is not None and snap.altitude_fresh():
+                    altitude = snap.altitude_ahead(0.0)
+                    rate = snap.altitude.rate
+            except Exception:
+                return
+        try:
+            verdict = service.steer_check(pitch, roll, altitude, rate, time.time())
+        except Exception:
+            logger.exception("Controller: steer guard check failed")
+            return
+        if verdict is None:
+            return
+        logger.debug("STEERGUARD: %s", verdict.log_text())
+        now_verdict = (verdict.withhold_down, verdict.flip_roll)
+        if now_verdict != self._steer_guard_verdict:
+            if any(now_verdict):
+                logger.info("Controller: STEER GUARD would %s (shadow, ADR 176): %s",
+                            " and ".join(w for w, on in (("withhold nose-down", verdict.withhold_down),
+                                                         ("flip the roll", verdict.flip_roll)) if on),
+                            verdict.log_text())
+            elif self._steer_guard_verdict is not None and any(self._steer_guard_verdict):
+                logger.info("Controller: STEER GUARD clear again (shadow, ADR 176): %s",
+                            verdict.log_text())
+            self._steer_guard_verdict = now_verdict
+
     def _map_climb_wanted(self) -> bool:
         service = getattr(self, "_terrain_service", None)
         try:
@@ -2020,6 +2131,21 @@ class Controller:
                 self._round_note("agree_arm_" + arm, time.time())
             except Exception as exc:
                 log_suppressed(logger, "agreement_trial_note", exc)
+
+    def gun_aim_new_round(self) -> None:
+        """A round has started: draw Design 021 Phase 3's arm for it, log it,
+        and tag the round for the summary (as ADR 172 does)."""
+        trial = getattr(self, "_ring_aim_trial", None)
+        arm = trial.new_round() if trial is not None else None
+        if arm is None:
+            return
+        logger.info("GUNAIM TRIAL: round %d — %s arm (Design 021 Phase 3, share %.2f)",
+                    trial.rounds, arm, trial.share)
+        if self._round_note is not None:
+            try:
+                self._round_note("gun_arm_" + arm, time.time())
+            except Exception as exc:
+                log_suppressed(logger, "gun_aim_trial_note", exc)
 
     def _agreement_breaks_holdoff(self, objective: "str | None") -> bool:
         """Code Review 019 cycle 25: whether two agreeing terrain warnings set aside
@@ -2659,6 +2785,7 @@ class Controller:
         self.release_pitch_hold(why=why)
         self.release_gun_hold(why=why)
         self._rearm_afterburner(False)
+        self._rearm_airbrake(False)
         self._pitch_last_sample = None
 
     # A climb-out started at the pass is this rearm's: the count that shows the
@@ -2677,7 +2804,7 @@ class Controller:
         if not yielding:
             self.release_roll_hold(why="rearm climb-out")
             self.hold_pitch_for_icon("up", "rearm climb-out")
-            self._rearm_afterburner(True)
+            self._rearm_climb_throttle(True)
         return time.time() + self._resupply_rearm_climb_s
 
     # The approach brake's switch for each objective it can brake for.
@@ -2846,6 +2973,61 @@ class Controller:
             return None, None
         return float(snap.speed.value), snap.speed.ts
 
+    def _rearm_climb_dive(self) -> bool:
+        """ADR 159 for the rearm climb-out: True while the path is a dive the
+        emergency climb would brake, steeper than ``emergency_airbrake_below_deg``
+        or below level at ``emergency_airbrake_above_kph`` or more (held down to
+        the release speed). An unknown angle keeps the current state.
+
+        2026-11-08, logs of 11-01 to 11-08: a climb-out started in a dive steeper
+        than -20 deg was followed by a crash 18% of the time (-20 to -40, n=62) and
+        28% (steeper, n=18) when the pass started it, against 4% from a shallower
+        path; it lit the afterburner at once. Stormbreak, 00:19:28.9: from -42 deg
+        and 826 KPH, with the approach brake just let go, the nose went on to -61
+        deg under nose-up and afterburner before the emergency climb braked."""
+        if self._analyzer is None:
+            return False
+        try:
+            snap = self._analyzer.get_telemetry()
+        except Exception:
+            return self._rearm_brake_held
+        angle = snap.pitch_angle_deg() if snap is not None else None
+        if angle is None:
+            return self._rearm_brake_held
+        if angle >= 0:
+            return False
+        limit = self._climb_brake_below_deg
+        if limit is not None and angle < float(limit):
+            return True
+        above, release = self._climb_brake_above_kph, self._climb_brake_release_kph
+        speed = snap.speed.value if snap.speed_fresh() else None
+        if above is None or speed is None:
+            return False
+        if self._rearm_brake_held and release is not None:
+            return speed > float(release)
+        return speed >= float(above)
+
+    def _rearm_climb_throttle(self, climbing_out: bool) -> None:
+        """The climb-out's throttle: the airbrake in a dive the emergency climb
+        would brake (`_rearm_climb_dive`), else the afterburner. The burner comes
+        down before the airbrake goes up (ADR 137: they cancel each other)."""
+        brake = climbing_out and self._rearm_climb_dive()
+        self._rearm_afterburner(climbing_out and not brake)
+        self._rearm_airbrake(brake)
+
+    def _rearm_airbrake(self, hold: bool) -> None:
+        """The climb-out's hold on the airbrake (owner `rearm_climb`, which yields
+        to a takeover and to the emergency climb)."""
+        if hold and self._may_hold_key(AIRBRAKE_KEY, requester="rearm_climb"):
+            if not self._rearm_brake_held:
+                self._climb_key(AIRBRAKE_KEY, press=True, action="rearm_climb")
+                self._rearm_brake_held = True
+                logger.info("RESUPPLY: rearm climb-out in a steep or fast dive: airbrake "
+                            "on, afterburner off (ADR 159)")
+        elif self._rearm_brake_held:
+            self._climb_key(AIRBRAKE_KEY, press=False, action="rearm_climb")
+            self._rearm_brake_held = False
+
     def _rearm_afterburner(self, hold: bool) -> None:
         """The rearm climb-out's lease on the afterburner: taken and renewed
         while `hold`, given back otherwise. The key is leased (ADR 151), so
@@ -2876,19 +3058,168 @@ class Controller:
         release_tracking_holds."""
         if not self._pursuit_gun_on_centre:
             return
-        limit = self._pursuit_gun_centre_err * (
-            self._GUN_RELEASE_FACTOR if self._gun_held_since is not None else 1.0)
-        centred = (bool(visible) and err is not None and err_y is not None
-                   and abs(err) <= limit and abs(err_y) <= limit)
-        if centred and self._gun_held_since is None:
+        factor = self._GUN_RELEASE_FACTOR if self._gun_held_since is not None else 1.0
+        ring_px = self._ring_aim_px
+        if ring_px is not None:
+            # Design 021 Phase 3: while the chase aims at the lead ring, the gun
+            # holds while the ring is within fire_px of the crosshair.
+            centred = bool(visible) and ring_px <= self._ring_fire_px * factor
+        else:
+            limit = self._pursuit_gun_centre_err * factor
+            centred = (bool(visible) and err is not None and err_y is not None
+                       and abs(err) <= limit and abs(err_y) <= limit)
+        # Operator, 2026-11-13: only under gun_max_range_km, read off the
+        # tracked nameplate. No fresh reading of this nameplate is out of range.
+        in_range, rng = True, ""
+        if self._target_range is not None:
+            reading = self._target_range.latest(self._gun_cluster, self._gun_range_max_age_s)
+            km = reading.km if reading is not None else None
+            in_range = km is not None and km < self._gun_max_range_km
+            rng = (" range=%.2fkm" % km if km is not None else " range=none")
+        if centred and in_range and self._gun_held_since is None:
             self._press_tracking_key(FIRE_MACHINE_GUN, "pursuit_gun")
             self._gun_held_since = time.time()
-            logger.debug("HOLD[gun]: None -> fire (target centred err=%+.3f err_y=%+.3f)",
-                         err, err_y)
-        elif not centred and self._gun_held_since is not None:
+            if self._gun_damage is not None:
+                self._gun_damage.burst_open(
+                    km if self._target_range is not None else None, self._gun_ring_px,
+                    arm=self._ring_aim_trial.arm,
+                    aim="ring" if ring_px is not None else "marker")
+            if ring_px is not None:
+                logger.debug("HOLD[gun]: None -> fire (ring on the crosshair ring_px=%.0f%s)",
+                             ring_px, rng)
+            else:
+                logger.debug("HOLD[gun]: None -> fire (target centred err=%+.3f err_y=%+.3f%s)",
+                             err, err_y, rng)
+        elif not (centred and in_range) and self._gun_held_since is not None:
             self.release_gun_hold(
                 why="target lost" if not visible or err is None or err_y is None
-                else "off centre err=%+.3f err_y=%+.3f" % (err, err_y))
+                else ("ring off the crosshair ring_px=%.0f" % ring_px if ring_px is not None
+                      else "off centre err=%+.3f err_y=%+.3f" % (err, err_y)) if not centred
+                else "out of range" + rng)
+
+    def _gun_lead_shadow(self, frame, obs: dict, picture_ts: float) -> None:
+        """Design 021 Phase 1 (shadow): look for the lead ring around the tracked
+        marker while the target reads under search_max_km, and have the range
+        reader's worker read the damage text while a burst is open or settling.
+        Logs only; its failure must not cost the steering tick."""
+        if self._lead_ring is None:
+            return
+        try:
+            self._gun_ring_px = None
+            self._lead_km = None
+            if obs.get("visible") and self._gun_cluster is not None:
+                reading = self._target_range.latest(self._gun_cluster,
+                                                    self._gun_range_max_age_s)
+                self._lead_km = reading.km if reading is not None else None
+                if reading is not None and reading.km < self._lead_search_max_km:
+                    ring = self._lead_ring.observe(
+                        frame, (obs["centroid_x"], obs["centroid_y"]), reading.km,
+                        picture_ts, self._gun_held_since is not None)
+                    if ring is not None:
+                        self._gun_ring_px = self._lead_ring.cross_px(frame.shape, ring)
+                    # Phase 3's measure: how often the ring sits on the crosshair
+                    # under 1.2 km, by arm; each picture once.
+                    if reading.km < 1.2 and picture_ts != self._ring_tally_ts:
+                        self._ring_tally_ts = picture_ts
+                        tally = self._ring_on_tally.setdefault(
+                            self._ring_aim_trial.arm or "off", [0, 0])
+                        tally[0] += 1
+                        tally[1] += (self._gun_ring_px is not None
+                                     and self._gun_ring_px * 1200.0 / frame.shape[0]
+                                     <= self._ring_fire_px)
+            if self._gun_damage is not None:
+                if self._gun_damage.reading_wanted():
+                    self._target_range.submit_damage(frame)
+                self._gun_damage.tick()
+        except Exception as exc:
+            log_suppressed(logger, "gun_lead_shadow", exc)
+
+    def _own_travel_px(self, frame_shape):
+        """For TargetProjection: how far the chase's own keys moved the marker
+        between two pictures, px on x and y (the hold models' key history, rate
+        and lag; zero on an axis without a model)."""
+        h, w = frame_shape[:2]
+
+        def travel(t0: float, t1: float) -> "tuple[float, float]":
+            out = []
+            for axis, half in (("roll", w / 2.0), ("pitch", h / 2.0)):
+                model = self._hold_models.get(axis)
+                out.append(0.0 if model is None else model.rate_per_s * model.key_time(
+                    t0 - model.lag_s, t1 - model.lag_s) * half)
+            return out[0], out[1]
+        return travel
+
+    def _target_projection_shadow(self, frame, obs: dict, picture_ts: float) -> None:
+        """Design 021 Phase 5 (shadow): project where the tracked target is
+        going, put the point on the observation for the HUD (`projection`), and
+        log it with its miss against the game's ring when the ring is in the
+        picture. Its failure must not cost the steering tick."""
+        tp = self._target_projection
+        if tp is None:
+            return
+        try:
+            if not obs.get("visible") or self._gun_cluster is None:
+                tp.reset()
+                return
+            reading = self._target_range.latest(self._gun_cluster, self._gun_range_max_age_s)
+            proj = tp.update((obs["centroid_x"], obs["centroid_y"]), picture_ts,
+                             reading.km if reading is not None else None,
+                             frame.shape[0], self._own_travel_px(frame.shape))
+            if proj is None:
+                return
+            obs["projection"] = proj
+            if picture_ts == self._projection_logged_ts:
+                return                              # the same picture again
+            self._projection_logged_ts = picture_ts
+            ring = (self._lead_ring.seen_at(picture_ts)
+                    if self._lead_ring is not None else None)
+            miss = None
+            if ring is not None:
+                miss = math.hypot(ring.x - proj.x, ring.y - proj.y) * 1200.0 / frame.shape[0]
+                self._projection_misses.append(miss)
+            logger.debug(
+                "TARGETPROJ: at=(%.0f,%.0f) marker=(%.0f,%.0f) v=(%+.0f,%+.0f)px/s "
+                "km=%.2f ring_miss=%s", proj.x, proj.y, obs["centroid_x"],
+                obs["centroid_y"], proj.vx, proj.vy, proj.km,
+                "-" if miss is None else "%.0f" % miss)
+        except Exception as exc:
+            log_suppressed(logger, "target_projection_shadow", exc)
+
+    def _ring_aim(self, frame, visible, picture_ts: float
+                  ) -> "tuple[float, float] | None":
+        """Design 021 Phase 3 (D4): in a `ring` round, the steering error of the
+        lead ring against the crosshair, in the tracker's half-frame units, while
+        a ring of this target was confirmed within ring_memory_s; None otherwise,
+        and the chase steers at the marker as before. Sets `_ring_aim_px` for the
+        fire rule. Its failure must not cost the steering tick."""
+        if self._lead_ring is None:
+            return None
+        aim = None
+        try:
+            # Rev 2: only where the game draws the ring. Past it, the shape
+            # match can take an objective's dashed circle for one (19:53).
+            if (visible and self._ring_aim_trial.arm == "ring"
+                    and self._lead_km is not None
+                    and self._lead_km < self._ring_steer_max_km):
+                frame_shape = frame.shape
+                ring = self._lead_ring.aim_ring(picture_ts, self._ring_memory_s,
+                                                self._ring_min_dots)
+                if ring is not None:
+                    h, w = frame_shape[:2]
+                    cx, cy = crosshair(frame_shape, self._lead_ring.crosshair_pct)
+                    aim = (max(-1.0, min(1.0, (ring.x - cx) / (w / 2.0))),
+                           max(-1.0, min(1.0, (ring.y - cy) / (h / 2.0))))
+                    self._ring_aim_px = math.hypot(ring.x - cx, ring.y - cy) * 1200.0 / h
+        except Exception as exc:
+            log_suppressed(logger, "ring_aim", exc)
+            aim = None
+        if aim is None:
+            self._ring_aim_px = None
+        if (aim is not None) != self._ring_aim_was:
+            self._ring_aim_was = aim is not None
+            logger.debug("GUNAIM: %s", "ring (ring_px=%.0f)" % self._ring_aim_px
+                         if aim is not None else "marker")
+        return aim
 
     def release_gun_hold(self, why: str = "release") -> None:
         """Release the machine gun if the pursuit is holding it; no-op
@@ -2897,6 +3228,8 @@ class Controller:
             return
         held = time.time() - self._gun_held_since
         self._gun_held_since = None
+        if self._gun_damage is not None:
+            self._gun_damage.burst_close()
         self._gun_fired_s += held
         self._release_tracking_key(FIRE_MACHINE_GUN, "pursuit_gun")
         logger.debug("HOLD[gun]: fire -> None after %.1fs (%s)", held, why)
@@ -4884,6 +5217,20 @@ class Controller:
                         visible = obs.get("visible")
                         err = obs.get("error_norm")
                         err_y = obs.get("error_norm_y")
+                        # The gun's range gate reads the tracked nameplate's
+                        # range on its own thread (operator, 2026-11-13).
+                        self._gun_cluster = obs.get("cluster") if visible else None
+                        if self._target_range is not None and self._gun_cluster is not None:
+                            self._target_range.submit(frame, self._gun_cluster, picture_ts)
+                        self._gun_lead_shadow(frame, obs, picture_ts)
+                        self._target_projection_shadow(frame, obs, picture_ts)
+                        # Design 021 Phase 3 (D4): in a `ring` round, with a ring
+                        # of this target in view, the chase and the gun take
+                        # their error from the ring against the crosshair. Every
+                        # rule that outranks the chase acts on it as on the marker.
+                        ring_aim = self._ring_aim(frame, visible, picture_ts)
+                        if ring_aim is not None:
+                            err, err_y = ring_aim
                         # ADR 148: while a hard-emergency climb is flying the airframe
                         # (a dive the chase followed, or a search roll that spiralled),
                         # the chase writes neither axis: the recovery is the only writer,
@@ -5248,8 +5595,9 @@ class Controller:
                             else:
                                 rearm_climb_until = 0.0
                                 self.release_pitch_hold(why="rearm climb-out over")
-                        # The afterburner is held with the nose-up and let go with it.
-                        self._rearm_afterburner(climbing_out)
+                        # The afterburner is held with the nose-up and let go with it,
+                        # or the airbrake in a steep or fast dive (ADR 159).
+                        self._rearm_climb_throttle(climbing_out)
                         # ADR 171: not before the climb-out is over. The resupply
                         # point sits near terrain, and that nose-up is what pulls
                         # the aircraft away from it (operator, 2026-10-02).
@@ -5442,6 +5790,8 @@ class Controller:
                                                       or wings_level):
                                     self._search_look_down()
                         self._pursuit_gun_tick(control_visible, err, err_y)
+                        # ADR 176 (shadow): what the map says about the command just held.
+                        self._steer_guard_shadow()
                         if icon_state is not None:
                             try:
                                 act = "level" if wings_level else "-"
@@ -5693,6 +6043,13 @@ class Controller:
                                 and not (self._resupply_priority_actuate
                                          and missile_priority.empty)):
                             self.fire_active_weapon(hold_seconds=0.1, block=False, ignore_cancel=True)
+                        # Design 021: a missile left the rail when the count fell.
+                        # The 'f' key is pressed about once a second whether or not
+                        # one launches (990 presses in the first 4 minutes live),
+                        # so the press would mark nearly every gun burst mixed.
+                        if (self._gun_damage is not None and ammo is not None
+                                and last_ammo is not None and ammo < last_ammo):
+                            self._gun_damage.missile_fired()
                         last_health, last_ammo, last_flares = health, ammo, flares
                         # With the pursuit's own view the HUD is drawn above, from the
                         # picture the view was taken on. This render is the fallback
@@ -6804,7 +7161,8 @@ class Controller:
             # ADR 174 revision 2: the map sees the ground ahead rising faster than
             # the path climbs (a canyon wall), so its climb is not refused here.
             if _path is not None and _path >= 0.0 and self._map_climb_wanted():
-                logger.info("Controller: crash recovery starts on a climbing path (%+.0f deg) — "
+                # Not "starts": the objective hold-off below can still hold it.
+                logger.info("Controller: crash recovery allowed on a climbing path (%+.0f deg) — "
                             "the map's ground rises faster (ADR 174)", _path)
             elif _path is not None and _path >= 0.0:
                 now = time.time()
@@ -6831,6 +7189,14 @@ class Controller:
                             "pull-out would bottom out at %.0f m (HLDD 001 part 2)",
                             _objective, self._pullout_lowest_m)
                 _objective = None
+            if _objective is not None and self._map_climb_wanted():
+                # ADR 174: every map climb held off is logged, unthrottled, so the trade
+                # (a pickup or a kill against a crash) can be counted. 2026-11-08 19:36:53
+                # and 19:38:16, Stormbreak: two held off for the resupply marker, both
+                # crashed 4 to 7 s later. The throttled line below logged one in four.
+                logger.info("Controller: map climb held off — the pursuit has the %s in view "
+                            "(ADR 174)", _objective)
+                return
             if _objective is not None:
                 now = time.time()
                 if now - self._recovery_held_log_ts >= 10.0:
@@ -9872,6 +10238,29 @@ class Controller:
                 self._path_perception.stop(timeout=0.5)
             except Exception as exc:
                 log_suppressed(logger, "clear_path_stop", exc)
+        if self._lead_ring is not None:
+            try:
+                logger.info("LEADRING: %s", self._lead_ring.summary())
+                if self._ring_on_tally:
+                    logger.info("GUNAIM: ring within %.0f px under 1.2 km: %s", self._ring_fire_px,
+                                "; ".join("%s arm %d of %d pictures" % (a, t[1], t[0])
+                                          for a, t in sorted(self._ring_on_tally.items())))
+                if self._projection_misses:
+                    _m = sorted(self._projection_misses)
+                    logger.info(
+                        "TARGETPROJ: %d pictures with the ring: miss median %.0f px, "
+                        "%d within 40 px, %d within 80 px", len(_m), _m[len(_m) // 2],
+                        sum(1 for v in _m if v <= 40), sum(1 for v in _m if v <= 80))
+                if self._gun_damage is not None:
+                    self._gun_damage.flush()
+                    logger.info("GUNHIT: %s", self._gun_damage.summary())
+            except Exception as exc:
+                log_suppressed(logger, "gun_lead_summary", exc)
+        if self._target_range is not None:
+            try:
+                self._target_range.stop(timeout=0.5)
+            except Exception as exc:
+                log_suppressed(logger, "target_range_stop", exc)
         if self._depth_perception is not None:
             try:
                 self._depth_perception.stop(timeout=1.0)

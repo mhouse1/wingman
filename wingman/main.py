@@ -435,37 +435,54 @@ def _wait_for_tick_telemetry(analyzer, ammo_events, since_ts: float, wait_s: flo
     return True
 
 
+def _pick_card_then_commit(ctrl, analyzer, logger, pick_crop: str, commit_crop: str,
+                           what: str, delay_s: float = CHOOSE_REWARDS_ACCEPT_DELAY_S):
+    """Click a card on a choice overlay, then its commit button `delay_s` later.
+
+    The button is inert until a card is chosen, so the two clicks are ordered.
+    The second runs from a thread so the main loop is not held, and is dropped
+    if the game has moved on. Returns the thread, or None when a crop is
+    missing and nothing was clicked.
+    """
+    missing = [name for name in (pick_crop, commit_crop) if name not in analyzer.crops]
+    if missing:
+        logger.warning("Stall recovery: %s not calibrated — the %s is left "
+                       "for the operator", " and ".join(missing), what)
+        return None
+    ctrl.click_crop(analyzer.crops[pick_crop], block=False, count=1, region_name=pick_crop)
+
+    def _commit():
+        time.sleep(delay_s)
+        if analyzer.game_state not in _CHOOSE_REWARDS_STATES:
+            logger.debug("%s suppressed — state is %s", commit_crop, analyzer.game_state)
+            return
+        ctrl.click_crop(analyzer.crops[commit_crop], block=False, count=1,
+                        region_name=commit_crop)
+
+    thread = threading.Thread(target=_commit, daemon=True)
+    thread.start()
+    return thread
+
+
 def _choose_middle_reward(ctrl, analyzer, logger,
                           delay_s: float = CHOOSE_REWARDS_ACCEPT_DELAY_S):
     """Anomaly 006: take the middle reward on the CHOOSE REWARDS overlay.
 
     Operator, 2026-10-02: "it should always choose the reward in the middle of
-    the screen then accept". Clicks the middle card now and SELECT ONE after
-    `delay_s`, from a thread so the main loop is not held; the second click is
-    dropped if the game has moved on. Returns the thread, or None when a crop
-    is missing and nothing was clicked.
+    the screen then accept".
     """
-    missing = [name for name in ("STALL_CHOOSE_REWARDS_PICK", "STALL_CHOOSE_REWARDS_ACCEPT")
-               if name not in analyzer.crops]
-    if missing:
-        logger.warning("Stall recovery: %s not calibrated — the reward is left "
-                       "for the operator", " and ".join(missing))
-        return None
-    ctrl.click_crop(analyzer.crops["STALL_CHOOSE_REWARDS_PICK"], block=False,
-                    count=1, region_name="STALL_CHOOSE_REWARDS_PICK")
+    return _pick_card_then_commit(ctrl, analyzer, logger, "STALL_CHOOSE_REWARDS_PICK",
+                                  "STALL_CHOOSE_REWARDS_ACCEPT", "reward", delay_s)
 
-    def _accept():
-        time.sleep(delay_s)
-        if analyzer.game_state not in _CHOOSE_REWARDS_STATES:
-            logger.debug("CHOOSE REWARDS accept suppressed — state is %s",
-                         analyzer.game_state)
-            return
-        ctrl.click_crop(analyzer.crops["STALL_CHOOSE_REWARDS_ACCEPT"], block=False,
-                        count=1, region_name="STALL_CHOOSE_REWARDS_ACCEPT")
 
-    thread = threading.Thread(target=_accept, daemon=True)
-    thread.start()
-    return thread
+def _give_parts_to_second_jet(ctrl, analyzer, logger,
+                              delay_s: float = CHOOSE_REWARDS_ACCEPT_DELAY_S):
+    """Anomaly 004: the SELECT AN AIRCRAFT TO RECEIVE PARTS overlay.
+
+    Operator, 2026-11-10: "select the 2nd jet and click CONFIRM".
+    """
+    return _pick_card_then_commit(ctrl, analyzer, logger, "STALL_PARTS_PICK",
+                                  "STALL_PARTS_CONFIRM", "parts choice", delay_s)
 
 
 def _alive_transition_disposition(state, alive_after_observed_death: bool) -> str:
@@ -1424,6 +1441,16 @@ def main():
             _choose_middle_reward(ctrl, analyzer, logger)
             return
 
+        if crop == "STALL_PARTS_SELECT":
+            # Anomaly 004. Not a dismiss: this assigns the parts, on the
+            # operator's rule of 2026-11-10 (the second jet, then CONFIRM).
+            # Only reached once the liveness guard reports a stall.
+            logger.warning(
+                "\033[93m🔧 Stall recovery: '%s' — giving the parts to the second "
+                "jet, then CONFIRM (state=%s)\033[0m", crop, current.name)
+            _give_parts_to_second_jet(ctrl, analyzer, logger)
+            return
+
         if crop == "STALL_AIRCRAFT":
             # Unchanged (ADR 084): no adjacent destructive button, ESC works.
             logger.warning("\033[93m🔧 Stall recovery: '%s' — pressing ESC (state=%s)\033[0m",
@@ -1853,7 +1880,8 @@ def main():
                         liveness.note_progress("OCR")
                 except Exception:
                     pass
-                liveness.check()
+                # Anomaly 004: the parts dialog waits for this stall.
+                analyzer.note_liveness_stall(liveness.check())
             # ADR 090: the Performance 008 leak is unfixed and degrades
             # perception continuously — OCR p95 crosses the tick budget at
             # ~hour 3, the median at ~hour 6. A SAFE POINT is the lobby with no

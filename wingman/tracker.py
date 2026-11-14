@@ -395,6 +395,9 @@ class TargetTracker:
             "centroid_y": self._last_y,
             "error_norm": error_norm,
             "error_norm_y": error_norm_y,
+            # The chosen nameplate's glyph centre, absolute, this tick only:
+            # where the gun's range gate reads the range (target_range.py).
+            "cluster": rm_probe["cluster"] if selected is not None else None,
         }
 
     def detect_padlock_off(self, frame: np.ndarray) -> bool:

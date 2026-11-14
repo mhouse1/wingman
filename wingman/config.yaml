@@ -354,19 +354,28 @@ crops:
     text: [RETRY]
   # Anomaly 004 (2026-09-13): "SELECT AN AIRCRAFT TO RECEIVE PARTS" overlay
   # opened over the lobby on a normal round-end, unprompted by any wingman
-  # click — same blackout shape as STALL_PROFILE, different screen. Detect
-  # + click are the same crop (like STALL_RETRY): CONFIRM is both the
-  # overlay's own label and a real button, so clicking it does not risk
-  # firing on a label-only text the way STALL_PROFILE's title would.
-  # Coordinates measured directly from the archived reference frame
-  # (pixel color thresholding around the button, not estimated).
-  #
-  # NOT wired into auto-recovery (see analyzer.py comment) — CONFIRM only
-  # commits once an aircraft is selected (verified live 2026-09-13:
-  # clicking an aircraft card auto-assigns it all 100/100 parts; CONFIRM
-  # then turns from grey to white/active). Which of the operator's owned
-  # aircraft gets the parts is a real decision, so this crop is calibrated
-  # for detection/future use, not autonomous action.
+  # click — same blackout shape as STALL_PROFILE, different screen. CONFIRM
+  # only commits once an aircraft card is clicked (verified live 2026-09-13:
+  # the card takes all the parts and CONFIRM turns from grey to white).
+  # Operator, 2026-11-10 (tests/test-output/screenshot_20261110_190158.png,
+  # kept as test_screenshots/STALL_PARTS_SELECT.png): "select the 2nd jet and
+  # click CONFIRM". STALL_PARTS_SELECT is the title (detection), _PICK the
+  # second card, _CONFIRM the button. The four cards sit at the same place on
+  # every archived frame (2026-09-13, 11-04, 11-09, 11-10, all 1920x1200):
+  # the first ends at x 524 px, the second spans 541 to 981 and y 485 to 787.
+  # _PICK is the middle of the second card, 200 px clear of its sides.
+  # Operator, 2026-11-13: act only once the liveness guard reports a stall
+  # (liveness_guard.stall_limit_s), so an operator who is present picks first.
+  # With the liveness guard disabled the dialog is never handled.
+  STALL_PARTS_SELECT:
+    coords:
+    - [0.26, 0.165]
+    - [0.92, 0.23]
+    text: [RECEIVEPARTS, SELECTANAIRCRAFT]
+  STALL_PARTS_PICK:
+    coords:
+    - [0.33, 0.44]
+    - [0.46, 0.62]
   STALL_PARTS_CONFIRM:
     coords:
     - [0.4188, 0.8067]
@@ -1745,8 +1754,9 @@ pursuit_mode:
     # median 4.6 s after the marker was last seen, the first count above zero
     # 1.5 s after it; in the 3.5 s after the confirmation the aircraft gained a
     # median 11 m, and 18 of the 52 were followed by a respawn within 30 s. In 70
-    # spells with every rack empty no count above zero went back to zero. A count
-    # over 8 is not taken as the sign (resupply.REARM_SIGN_MAX_COUNT).
+    # spells with every rack empty no count above zero went back to zero. Only a
+    # count of 2, 4 or 6 is taken as the sign (resupply.REARM_SIGN_COUNTS): first
+    # reads of 8 started 28 climb-outs over 11-01 to 11-09 and none was confirmed.
     rearm_climb_s: 3.0
     # Operator, 2026-10-13: "it just missed the resupply". The steering deadband
     # while the resupply marker has the steering, in half-frames on both axes
@@ -1945,6 +1955,52 @@ pursuit_mode:
   # Named guess; false turns it off.
   gun_on_centre: true
   gun_centre_err: 0.05
+  # Operator, 2026-11-13: "machine gun activation should only be allowed when the
+  # target distance is less than 2km away". The range is read off the tracked
+  # target's nameplate ("1.3km") on a worker thread (wingman/target_range.py,
+  # logged as GUNRANGE:). The gun opens only on a reading under gun_max_range_km
+  # of the nameplate being tracked, at most gun_range_max_age_s old; no reading
+  # means no gun. 0 turns the range gate off (the centre test alone, as before).
+  gun_max_range_km: 2.0
+  gun_range_max_age_s: 1.5
+  # Design 021 Phase 1 (shadow, 2026-11-13): the lead ring the game draws ahead
+  # of a close target, and the "NN DMG" text by the crosshair, read and logged
+  # (LEADRING:, GUNHIT:). Nothing flies on them yet. Measured on 12 operator
+  # frames: the ring is found at the right pixel in 11 of 11 at 0.50 to 0.69;
+  # a dashed padlock crosshair scored 0.49, so the shadow logs from 0.45 with
+  # the score. The crosshair centre: x 959.5, y 604.5 to 612 (median 609.75)
+  # at 1920x1200.
+  gun_lead:
+    enabled: true
+    search_max_km: 2.0
+    search_px: 450
+    min_score: 0.45
+    crosshair_pct: [0.4997, 0.508]
+    # Design 021 Phase 3: half the rounds, drawn per round, steer the crosshair
+    # onto the lead ring and fire while it is within fire_px of it; the other
+    # half steer at the marker and fire on today's rule.
+    steer_share: 0.5
+    fire_px: 40
+    # 0.45 s spans one missed picture: confirmed rings 60% of the time follow
+    # each other within 0.26 s, 70% within 0.42 s (2026-11-13, 196 gaps).
+    ring_memory_s: 0.45
+    # 85% of 254 confirmed rings had 2 or more of the 4 dots (2026-11-13).
+    ring_min_dots: 2
+    # Rev 2 (2026-11-13 19:53): a ring round steered for 0.7 s on control point
+    # A's red dashed circle, matched as a ring at 1.9 km (score 0.48, by eye on
+    # the crop). The game draws the ring at about 1.1 km and under; all five
+    # matches scoring under 0.50 past 1.2 km sat 223 to 357 px from the marker,
+    # the two under 1.0 km (real rings) 38 to 40 px.
+    steer_max_km: 1.2
+  # Design 021 Phase 5 (shadow): where the tracked target is going, drawn on
+  # live_hud.png as PROJ and logged as TARGETPROJ. Nothing flies on it. The
+  # three values are the fit on 630 ring sightings of 2026-11-13: the marker's
+  # motion with the chase's own keys taken out, times the range.
+  target_projection:
+    enabled: true
+    lead_s_per_km: [0.51, 0.37]
+    offset_px: [14, 4]
+    smooth_s: 0.4
   # mission_su30 (now mission_acs) no longer presses SWITCH_WEAPON at step 2 (operator,
   # 2026-09-24: "not switch weapons until it runs out"; ADR 144 D4). Its
   # pursuit hand-off defers the switch until the selected weapon's ammo has
@@ -2274,6 +2330,9 @@ telemetry:
 # tools/build_all_maps.py (the game closed); all six arenas, 2026-11-07.
 terrain_service:
   enabled: true
+  # Design 020 Phase 7 (ADR 176, shadow): the chase's own pitch and roll command projected
+  # through the height map on every steering tick, logged as STEERGUARD:. Flies nothing yet.
+  steer_guard: {enabled: true, pitch_deg_s: 10, turn_deg_s: 12, decide_s: 3.0, max_fix_age_s: 2.0}
   # The game's map names (MATCH:) to their data. ICEBOUND = arctic-3 and STORMBREAK =
   # seastacks are inferred from the minimaps; a wrong pairing shows as weak-match fixes.
   # Variants share their day geometry (measured: under 0.02% of cells differ); ICEBOUND
@@ -2309,9 +2368,11 @@ terrain_service:
     CRUCIBLE:
       minimap: test_screenshots/terrain/content-2026-10-28_08-50/crucible-day/crucible-minimap.png
       height: test_screenshots/terrain/content-2026-10-28_08-50/crucible-day/crucible-height-16m.npz
+      mpp_at_320px: 21     # zoomed in: 0 fixes at the shared 34, 10 of 12 live grabs at 19-23
     CRUCIBLE NIGHT:
       minimap: test_screenshots/terrain/content-2026-10-28_08-50/crucible-day/crucible-minimap.png
       height: test_screenshots/terrain/content-2026-10-28_08-50/crucible-day/crucible-height-16m.npz
+      mpp_at_320px: 21     # zoomed in: 0 fixes at the shared 34, 10 of 12 live grabs at 19-23
     ICEBOUND:
       minimap: test_screenshots/terrain/content-2026-10-28_08-50/arctic-3-day/arctic-3-minimap.png
       height: test_screenshots/terrain/content-2026-10-28_08-50/arctic-3-day/arctic-3-height-16m.npz
