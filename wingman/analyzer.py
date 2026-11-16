@@ -19,7 +19,9 @@ from .compass import CompassReader
 from .config_schema import schema_default
 from .full_map import FullMapReader
 from .crop_region import CropCoords, get_crop, load_crops, draw_crops
+from .gun_heat import GunHeatReader
 from .special_weapon import SpecialWeaponReader
+from .weapon_name import SelectedWeapon, WeaponNameReader
 from .telemetry import TelemetryProcessor, pitch_band_from_angle_deg
 # CR-018-15: the FSM vocabulary lives in the leaf module .state, so code that
 # needs only these names does not import EasyOCR through this module. Every
@@ -459,6 +461,17 @@ def _hsv_green_digit_mask(frame_bgr):
     return cv2.bitwise_not(upscaled)
 
 
+def _process_weapon_name_region(frame) -> str:
+    """The selected weapon's name on the weapon panel (ADR 180 D1), read at twice
+    the size: at 1x "AIM-9M Sidewinder" read as "AIM-9M Sidewindel" (2026-11-15).
+    Empty when nothing is read."""
+    reader = _get_thread_ocr_reader()
+    if reader is None or frame is None or frame.size == 0:
+        return ""
+    up = cv2.resize(frame, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+    return " ".join(reader.readtext(up, detail=0, paragraph=True, workers=0))
+
+
 def _process_health_region(health_frame, label: str = "health") -> "tuple[int | None, float]":
     """Extract the numeric health value from the health crop via OCR.
 
@@ -848,7 +861,7 @@ _STATE_CROPS: "dict[GameState, set[str]]" = {
     },
     GameState.GAME_BATTLE: {
         "respawn", "incoming", "click_to",
-        "HEALTH", "AMMO_FLARES", "AMMO_MISSILE", "ENEMY_CLOSE_BY",
+        "HEALTH", "AMMO_FLARES", "AMMO_MISSILE", "ENEMY_CLOSE_BY", "WEAPON_NAME",
     },
     GameState.GAME_END_B: {
         "click_to", "FINAL_CONTINUE", "PERF_SCORE", "PERF_KDA",
@@ -1079,6 +1092,19 @@ class GameStateAnalyzer:
         if sw_cfg.get("enabled") is False:
             sw_box = None
         self._special_weapon = SpecialWeaponReader(sw_box, sw_cfg)
+        # ADR 180 D1: the selected weapon's name, sorted by weapon.classes; one
+        # OCR read in flight at a time.
+        w_cfg = config.get("weapon", {}) or {}
+        self._weapon_name = (WeaponNameReader(
+            w_cfg.get("classes") or {},
+            float(w_cfg.get("stale_after_s", schema_default("weapon.stale_after_s"))))
+            if w_cfg.get("enabled", schema_default("weapon.enabled")) else None)
+        self._weapon_name_future = None
+        # ADR 173 D2b: the gun heat bar, for the gun cool-down ability.
+        self._gun_heat = GunHeatReader(
+            None if sw_cfg.get("enabled") is False else self.crops.get("GUN_HEAT"),
+            hot_at=float(sw_cfg.get("gun_heat_at",
+                                    schema_default("special_weapon.gun_heat_at"))))
 
         # Enemy HSV range for red-color detection in ENEMY_CLOSE_BY crop
         enemy_hsv_cfg = config.get("enemy_hsv", {})
@@ -1808,6 +1834,60 @@ class GameStateAnalyzer:
         """ADR 173: True while the special weapon's ring is lit, False when it is
         not, None with no fresh read (outside battle, or no SPECIAL_WEAPON crop)."""
         return self._special_weapon.ready()
+
+    def note_special_weapon_press(self) -> None:
+        """The special weapon was pressed (ADR 173), for the reader's capture."""
+        self._special_weapon.note_press()
+
+    def gun_hot(self) -> "bool | None":
+        """True while the gun heat bar is at `gun_heat_at` (0.8) or more, or red
+        (overheated); False when not; None with no fresh read (ADR 173 D2b)."""
+        return self._gun_heat.hot()
+
+    def _submit_weapon_name(self, executor, full_frame) -> None:
+        """Start a read of the selected weapon's name when none is in flight
+        (ADR 180 D1). Like the telemetry pass, nothing waits on it: its
+        done-callback puts the name in the reader."""
+        if (self._weapon_name is None or self._weapon_name_future is not None
+                or "WEAPON_NAME" not in self.crops):
+            return
+        crop = get_crop(full_frame, *self.crops["WEAPON_NAME"][:4])
+        fut = executor.submit(_process_weapon_name_region, crop)
+        self._weapon_name_future = fut
+        fut.add_done_callback(self._on_weapon_name_done)
+
+    def _on_weapon_name_done(self, fut) -> None:
+        self._weapon_name_future = None
+        try:
+            if not fut.cancelled():
+                self._weapon_name.note_text(fut.result())
+        except Exception as exc:
+            logger.debug("Analyzer: weapon name read failed: %s", exc)
+
+    def selected_weapon(self) -> "SelectedWeapon | None":
+        """The selected weapon (name, class, fire mode) read off the weapon panel,
+        while fresh; None otherwise (ADR 180 D1)."""
+        return None if self._weapon_name is None else self._weapon_name.selected()
+
+    def special_weapon_glyph(self) -> "str | None":
+        """The ability glyph in the special weapon's ring: 'refuel', 'other', or None
+        before two lit reads agree (operator, 2026-11-15)."""
+        return self._special_weapon.glyph()
+
+    def get_afterburner_fuel_reading(self) -> "tuple[int | None, float]":
+        """(percentage, time it was read): the same reading and staleness as
+        get_afterburner_fuel_pct, with its time, so a caller can count readings
+        rather than calls. (None, 0.0) when unknown or stale."""
+        if not self._fuel_lock.acquire(timeout=1.0):
+            logger.warning("get_afterburner_fuel_reading: _fuel_lock timeout")
+            return None, 0.0
+        try:
+            if self._fuel_pct is None or time.time() - self._fuel_ts > self._fuel_stale_after_s:
+                return None, 0.0
+            return self._fuel_pct, self._fuel_ts
+        finally:
+            if self._fuel_lock.locked():
+                self._fuel_lock.release()
 
     def get_afterburner_fuel_pct(self) -> "int | None":
         """Latest afterburner fuel percentage, or None when unknown/stale.
@@ -2979,6 +3059,7 @@ class GameStateAnalyzer:
 
         if self.game_state in BATTLE_STATES:
             self._special_weapon.update(frame)
+            self._gun_heat.update(frame)
 
         # Detect incoming missiles - use cached result from background OCR
         with self._incoming_cache_lock:
@@ -3160,6 +3241,7 @@ class GameStateAnalyzer:
                             and self._telemetry_tick_counter >= self._telemetry_every_n_ticks):
                         self._telemetry_tick_counter = 0
                         self._submit_telemetry(executor, telemetry_frame)
+                    self._submit_weapon_name(executor, full_frame)
                     t2 = time.time()
 
                     # Wait for respawn result first — update its cache immediately so the

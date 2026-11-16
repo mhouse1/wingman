@@ -47,6 +47,10 @@ from wingman.config_schema import ConfigError, assert_valid_config, schema_defau
 CONFIG = REPO / "wingman" / "config.yaml"
 STATS_DIRS = (REPO / "docs" / "performance" / "current", REPO / "docs" / "performance" / "release")
 LOGS_DIR = REPO / "logs"
+# The newest session's log, which `make r` writes and the next start rotates into
+# LOGS_DIR. The after-session ingest runs before that rotation, so its resource
+# samples are read from here.
+CURRENT_LOG = REPO / "wingman.log"
 CHANGES = REPO / "grafana" / "changes.yaml"
 SCHEMA = REPO / "grafana" / "schema.sql"
 COMPOSE = REPO / "grafana" / "compose.yaml"
@@ -84,6 +88,25 @@ _JET_NAME_RE = re.compile(r"JET NAME: ([A-Z0-9][A-Z0-9 ./-]*)$")
 _RANKING = "SQUADRON RANKING: rank"
 _RANKING_RE = re.compile(r"SQUADRON RANKING: rank (\d+), trophies ([\d,]+)")
 RANKING_COLUMNS = ("run_id", "read_at", "rank", "trophies", "tags")
+# ResourceSampler's lines (wingman/resource_monitor.py, Performance 008): one
+# `RESOURCE elapsed=…` line per interval, the session-end `RESOURCE SUMMARY`
+# block with its `  VERDICT:` line, and STANDBY's malloc_trim line.
+_RESOURCE_RE = re.compile(r"RESOURCE elapsed=(\d+)s (.*)$")
+_PAIR_RE = re.compile(r"(\w+)=(\S+)")
+_SUMMARY = "RESOURCE SUMMARY"
+_VERDICT = "VERDICT: "
+_TRIM_RE = re.compile(r"STANDBY: malloc_trim released (\d+) MB")
+# The sample figures the dashboard keeps, by their name on the line; `load` is
+# split into its three averages.
+RESOURCE_FIGURES = ("rss_mb", "anon_mb", "mi_use_mb", "mi_free_mb", "shmem_mb", "peak_rss_mb",
+                    "swap_mb", "threads", "fds", "ocr_med", "ocr_p95", "n_ocr", "pool_depth",
+                    "game_rss_mb", "game_swap_mb", "sys_swap_mb", "load1", "load5", "load15")
+_FLOAT_FIGURES = {"ocr_med", "ocr_p95", "load1", "load5", "load15"}
+RESOURCE_COLUMNS = ("session_start", "elapsed_s", "at") + RESOURCE_FIGURES
+SESSION_COLUMNS = ("session_start", "run_id", "verdict", "trim_released_mb", "complete", "tags")
+# The token the first psql call prints for each session whose resource samples
+# are loaded from a finished log, so the ingest need not read that log again.
+_COMPLETE_TOKEN = "resource-complete:"
 
 
 @dataclass(frozen=True)
@@ -313,6 +336,109 @@ def rankings_from_log(lines, run_id: str) -> "list[Ranking]":
     return [Ranking(run_id, when, rank, trophies, tags) for when, rank, trophies in readings]
 
 
+@dataclass(frozen=True)
+class ResourceSample:
+    """One row of the `resource_samples` table: a `RESOURCE elapsed=…` line."""
+
+    session_start: datetime
+    elapsed_s: int
+    at: datetime
+    figures: dict = field(default_factory=dict)     # RESOURCE_FIGURES name -> value or None
+
+
+@dataclass(frozen=True)
+class ResourceSession:
+    """One row of the `resource_sessions` table: what a log says of its session
+    besides the samples."""
+
+    session_start: datetime
+    run_id: "str | None" = None
+    verdict: "str | None" = None
+    trim_released_mb: "int | None" = None
+    # True once nothing more can be written to the log: it was rotated, or the
+    # session wrote its run file. A complete session's log is not read again.
+    complete: bool = False
+    tags: dict = field(default_factory=dict)
+
+
+def _figure(name: str, text: str):
+    if text == "n/a":
+        return None
+    try:
+        return float(text) if name in _FLOAT_FIGURES else int(text)
+    except ValueError:
+        return None
+
+
+def _sample_figures(rest: str) -> dict:
+    pairs = dict(_PAIR_RE.findall(rest))
+    loads = pairs.pop("load", "").split("/")
+    loads += ["n/a"] * (3 - len(loads))
+    pairs.update(load1=loads[0], load5=loads[1], load15=loads[2])
+    return {name: _figure(name, pairs.get(name, "n/a")) for name in RESOURCE_FIGURES}
+
+
+def resources_from_log(lines, session_start: datetime, finished: bool = False
+                       ) -> "tuple[list[ResourceSample], ResourceSession | None]":
+    """A log's resource samples, one per `RESOURCE elapsed=…` line at the line's
+    time, and its session row: the run_id and account its run-file line names,
+    the session-end VERDICT, and how much STANDBY's malloc_trim gave back. No
+    session row for a log without a sample. `finished`: the log was rotated, so
+    the session is over even without a run-file line (a killed session)."""
+    samples: "list[ResourceSample]" = []
+    run_id = verdict = trim = None
+    in_summary = False
+    for raw in lines:
+        if ("RESOURCE" not in raw and _VERDICT not in raw and _RUN_FILE not in raw
+                and "malloc_trim" not in raw):
+            continue
+        line = _ANSI_RE.sub("", raw).rstrip("\n")
+        sample = _RESOURCE_RE.search(line)
+        if sample:
+            when = line_time(line)
+            if when is not None:
+                samples.append(ResourceSample(session_start, int(sample.group(1)), when,
+                                              _sample_figures(sample.group(2))))
+            continue
+        if _SUMMARY in line:
+            in_summary = True
+            continue
+        if in_summary and line.lstrip().startswith(_VERDICT):
+            verdict = line.split(_VERDICT, 1)[1].strip()
+            in_summary = False
+            continue
+        named = _RUN_FILE_RE.search(line)
+        if named:
+            run_id = named.group(1)
+            continue
+        trimmed = _TRIM_RE.search(line)
+        if trimmed:
+            trim = int(trimmed.group(1))
+    if not samples:
+        return [], None
+    tags = {"account": account_of(run_id)} if run_id else {}
+    return samples, ResourceSession(session_start, run_id, verdict, trim,
+                                    finished or run_id is not None, tags)
+
+
+def logs_for_resources(rotated, current: "Path | None", complete_starts
+                       ) -> "list[tuple[Path, datetime, bool]]":
+    """(log, its session's start, whether it is finished) for each log whose
+    resource samples may not all be loaded yet: every rotated log whose session is
+    not loaded as complete, and the current log, which is always read."""
+    done = {int(s.timestamp()) for s in complete_starts}
+    found = []
+    for path in rotated:
+        start = log_start(path)
+        if start is not None and int(start.timestamp()) not in done:
+            found.append((path, start, True))
+    if current is not None:
+        start = log_start(current)
+        if start is not None:
+            found.append((current, start, False))
+    return found
+
+
 def log_start(path: Path) -> "datetime | None":
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
@@ -397,11 +523,41 @@ def rankings_csv(rankings) -> str:
     return _csv((r.run_id, r.read_at, r.rank, r.trophies, r.tags) for r in rankings)
 
 
-def load_script(rows_text: str, changes_text: str, rankings_text: str = "") -> str:
+def resources_csv(samples) -> str:
+    """The resource samples as COPY … (FORMAT csv) input, in RESOURCE_COLUMNS order."""
+    return _csv((s.session_start, s.elapsed_s, s.at, *(s.figures.get(n) for n in RESOURCE_FIGURES))
+                for s in samples)
+
+
+def sessions_csv(sessions) -> str:
+    """The resource sessions as COPY … (FORMAT csv) input, in SESSION_COLUMNS order."""
+    return _csv((s.session_start, s.run_id, s.verdict, s.trim_released_mb,
+                 "true" if s.complete else "false", s.tags) for s in sessions)
+
+
+def _upsert(table: str, columns, key: int, text: str) -> str:
+    """COPY `text` into a temporary copy of `table`, then upsert it on the first
+    `key` columns, printing how many rows were new."""
+    cols = ", ".join(columns)
+    updates = ", ".join(f"{c} = EXCLUDED.{c}" for c in columns[key:])
+    return (
+        f"CREATE TEMP TABLE incoming_{table} (LIKE {table} INCLUDING DEFAULTS) ON COMMIT DROP;\n"
+        f"COPY incoming_{table} ({cols}) FROM STDIN WITH (FORMAT csv);\n"
+        f"{text}\\.\n"
+        "WITH loaded AS (\n"
+        f"    INSERT INTO {table} ({cols}) SELECT {cols} FROM incoming_{table}\n"
+        f"    ON CONFLICT ({', '.join(columns[:key])}) DO UPDATE SET {updates}\n"
+        "    RETURNING (xmax = 0) AS inserted)\n"
+        "SELECT count(*) FILTER (WHERE inserted) FROM loaded;\n")
+
+
+def load_script(rows_text: str, changes_text: str, rankings_text: str = "",
+                resources_text: str = "", sessions_text: str = "") -> str:
     """One transaction: the rows into a temporary table, then upserted by (run_id,
     mission_index), which prints how many were new; the squadron readings the
-    same way by (run_id, read_at); the `changes` table replaced by the change
-    log. A round or a reading is never deleted."""
+    same way by (run_id, read_at), the resource samples by (session_start,
+    elapsed_s) and their sessions by session_start; the `changes` table replaced
+    by the change log. A round, a reading or a sample is never deleted."""
     cols = ", ".join(COLUMNS)
     updates = ", ".join(f"{c} = EXCLUDED.{c}" for c in COLUMNS[2:])
     rcols = ", ".join(RANKING_COLUMNS)
@@ -425,7 +581,9 @@ def load_script(rows_text: str, changes_text: str, rankings_text: str = "") -> s
         f"    ON CONFLICT (run_id, read_at) DO UPDATE SET {rupdates}\n"
         "    RETURNING (xmax = 0) AS inserted)\n"
         "SELECT count(*) FILTER (WHERE inserted) FROM loaded;\n"
-        "DELETE FROM changes;\n"
+        + _upsert("resource_samples", RESOURCE_COLUMNS, 2, resources_text)
+        + _upsert("resource_sessions", SESSION_COLUMNS, 1, sessions_text)
+        + "DELETE FROM changes;\n"
         "COPY changes (at, label, ref) FROM STDIN WITH (FORMAT csv);\n"
         f"{changes_text}\\.\n"
         "COMMIT;\n")
@@ -477,10 +635,16 @@ def ingest(dry_run: bool = False, project: "str | None" = None,
 
     known = [s for s in (session_start(str(d.get("run_id", ""))) for d in sessions) if s]
     compose = _compose(project, env_file)
+    complete: "list[datetime]" = []
     if not dry_run:
         out = psql(SCHEMA.read_text(encoding="utf-8")
-                   + "\nSELECT DISTINCT run_id FROM rounds;\n", compose)
-        known += loaded_starts(out.split())
+                   + "\nSELECT DISTINCT run_id FROM rounds;\n"
+                   f"SELECT '{_COMPLETE_TOKEN}' || floor(extract(epoch FROM session_start))::bigint\n"
+                   "FROM resource_sessions WHERE complete;\n", compose)
+        tokens = out.split()
+        known += loaded_starts(t for t in tokens if not t.startswith(_COMPLETE_TOKEN))
+        complete = [datetime.fromtimestamp(int(t[len(_COMPLETE_TOKEN):]), timezone.utc)
+                    for t in tokens if t.startswith(_COMPLETE_TOKEN)]
 
     from_logs = 0
     for path, start in logs_to_rebuild(sorted(LOGS_DIR.glob("wingman_*.log")), known):
@@ -492,6 +656,17 @@ def ingest(dry_run: bool = False, project: "str | None" = None,
         from_logs += bool(log_rows)
         rows.update((r.key, r) for r in log_rows)
 
+    samples: "dict[tuple[datetime, int], ResourceSample]" = {}
+    resource_sessions: "dict[datetime, ResourceSession]" = {}
+    current = CURRENT_LOG if CURRENT_LOG.exists() else None
+    for path, start, finished in logs_for_resources(sorted(LOGS_DIR.glob("wingman_*.log")),
+                                                    current, complete):
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            log_samples, log_session = resources_from_log(fh, start, finished)
+        samples.update(((s.session_start, s.elapsed_s), s) for s in log_samples)
+        if log_session is not None:
+            resource_sessions[start] = log_session
+
     changes = load_changes(CHANGES.read_text(encoding="utf-8"))
     ordered = sorted(rows.values(), key=lambda r: (r.ended_at, r.run_id, r.mission_index))
     read = [r for r in ordered if r.score is not None]
@@ -499,13 +674,19 @@ def ingest(dry_run: bool = False, project: "str | None" = None,
     if not dry_run:
         out = psql(load_script(rounds_csv(ordered), changes_csv(changes),
                                rankings_csv(sorted(rankings.values(),
-                                                   key=lambda r: (r.read_at, r.run_id)))),
+                                                   key=lambda r: (r.read_at, r.run_id))),
+                               resources_csv(sorted(samples.values(),
+                                                    key=lambda s: (s.session_start, s.elapsed_s))),
+                               sessions_csv(sorted(resource_sessions.values(),
+                                                   key=lambda s: s.session_start))),
                    compose)
-        counts = [line for line in out.split() if line.isdigit()] + ["?", "?"]
-        new = f"{counts[0]} new rows, {counts[1]} new squadron readings"
+        counts = [line for line in out.split() if line.isdigit()] + ["?"] * 4
+        new = (f"{counts[0]} new rows, {counts[1]} new squadron readings, "
+               f"{counts[2]} new resource samples")
     print(f"round-scores: {from_stats} sessions from stats files, {from_logs} from logs; "
           f"{len(ordered)} rounds, {len(read)} read, score {sum(r.score for r in read):,}; "
-          f"{len(rankings)} squadron readings; {len(changes)} changes; {new}")
+          f"{len(rankings)} squadron readings; {len(samples)} resource samples from "
+          f"{len(resource_sessions)} sessions; {len(changes)} changes; {new}")
     return 0
 
 

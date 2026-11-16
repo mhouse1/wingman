@@ -378,8 +378,10 @@ def test_a_ring_without_the_dots_to_this_target_is_not_steered_at(monkeypatch):
 
 def test_the_ring_arm_fires_on_the_ring_not_the_marker(monkeypatch):
     """The marker 0.3 off the centre is out of the gun box; the ring on the
-    crosshair opens the gun, and the burst says it opened on the ring."""
+    crosshair opens the gun, and the burst says it opened on the ring.
+    ADR 178 D3, the rule with fire_while_ring_shows off."""
     ctrl, keys, frame = _ring_ctrl(monkeypatch, "ring")
+    ctrl._gun_fire_while_ring = False
     ctrl._ring_aim(frame, True, 1.1)
     ctrl._pursuit_gun_tick(True, 0.3, 0.3)
     assert keys == [("down", FIRE_MACHINE_GUN)]
@@ -396,7 +398,9 @@ def test_the_ring_arm_fires_on_the_ring_not_the_marker(monkeypatch):
 
 
 def test_the_ring_arm_holds_fire_while_the_ring_is_off_the_crosshair(monkeypatch):
+    """ADR 178 D3, the rule with fire_while_ring_shows off (ADR 182 turns it on)."""
     ctrl, keys, frame = _ring_ctrl(monkeypatch, "ring")
+    ctrl._gun_fire_while_ring = False
     # Move the crosshair: the ring is now about 125 px from it.
     ctrl._lead_ring.crosshair_pct = (0.45, 0.45)
     assert ctrl._ring_aim(frame, True, 1.1) is not None
@@ -406,7 +410,9 @@ def test_the_ring_arm_holds_fire_while_the_ring_is_off_the_crosshair(monkeypatch
 
 
 def test_the_marker_arm_fires_on_the_marker_rule(monkeypatch):
+    """ADR 178 D4, with fire_while_ring_shows off (ADR 182 turns it on)."""
     ctrl, keys, frame = _ring_ctrl(monkeypatch, "marker")
+    ctrl._gun_fire_while_ring = False
     ctrl._ring_aim(frame, True, 1.1)
     ctrl._pursuit_gun_tick(True, 0.3, 0.3)
     assert keys == []
@@ -465,12 +471,16 @@ def test_the_gun_summary_splits_by_arm():
     assert "ring arm 1 bursts, 1 gained, 1.0s, 30 dmg" in s
 
 
-def test_the_shared_config_runs_the_phase3_trial_in_half_the_rounds():
+def test_the_shared_config_steers_on_the_ring_and_fires_while_it_shows():
+    """ADR 182 (operator, 2026-11-15): every round steers onto the ring (ADR 178
+    drew half), and the gun holds while the ring shows. Off without the keys."""
     from wingman.config_schema import schema_default
     assert schema_default("pursuit_mode.gun_lead.steer_share") == 0.0
+    assert schema_default("pursuit_mode.gun_lead.fire_while_ring_shows") is False
     cfg = yaml.safe_load((Path(__file__).parents[1] / "wingman" / "config.yaml").read_text())
     gl = cfg["pursuit_mode"]["gun_lead"]
-    assert gl["steer_share"] == 0.5 and gl["fire_px"] == 60
+    assert gl["steer_share"] == 1.0 and gl["fire_while_ring_shows"] is True
+    assert gl["fire_px"] == 60
     assert gl["ring_memory_s"] == 0.45 and gl["ring_min_dots"] == 2
     assert gl["steer_max_km"] == 1.2 == schema_default("pursuit_mode.gun_lead.steer_max_km")
 
@@ -526,6 +536,7 @@ def test_the_shipped_fire_radius_opens_close_and_lets_go_late(monkeypatch):
     assist does the rest). 55 px opens the gun, 89 holds it, 91 lets go."""
     cfg = yaml.safe_load((Path(__file__).parents[1] / "wingman" / "config.yaml").read_text())
     ctrl, keys, frame = _ring_ctrl(monkeypatch, "ring")
+    ctrl._gun_fire_while_ring = False           # ADR 178 D3, before ADR 182
     ctrl._ring_fire_px = float(cfg["pursuit_mode"]["gun_lead"]["fire_px"])
     ctrl._ring_aim(frame, True, 1.1)
     ctrl._ring_aim_px = 55.0
@@ -536,5 +547,167 @@ def test_the_shipped_fire_radius_opens_close_and_lets_go_late(monkeypatch):
     assert keys == [("down", FIRE_MACHINE_GUN)]
     ctrl._ring_aim_px = 91.0
     ctrl._pursuit_gun_tick(True, 0.3, 0.3)
+    assert keys[-1] == ("up", FIRE_MACHINE_GUN)
+    ctrl._target_range.stop()
+
+
+@pytest.mark.parametrize("values,step_max,gun", [
+    # Su-47, 2026-11-14 05:22 (live): read once each, a misread 2204 between.
+    # 162 to 225 to 267 are gun hits (63, 42); 267 to 429 is a missile (162).
+    ([162, 2204, 225, 267, 429, 429, 429, 429], 110, 105),
+    # The same burst under the default limit of 60 keeps only the 42.
+    ([162, 2204, 225, 267, 429, 429, 429, 429], None, 42),
+    # Su-47 bursts with no missile near: steps of 21 to 105, all the gun's.
+    ([21, 42, 42, 63, 147], 110, 126),
+    # A misread above both neighbours is dropped (live: 4433 between 153s).
+    ([98, 109, 131, 153, 4433, 153, 453, 153], None, 55),
+    # Su-47 missile hits alone (155 to 172) are not the gun.
+    ([310, 310, 465, 465], 110, 0),
+])
+def test_rev7_counts_single_readings_against_the_jets_limit(values, step_max, gun):
+    """Rev 7: on the Su-47 the text changed every reading and the gun's steps
+    run to 105, so no gun hit was counted in 77 rounds."""
+    assert gd.gun_gain(values, step_max) == gun
+
+
+def test_the_burst_takes_the_jets_gun_step_from_its_profile(monkeypatch):
+    ctrl, keys, frame = _ring_ctrl(monkeypatch, "ring")
+    ctrl._jet_profiles = {"su47": {"match": "SU-47", "gun_step_max": 110}}
+    ctrl._jet_source = lambda: "SU-47 BERKUT"
+    ctrl._ring_aim(frame, True, 1.1)
+    ctrl._pursuit_gun_tick(True, 0.3, 0.3)
+    assert ctrl._gun_damage._burst.gun_step_max == 110
+    ctrl.release_gun_hold(why="test")
+    ctrl._jet_source = lambda: "MIRAGE MIII"
+    ctrl._pursuit_gun_tick(True, 0.3, 0.3)
+    assert ctrl._gun_damage._burst.gun_step_max is None
+    ctrl._target_range.stop()
+
+
+def test_the_shipped_su47_profile_carries_its_gun_step():
+    from wingman.jet_name import profile_for_jet
+    cfg = yaml.safe_load((Path(__file__).parents[1] / "wingman" / "config.yaml").read_text())
+    profile = profile_for_jet("SU-47 BERKUT", cfg["jet_profile"]["profiles"])
+    assert profile is not None and profile["gun_step_max"] == 110
+
+
+# -- ADR 173 D2c: a gun cool-down jet opens the gun further out -------------------
+
+class _GlyphAnalyzer:
+    def __init__(self, glyph):
+        self.glyph = glyph
+
+    def special_weapon_glyph(self):
+        return self.glyph
+
+
+def _gun_at(monkeypatch, km, glyph):
+    import time
+    ctrl, keys = _make_ctrl(monkeypatch)
+    ctrl._analyzer = _GlyphAnalyzer(glyph)
+    ctrl._gun_cluster = (1, 2, 3, 4)
+    ctrl._target_range._latest = RangeReading(km=km, text=f"{km}km", cluster=ctrl._gun_cluster,
+                                              ts=time.monotonic(), cost_ms=20.0)
+    ctrl._pursuit_gun_tick(True, 0.01, 0.01)
+    ctrl._target_range.stop()
+    return keys
+
+
+def test_a_gun_cooldown_jet_fires_between_two_and_three_km(monkeypatch):
+    """Operator, 2026-11-15: "for aircrafts with this special ability we can
+    activate the machine gun sooner from a further distance"."""
+    assert _gun_at(monkeypatch, 2.6, "gun_cooldown") == [("down", FIRE_MACHINE_GUN)]
+
+
+def test_a_gun_cooldown_jet_still_holds_fire_past_three_km(monkeypatch):
+    assert _gun_at(monkeypatch, 3.2, "gun_cooldown") == []
+
+
+@pytest.mark.parametrize("glyph", [None, "other", "refuel"])
+def test_any_other_jet_keeps_the_two_km_gate(monkeypatch, glyph):
+    assert _gun_at(monkeypatch, 2.6, glyph) == []
+
+
+# -- ADR 182: the gun holds while the lead ring shows ----------------------------
+
+def test_the_gun_holds_while_the_ring_shows_wherever_it_is(monkeypatch, caplog):
+    """Live 2026-11-15 20:12:09.950 (screenshot_20261115_201210): the ring
+    confirmed 38 to 97 px from the crosshair, the marker 0.164 off centre, and
+    the gun let go. Operator: "as long as the gun lead is being displayed it
+    should activate". The ring about 125 px out, the marker 0.3 off: it holds."""
+    ctrl, keys, frame = _ring_ctrl(monkeypatch, "ring")
+    ctrl._gun_fire_while_ring = True
+    ctrl._lead_ring.crosshair_pct = (0.45, 0.45)
+    caplog.set_level(logging.DEBUG, logger="wingman.controller")
+    assert ctrl._ring_aim(frame, True, 1.1) is not None
+    assert 110 <= ctrl._ring_shown_px <= 140
+    ctrl._pursuit_gun_tick(True, 0.3, 0.3)
+    assert keys == [("down", FIRE_MACHINE_GUN)]
+    assert "HOLD[gun]: None -> fire (lead ring showing ring_px=" in caplog.text
+    # Still held over the ring memory, with the marker off centre.
+    ctrl._ring_aim(frame, True, 1.1 + 0.4)
+    ctrl._pursuit_gun_tick(True, 0.3, 0.3)
+    assert keys == [("down", FIRE_MACHINE_GUN)]
+    # The ring gone past ring_memory_s and the marker off centre: lets go.
+    ctrl._ring_aim(frame, True, 1.1 + 0.5)
+    assert ctrl._ring_shown_px is None
+    ctrl._pursuit_gun_tick(True, 0.3, 0.3)
+    assert keys[-1] == ("up", FIRE_MACHINE_GUN)
+    assert "off centre err=+0.300" in caplog.text
+    ctrl._target_range.stop()
+
+
+def test_a_marker_round_fires_on_the_ring_without_steering_on_it(monkeypatch):
+    ctrl, keys, frame = _ring_ctrl(monkeypatch, "marker")
+    ctrl._gun_fire_while_ring = True
+    assert ctrl._ring_aim(frame, True, 1.1) is None          # steers at the marker
+    assert ctrl._ring_shown_px is not None
+    ctrl._pursuit_gun_tick(True, 0.3, 0.3)
+    assert keys == [("down", FIRE_MACHINE_GUN)]
+    ctrl._target_range.stop()
+
+
+def test_the_ring_falls_back_to_the_centre_rule_when_it_goes(monkeypatch):
+    """A centred marker keeps the gun after the ring goes; without the ring the
+    range gate and the centre rule are as before."""
+    ctrl, keys, frame = _ring_ctrl(monkeypatch, "ring")
+    ctrl._gun_fire_while_ring = True
+    ctrl._ring_aim(frame, True, 1.1)
+    ctrl._pursuit_gun_tick(True, 0.3, 0.3)
+    ctrl._ring_aim(frame, True, 1.1 + 0.5)
+    ctrl._pursuit_gun_tick(True, 0.01, 0.01)
+    assert keys == [("down", FIRE_MACHINE_GUN)]
+    ctrl._target_range.stop()
+
+
+@pytest.mark.parametrize("lead_km,visible", [
+    (1.9, True),       # past steer_max_km: an objective's circle (ADR 178 rev 2)
+    (None, True),      # no fresh range reading
+    (0.73, False),     # the target out of view
+])
+def test_a_ring_not_in_use_does_not_open_the_gun(monkeypatch, lead_km, visible):
+    ctrl, keys, frame = _ring_ctrl(monkeypatch, "ring")
+    ctrl._gun_fire_while_ring = True
+    ctrl._lead_km = lead_km
+    ctrl._ring_aim(frame, visible, 1.1)
+    assert ctrl._ring_shown_px is None
+    ctrl._pursuit_gun_tick(visible, 0.3, 0.3)
+    assert keys == []
+    ctrl._target_range.stop()
+
+
+
+def test_the_ring_holds_the_gun_while_a_resupply_run_has_the_steering(monkeypatch):
+    """ADR 182 D6, live 2026-11-15 22:09:38: a resupply run had the steering
+    (the chase's visible is False), the ring of the tracked target confirmed
+    212 and 307 px out, and the gun stayed off. Operator: "yes"."""
+    ctrl, keys, frame = _ring_ctrl(monkeypatch, "ring")
+    ctrl._gun_fire_while_ring = True
+    ctrl._ring_aim(frame, True, 1.1)            # the target in view on the picture
+    ctrl._pursuit_gun_tick(False, None, None)   # the chase does not have the steering
+    assert keys == [("down", FIRE_MACHINE_GUN)]
+    # The ring gone: the chase's rule again, which lets go without the steering.
+    ctrl._ring_aim(frame, True, 1.1 + 0.5)
+    ctrl._pursuit_gun_tick(False, None, None)
     assert keys[-1] == ("up", FIRE_MACHINE_GUN)
     ctrl._target_range.stop()

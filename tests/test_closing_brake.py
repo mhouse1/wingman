@@ -246,7 +246,7 @@ def test_the_shared_config_brakes_in_half_the_rounds():
     assert schema_default("pursuit_mode.closing_brake.share") == 0.0
     cfg = yaml.safe_load((Path(__file__).parents[1] / "wingman" / "config.yaml").read_text())
     cb = cfg["pursuit_mode"]["closing_brake"]
-    assert cb["share"] == 0.5
+    assert cb["share"] == 1.0          # ADR 179 D8: every round, from 2026-11-14
     for key in ("on_km", "on_mps", "off_mps", "max_hold_s", "cooldown_s", "min_kph"):
         assert cb[key] == schema_default("pursuit_mode.closing_brake." + key)
     assert AIRBRAKE_KEY

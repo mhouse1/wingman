@@ -122,9 +122,15 @@ _JET_PROFILE = Section(children={
     # operator, 2026-11-02). Absent: no special-weapon press on this jet.
     "special_weapon": Section(children={
         "ability": STR,
-        "trigger": Leaf(types=(str,), choices=("incoming", "low_flares", "ready")),
+        "trigger": Leaf(types=(str,), choices=("incoming", "low_flares", "low_fuel",
+                                                "gun_heat", "ready")),
         "flares_at": _int(0),
+        # low_fuel: the afterburner fuel percentage at or under which it fires.
+        "fuel_at": _num(0, 100),
     }, required=frozenset({"ability", "trigger"})),
+    # Design 021 hit counter rev 7: the largest rise of the damage text that
+    # is the gun's on this jet. Absent: gun_damage.GUN_STEP_MAX.
+    "gun_step_max": _num(1),
 })
 
 # capture_budget: 0 = unlimited for that dimension.
@@ -291,6 +297,18 @@ SCHEMA = Section(
             }),
         }),
 
+        # ADR 180 D1: the selected weapon, by its name on the weapon panel.
+        "weapon": Section(children={
+            "enabled": Leaf(types=(bool,), default=True),
+            # A reading older than this is no reading: `f` is tapped.
+            "stale_after_s": Leaf(types=NUMBER, minimum=0, default=6.0),
+            # Class name -> how `f` fires it and the words its weapons' names
+            # contain. Tried in order; a name in no class is tapped.
+            "classes": MapOf(Section(children={
+                "fire": Leaf(types=(str,), choices=("tap", "hold_on_lead")),
+                "names": _STR_LIST,
+            }, required=frozenset({"fire", "names"}))),
+        }),
         # ADR 173: the special weapon's ring reader and press policy.
         "special_weapon": Section(children={
             "enabled": Leaf(types=(bool,), default=True),
@@ -309,6 +327,19 @@ SCHEMA = Section(
             # Crops of a READY dropping to a partial ring (a press or a misread).
             "capture_dir": Leaf(types=(str,), default="test_screenshots/special_weapon/live"),
             "capture_max": Leaf(types=(int,), minimum=0, default=40),
+            # The refuel ability, recognised by its glyph on any jet (operator,
+            # 2026-11-15): a template crop, the overlap that counts as a match, and
+            # the afterburner fuel percentage at or under which it is pressed.
+            "refuel_glyph": Leaf(types=(str,),
+                                 default="test_screenshots/special_weapon/glyphs/refuel.png"),
+            "glyph_min_iou": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.85),
+            # The gun cool-down ability, recognised by its glyph on any jet and
+            # pressed when the gun heat bar reaches gun_heat_at (operator, 2026-11-15:
+            # "we should activate when the overheat indicator reaches 80%") or red.
+            "gun_heat_at": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.8),
+            "gun_cooldown_glyph": Leaf(
+                types=(str,), default="test_screenshots/special_weapon/glyphs/gun_cooldown.png"),
+            "refuel_fuel_at": Leaf(types=NUMBER, minimum=0, maximum=100, default=50),
         }),
 
         "fuel": Section(children={
@@ -977,6 +1008,9 @@ SCHEMA = Section(
             # range, read off its nameplate (target_range.py). 0 turns the gate off.
             "gun_max_range_km": Leaf(types=NUMBER, minimum=0, default=2.0),
             "gun_range_max_age_s": Leaf(types=NUMBER, minimum=0, default=1.5),
+            # ADR 173 D2c (operator, 2026-11-15): a jet with the gun cool-down
+            # ability opens the gun out to this range instead.
+            "gun_cooldown_max_range_km": Leaf(types=NUMBER, minimum=0, default=3.0),
             # Design 021 Phase 1 (shadow): the gun lead ring and the damage text
             # are read and logged; nothing flies on them.
             "gun_lead": Section(children={
@@ -1001,6 +1035,35 @@ SCHEMA = Section(
                 # The chase steers on a ring only while the tracked target reads
                 # under this range; the shadow still searches to search_max_km.
                 "steer_max_km": Leaf(types=NUMBER, minimum=0, default=1.2),
+                # ADR 182: the gun holds while a ring of the tracked target is in
+                # use, wherever it is. false = ADR 178 D3 (within fire_px).
+                "fire_while_ring_shows": Leaf(types=(bool,), default=False),
+            }),
+            # ADR 181: the chase stays on its target through missile and
+            # terrain warnings.
+            "hold_target": Section(children={
+                # The share of rounds that hold. 0 = off: the flare roll, the
+                # crash recovery's overrides and the terrain turn act as before.
+                "share": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.0),
+                # A target counts as in view this long after it last had the steering.
+                "view_s": Leaf(types=NUMBER, minimum=0, default=1.0),
+            }),
+            # ADR 180: while the selected weapon's class fires hold_on_lead
+            # (weapon.classes), `f` is held while the weapon's lead diamond is
+            # on the crosshair instead of tapped.
+            "rocket_lead": Section(children={
+                "enabled": Leaf(types=(bool,), default=True),
+                # The diamond template's lowest match score.
+                "min_score": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.6),
+                # Half-width of the search window around the marker, px at 1200 high.
+                "search_px": Leaf(types=NUMBER, minimum=20, default=450),
+                # The diamond's largest distance from the crosshair for `f` to
+                # go down, px at 1200 high; it comes up at 1.5 times this.
+                "fire_px": Leaf(types=NUMBER, minimum=1, default=60),
+                # The diamond stays the aim point this long after it was confirmed.
+                "memory_s": Leaf(types=NUMBER, minimum=0, default=0.45),
+                # The chase steers the crosshair onto the diamond while it is seen.
+                "steer": Leaf(types=(bool,), default=True),
             }),
             # ADR 179: in a share of rounds the chase brakes when it closes fast
             # on a target that is near.

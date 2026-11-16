@@ -52,6 +52,12 @@ class PerceptionFake:
     def get_afterburner_fuel_pct(self):
         return None
 
+    def special_weapon_glyph(self):
+        return None
+
+    def selected_weapon(self):
+        return None
+
     def scan_region_for_good_luck(self, frame) -> bool:
         return False
 

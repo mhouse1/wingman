@@ -71,6 +71,18 @@ jet_profile:
     jas39:
       match: JAS39
       special_weapon: {ability: cloak, trigger: ready}
+    # Operator, 2026-11-15: the Tornado ADV's special ability is a towed decoy that
+    # draws missiles, like the MiG-23's flare burst, so it goes out on an incoming
+    # missile. Its ring was lit 25 times in 4 rounds that morning with no press.
+    tornado:
+      match: TORNADO
+      special_weapon: {ability: towed_decoy, trigger: incoming}
+    # Design 021 hit counter rev 7: the Su-47's gun hits are multiples of 21
+    # (21, 42, 63, 84, 105 with no missile near, 2026-11-14) and its missile
+    # hits 155 to 172, so its gun steps run past the default 60.
+    su47:
+      match: SU-47
+      gun_step_max: 110
 
 unattended_mode: true
 # Party invites: false clicks REJECT, true clicks ACCEPT then readies up.
@@ -296,6 +308,20 @@ crops:
     coords:
     - [0.2792, 0.569]
     - [0.315, 0.6263]
+  # ADR 173 D2b: the gun heat bar under the crosshair (Design 021: x 760-1160, fill
+  # at y 810-815 over a green bracket at 816-818 on 1920x1200).
+  GUN_HEAT:
+    coords:
+    - [0.3958, 0.665]
+    - [0.6042, 0.695]
+  # ADR 180 D1: the selected weapon's name, printed above the large slot of the
+  # weapon panel (bottom right), right-aligned to x 1901 on 1920x1200, text rows
+  # y 1085-1104. "LAU-3 Hydra Rocket Pod" starts at x 1635; the box starts at
+  # 1560 for longer names (the "x3" by the special weapon ends at x 1545).
+  WEAPON_NAME:
+    coords:
+    - [0.8125, 0.8983]
+    - [0.9974, 0.9217]
   MINIMAP:
     coords:
     - [0.8319, 0.0044]
@@ -584,10 +610,49 @@ special_weapon: {enabled: true, sectors: 16, min_lit_sectors: 14, min_lit_when_c
   press_retry_s: 3.0, max_presses: 2,
   # A READY dropping to 8-14 of 16 saves the icon's crop here, up to capture_max a
   # session: the 2026-11-07 run had 8 one-read drops with no press (cause unseen).
-  capture_dir: test_screenshots/special_weapon/live, capture_max: 40}
+  capture_dir: test_screenshots/special_weapon/live, capture_max: 40,
+  # Operator, 2026-11-15: "whenever a jet has the refuel special ability ... activate
+  # it when afterburner fuel reaches 50% or lower". Recognised by its glyph on any
+  # jet without a profile of its own: on 689 saved crops the refuel glyph matched
+  # its template at 0.95-1.00 and every other glyph at 0.68 or less.
+  refuel_glyph: test_screenshots/special_weapon/glyphs/refuel.png,
+  glyph_min_iou: 0.85, refuel_fuel_at: 50,
+  # Operator, 2026-11-15: "for jets with machine gun cool down special it should auto
+  # activate when machine gun overheats". Its glyph is bullets with a circular arrow
+  # (the F-100's). Then: "we should activate when the overheat indicator reaches
+  # 80%": pressed when the gun heat bar (crop GUN_HEAT) is gun_heat_at of its width
+  # or more, or red (overheated).
+  gun_cooldown_glyph: test_screenshots/special_weapon/glyphs/gun_cooldown.png,
+  gun_heat_at: 0.8}
 # ADR 098: suppress injection when the game does not have focus. Off until a
 # full session confirms it never suppresses legitimate presses (ADR 098 D6).
 # on_unknown: "inject" (default) or "suppress" — see ADR 098 D4.
+# ADR 180 D1: the selected weapon is known by its name on the weapon panel (the
+# WEAPON_NAME crop), sorted into a class here. Classes are tried in order; a
+# name matches a class when it contains one of its words (case, spaces and
+# punctuation ignored). `fire` is how FIRE_ACTIVE_WEAPON fires the class:
+#   tap           pressed about every 0.35 s (the rule every weapon had before)
+#   hold_on_lead  held while the weapon's lead diamond is on the crosshair
+#                 (pursuit_mode.rocket_lead)
+# A name in no class is tapped and logged once ("Weapon selected: ... is in no
+# weapon class"), so a new weapon is added with a word here, and a new kind of
+# weapon (radar-guided, guided) with a class of its own. Names seen so far:
+# "LAU-3 Hydra Rocket Pod", "AIM-9M Sidewinder", "PL-8" (2026-11-15) and
+# "R-77 Adder" (2026-11-13). heat_seeking and radar fire the same way today;
+# they are separate classes so range rules can tell them apart later.
+weapon:
+  enabled: true
+  stale_after_s: 6.0
+  classes:
+    rocket:
+      fire: hold_on_lead
+      names: [Rocket, Hydra]
+    heat_seeking:
+      fire: tap
+      names: [Sidewinder, AIM-9, PL-8]
+    radar:
+      fire: tap
+      names: [Adder, R-77]
 focus_guard: {enabled: true, ttl_s: 1.0, session_ttl_s: 5.0, on_unknown: inject}
 incoming_detection:
   incoming_template_matching_enabled: true
@@ -1963,6 +2028,12 @@ pursuit_mode:
   # means no gun. 0 turns the range gate off (the centre test alone, as before).
   gun_max_range_km: 2.0
   gun_range_max_age_s: 1.5
+  # ADR 173 D2c (operator, 2026-11-15): "for aircrafts with this special ability we
+  # can activate the machine gun sooner from a further distance, the benefit is we
+  # may be able to hit target even when gun reticle hasnt shown yet". A jet whose
+  # special-weapon glyph is gun cool-down opens the gun under this range; the heat
+  # the longer bursts make is what the cool-down (at 80% heat) is for.
+  gun_cooldown_max_range_km: 3.0
   # Design 021 Phase 1 (shadow, 2026-11-13): the lead ring the game draws ahead
   # of a close target, and the "NN DMG" text by the crosshair, read and logged
   # (LEADRING:, GUNHIT:). Nothing flies on them yet. Measured on 12 operator
@@ -1979,7 +2050,15 @@ pursuit_mode:
     # Design 021 Phase 3: half the rounds, drawn per round, steer the crosshair
     # onto the lead ring and fire while it is within fire_px of it; the other
     # half steer at the marker and fire on today's rule.
-    steer_share: 0.5
+    # ADR 182 (operator, 2026-11-15): "it is wingmans job to align the center of
+    # the screen to the gun lead": 1.0, every round steers onto the ring (was 0.5).
+    steer_share: 1.0
+    # ADR 182: "as long as the gun lead is being displayed it should activate".
+    # While a ring of the tracked target is in use (confirmed within
+    # ring_memory_s, ring_min_dots dots to the marker, under steer_max_km), the
+    # gun holds wherever the ring is, in every round; fire_px then only counts
+    # the ring-on-crosshair measure. false restores ADR 178 D3 (fire within fire_px).
+    fire_while_ring_shows: true
     # Rev 4 (2026-11-14): 60, was 40. Operator: "we just need to get it close,
     # the game's aim assist will zoom the camera in and bring it closer". Of
     # ring sightings 40 to 60 px from the crosshair, the next picture had the
@@ -1996,6 +2075,36 @@ pursuit_mode:
     # matches scoring under 0.50 past 1.2 km sat 223 to 357 px from the marker,
     # the two under 1.0 km (real rings) 38 to 40 px.
     steer_max_km: 1.2
+  # ADR 181 (operator, 2026-11-15): "when pursuing a target it stays on pursuit,
+  # regardless of terrain signal or incoming missile". In a `hold` round, while the
+  # chase has had its target with the steering within view_s, nothing takes the
+  # airframe from it: no flare roll (the flares still go out), no missile evade,
+  # no crash recovery on agreeing warnings or a pull-out alarm, no terrain turn.
+  # The search, a resupply run and an objective run keep all of them.
+  # share is the share of rounds that hold, drawn per round and tagged
+  # hold_target; 1.0 is the operator's rule in every round, and leaves no
+  # rounds to compare against. To be revisited when Design 017 gives a way out
+  # that can be trusted. Measured 2026-11-15 (14.7 h): the target was out of
+  # view after 296 of 297 flare rolls that began with it in view, and back
+  # within 20 s after 151, a median 8.0 s later.
+  hold_target:
+    share: 1.0
+    view_s: 1.0
+  # ADR 180 (operator, 2026-11-15): "fire rockets by holding down the 'f'
+  # FIRE_ACTIVE_WEAPON key". While the selected weapon's class fires
+  # hold_on_lead (weapon.classes) nothing taps `f`; the pursuit steers the crosshair
+  # onto the weapon's lead diamond and holds `f` while the diamond is within
+  # fire_px of the crosshair. min_score: the two lead diamonds seen scored 0.66
+  # and 0.73, the best other match 0.55 (tests/test_rocket_lead.py).
+  rocket_lead:
+    enabled: true
+    min_score: 0.6
+    search_px: 450
+    # The gun ring's fire_px (Rev 4): get it close and the game's aim assist does
+    # the rest. The hold lets go at 1.5 times this, as the gun's does.
+    fire_px: 60
+    memory_s: 0.45
+    steer: true
   # ADR 179 (operator, 2026-11-13: "slow down while turning and then speed up
   # quickly"): half the rounds, drawn per round, hold the airbrake while the
   # tracked target is under on_km and the range closes at on_mps or more. Of 89
@@ -2004,7 +2113,10 @@ pursuit_mode:
   # and cooldown_s. min_kph is the lowest speed the approach brake aims for
   # (resupply_target_kph).
   closing_brake:
-    share: 0.5
+    # 1.0 from 2026-11-14 13:50 (ADR 179 D8): every round brakes. Over 77
+    # rounds the brake arm had 0.42 encounters of 3 s or more a round against
+    # 0.12 (p 0.01), and no more deaths.
+    share: 1.0
     on_km: 1.5
     on_mps: 150
     off_mps: 50

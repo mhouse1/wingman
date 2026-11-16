@@ -263,7 +263,10 @@ or flying. While it is held, the pursuit's steering shall write neither
 pitch nor roll, so the roll leaves the flight path unchanged. The hold
 shall end on manual takeover, on program exit, when an eject begins, and
 when a hard-emergency climb takes the airframe, and in any case no later
-than behavior_tree.missile_evade.flare_roll_max_s after it began.
+than behavior_tree.missile_evade.flare_roll_max_s after it began. In a
+round where the pursuit holds its target (pursuit_mode.hold_target), no
+roll shall start, and a held roll shall end, while the pursuit has its
+target in view; the flare burst itself shall be unaffected.
 <<<
 RATIONALE: >>>
 Operator, 2026-10-27; ADR 164. The roll is a continuous barrel roll about
@@ -283,5 +286,8 @@ whose pull-up a roll would turn sideways. The cap is a fault backstop for
 a burst that never reports its last flare. Implemented by
 Controller.flare_roll (wingman/controller.py), started from
 AmmoEventsHandler.deploy_flares_on_new_incoming (wingman/tick_handlers.py);
-pinned by tests/test_flare_roll.py.
+pinned by tests/test_flare_roll.py. The exception for a target in view is
+ADR 181 (operator, 2026-11-15): the roll kept the flight path but cost the
+chase its target. The roll still flies in every other case, so the
+behaviour is not lost. Pinned by tests/test_pursuit_hold.py.
 <<<

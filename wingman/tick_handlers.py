@@ -28,6 +28,7 @@ import time
 from . import capture_budget
 from .compass import fmt_heading
 from .crop_region import get_crop
+from .config_schema import schema_default
 from .special_weapon import SpecialWeaponPresser
 from .state import GameState, BATTLE_STATES
 from .suppressed import log_suppressed
@@ -965,6 +966,8 @@ class AmmoEventsHandler:
         # between rounds, so the profile is asked each tick.
         self._special_weapon_cfg = special_weapon_cfg or {}
         self._special_pressers = {}
+        self._fuel_low_streak = 0
+        self._fuel_last_ts = 0.0
         self._zero_streak = 0
         self._battle_started_ts = 0.0
         self._ignore_until = 0.0
@@ -1006,6 +1009,11 @@ class AmmoEventsHandler:
                 self._ctrl.closing_brake_new_round()
             except Exception as exc:
                 log_suppressed(logger, "closing_brake_new_round", exc)
+            # ADR 181: and whether the chase stays on its target this round.
+            try:
+                self._ctrl.pursuit_hold_new_round()
+            except Exception as exc:
+                log_suppressed(logger, "pursuit_hold_new_round", exc)
         self._in_battle = in_battle
 
     def suppress_after_respawn(self, seconds: float = 10.0):
@@ -1246,11 +1254,48 @@ class AmmoEventsHandler:
             self._ctrl.eject_and_dive(on_complete=_on_complete)
 
     def _special_weapon_profile(self) -> "dict | None":
+        """The jet's own `special_weapon` profile; failing that, the ability its glyph
+        names, on any jet (operator, 2026-11-15): refuel at `refuel_fuel_at` fuel or
+        lower (ADR 173 D2a), gun cool-down when the gun heat bar reaches 80% or overheats (D2b)."""
         try:
-            return self._ctrl.special_weapon_profile()
+            profile = self._ctrl.special_weapon_profile()
         except Exception as exc:
             log_suppressed(logger, "special_weapon_profile", exc)
+            profile = None
+        if profile:
+            return profile
+        try:
+            glyph = self._analyzer.special_weapon_glyph()
+        except Exception as exc:
+            log_suppressed(logger, "special_weapon_glyph", exc)
             return None
+        if glyph == "refuel":
+            return {"ability": "refuel", "trigger": "low_fuel",
+                    "fuel_at": self._special_weapon_cfg.get(
+                        "refuel_fuel_at", schema_default("special_weapon.refuel_fuel_at"))}
+        if glyph == "gun_cooldown":
+            # Operator, 2026-11-15: "for jets with machine gun cool down special it
+            # should auto activate when machine gun overheats", then "we should
+            # activate when the overheat indicator reaches 80%" (ADR 173 D2b).
+            return {"ability": "gun_cooldown", "trigger": "gun_heat"}
+        return None
+
+    def _low_fuel(self, at: float) -> bool:
+        """True once two fuel readings in a row are at or under `at`. Counted per
+        reading, not per call: the fuel OCR misreads now and then (92, 2, 75 % on
+        2026-11-11 at 15:06:28-31), and one misread must not spend the refuel."""
+        try:
+            pct, ts = self._analyzer.get_afterburner_fuel_reading()
+        except Exception as exc:
+            log_suppressed(logger, "afterburner_fuel_reading", exc)
+            return False
+        if pct is None:
+            self._fuel_low_streak = 0
+            return False
+        if ts != self._fuel_last_ts:
+            self._fuel_last_ts = ts
+            self._fuel_low_streak = self._fuel_low_streak + 1 if pct <= at else 0
+        return self._fuel_low_streak >= 2
 
     def _special_weapon_ready(self) -> "bool | None":
         try:
@@ -1294,6 +1339,16 @@ class AmmoEventsHandler:
             at = sw.get("flares_at")
             at = _LOW_FLARES_AT if at is None else int(at)
             fired = flares is not None and flares <= at
+        elif trigger == "gun_heat":
+            try:
+                fired = self._analyzer.gun_hot() is True
+            except Exception as exc:
+                log_suppressed(logger, "gun_hot", exc)
+                fired = False
+        elif trigger == "low_fuel":
+            at = sw.get("fuel_at")
+            at = schema_default("special_weapon.refuel_fuel_at") if at is None else at
+            fired = self._low_fuel(float(at))
         else:
             fired = True
         ready = self._special_weapon_ready()
@@ -1309,6 +1364,10 @@ class AmmoEventsHandler:
         logger.info("\033[93m✨ Special weapon %s: trigger %s, icon READY\033[0m",
                     ability, trigger)
         self._ctrl.activate_special_weapon()
+        try:
+            self._analyzer.note_special_weapon_press()
+        except Exception as exc:
+            log_suppressed(logger, "note_special_weapon_press", exc)
         now = time.time()
         if self._stats is not None:
             self._stats.on_event("special_weapon_used", now)
@@ -2507,6 +2566,10 @@ class BehaviorTreeHandler:
         service chose this tick. boundary_turn_mode rolls LEFT for a positive lateral."""
         side = getattr(self, "_terrain_turn_side", None)
         if side not in ("left", "right"):
+            return
+        # ADR 181: not while the chase has its target in view.
+        if self._ctrl.pursuit_holds_target() is True:
+            self._ctrl.note_hold_target_withheld("terrain turn")
             return
         max_s = self._terrain.turn_max_s if self._terrain is not None else 3.0
         logger.info("Controller: terrain turn %s (Design 020 way out, ADR 174)", side)

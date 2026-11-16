@@ -39,7 +39,10 @@ _RING_BAND = (0.85, 1.15)
 _INSIDE_BAND = (0.55, 0.78)
 _OUTSIDE_BAND = (1.22, 1.45)
 
-TRIGGERS = ("incoming", "low_flares", "ready")
+TRIGGERS = ("incoming", "low_flares", "low_fuel", "gun_heat", "ready")
+
+# The glyphs recognised on any jet, by name, and the config key of each template.
+GLYPH_TEMPLATE_KEYS = {"refuel": "refuel_glyph", "gun_cooldown": "gun_cooldown_glyph"}
 
 
 def _setting(cfg: dict, key: str):
@@ -62,6 +65,7 @@ class RingGeometry:
         # height, not the width, so a frame with another aspect keeps a circle.
         r = (y2 - y1) / 2.0 * h
         self.radius = r
+        self.cx, self.cy = cx, cy
         half = int(math.ceil(r * _OUTSIDE_BAND[1])) + 1
         self.x0 = int(round(cx)) - half
         self.y0 = int(round(cy)) - half
@@ -125,6 +129,75 @@ def ring_sectors(frame, geometry: RingGeometry, *, min_value: float = 200.0,
     return lit, covered
 
 
+# The ability's glyph inside the ring (operator, 2026-11-15: "whenever a jet has the
+# refuel special ability ... activate it when afterburner fuel reaches 50% or
+# lower"). The HUD draws each glyph pixel for pixel the same, so its white pixels
+# inside the disc are compared with a template's. Measured on 689 saved crops of
+# 2026-11-07..15: the refuel glyph scores 0.95-1.00 against the refuel template, the
+# missiles-and-arrow glyph (F-100) 0.67-0.68, every other glyph 0.26 or less.
+_PRESS_CAPTURE_S = 5.0     # a drop or a second press this soon after a press is saved
+_UNKNOWN_LOG_S = 10.0      # GLYPH: line while the glyph is unknown, this often
+_UNKNOWN_SAVE_S = 30.0     # and one icon crop per round once it has been unknown this long
+_GLYPH_FORGET_S = 20.0     # no reads this long (the lobby): the next round starts unknown
+_GLYPH_RADIUS = 0.62       # of the ring's radius: the glyph, not the disc's edge
+_GLYPH_SIZE = 40           # the mask is compared at this size, so any resolution works
+
+
+def glyph_mask(image, cx: float, cy: float, r: float):
+    """The glyph's white pixels inside the disc around (cx, cy), radius r, as a
+    _GLYPH_SIZE square boolean mask, or None when the square leaves the image."""
+    import cv2
+
+    half = r * _GLYPH_RADIUS
+    x0, y0 = int(round(cx - half)), int(round(cy - half))
+    x1, y1 = int(round(cx + half)), int(round(cy + half))
+    if x0 < 0 or y0 < 0 or x1 > image.shape[1] or y1 > image.shape[0]:
+        return None
+    hsv = cv2.cvtColor(np.ascontiguousarray(image[y0:y1, x0:x1]), cv2.COLOR_BGR2HSV)
+    v = hsv[..., 2].astype(np.int16)
+    s = hsv[..., 1].astype(np.int16)
+    yy, xx = np.mgrid[0:v.shape[0], 0:v.shape[1]]
+    d = np.hypot(yy - (cy - y0), xx - (cx - x0)) / max(r, 1e-6)
+    inside = d < _GLYPH_RADIUS
+    disc = (d >= _GLYPH_RADIUS * 0.85) & inside
+    # Relative to the disc, not an absolute white: an ability that is not available
+    # yet (gun cool-down on a cold gun, 2026-11-15 06:58) draws its glyph dim, with
+    # no lit ring. Halfway from the disc to the glyph's brightest pixels.
+    base = float(np.median(v[disc])) if disc.any() else 0.0
+    top = float(np.percentile(v[inside], 98)) if inside.any() else 0.0
+    if top - base < 25:
+        mask = np.zeros(v.shape, dtype=bool)
+    else:
+        mask = inside & (v >= base + 0.5 * (top - base)) & (s <= 110)
+    return cv2.resize(mask.astype(np.uint8), (_GLYPH_SIZE, _GLYPH_SIZE),
+                      interpolation=cv2.INTER_NEAREST).astype(bool)
+
+
+def glyph_iou(a, b) -> float:
+    """Overlap of two glyph masks, 0..1; 0 when either is empty."""
+    if a is None or b is None:
+        return 0.0
+    union = int((a | b).sum())
+    return float((a & b).sum()) / union if union else 0.0
+
+
+def load_glyph_template(path: str, crop_box, frame_shape=(1200, 1920)):
+    """The glyph mask from a saved drop crop (the capture's 2x-ring square cut from
+    a `frame_shape` frame), or None when the file is missing."""
+    import os
+
+    import cv2
+
+    if not path or not os.path.exists(path):
+        return None
+    image = cv2.imread(path)
+    if image is None:
+        return None
+    g = RingGeometry(crop_box, frame_shape, 16)
+    pad = g.size // 2
+    return glyph_mask(image, g.cx - (g.x0 - pad), g.cy - (g.y0 - pad), g.radius)
+
+
 class SpecialWeaponReader:
     """The ring's state, read each battle tick, for the handlers to ask.
 
@@ -158,6 +231,39 @@ class SpecialWeaponReader:
         # press log (2026-11-07: 8 one-read drops to 11-14/16 in 7 rounds).
         self._capture_dir = str(_setting(cfg, "capture_dir"))
         self._capture_left = int(_setting(cfg, "capture_max"))
+        # The ability glyphs recognised on any jet (refuel, gun cool-down): read on
+        # lit reads only (cooldown digits replace the glyph), two in a row agreeing.
+        # The best template at glyph_min_iou or more names it; none, 'other'.
+        self._glyph_min_iou = float(_setting(cfg, "glyph_min_iou"))
+        self._templates = {}
+        if crop_box is not None:
+            for name, key in GLYPH_TEMPLATE_KEYS.items():
+                path = str(_setting(cfg, key))
+                try:
+                    template = load_glyph_template(path, crop_box)
+                except Exception as exc:
+                    logger.debug("Special weapon: %s glyph template not loaded: %s",
+                                 name, exc)
+                    template = None
+                if template is None:
+                    logger.warning("Special weapon: no %s glyph template at %s; that "
+                                   "ability will not be recognised", name, path)
+                else:
+                    self._templates[name] = template
+        self._glyph = None
+        self._glyph_candidate = None
+        self._glyph_streak = 0
+        self._glyph_read_ts = clock()
+        self._unknown_since = None
+        self._unknown_last = 0.0
+        self._unknown_logged = 0.0
+        self._unknown_saved = False
+        self._last_lit = 0
+        # Presses, for the capture: a drop of any depth within _PRESS_CAPTURE_S of a
+        # press, and the picture at a retry, are saved (2026-11-15: 2 of 7 Tornado
+        # presses were not taken, and its taken presses read 0/16 or 13/16).
+        self._last_press_ts = 0.0
+        self._last_frame = None
 
     def update(self, frame) -> None:
         """Read the ring in this frame. Never raises."""
@@ -173,11 +279,99 @@ class SpecialWeaponReader:
         except Exception as exc:  # perception must not cost the tick
             logger.debug("Special weapon: ring read failed: %s", exc)
             return
-        if self.note_lit(lit, covered) and lit >= self._sectors // 2:
+        self._last_frame = frame
+        self._last_lit = lit
+        dropped = self.note_lit(lit, covered)
+        if dropped and (lit >= self._sectors // 2
+                        or self._clock() - self._last_press_ts <= _PRESS_CAPTURE_S):
             self._capture_drop(frame, lit)
+        if self._templates:
+            g = self._geometry
+            try:
+                mask = glyph_mask(frame, g.cx, g.cy, g.radius)
+                scores = {name: glyph_iou(mask, t) for name, t in self._templates.items()}
+            except Exception as exc:
+                logger.debug("Special weapon: glyph read failed: %s", exc)
+                return
+            best = max(scores, key=scores.get)
+            iou = scores[best]
+            self._note_unknown(frame, best, iou)
+            if iou >= self._glyph_min_iou:
+                self.note_glyph(best, iou)
+            elif self._ready_streak > 0:
+                self.note_glyph("other", iou)       # a lit ring round another glyph
+            else:
+                self.note_glyph(None, iou)          # unlit and unmatched: says nothing
 
-    def _capture_drop(self, frame, lit: int) -> None:
-        """Save the icon from a READY that dropped to a partial ring. Never raises."""
+    def _note_unknown(self, frame, best: str, iou: float) -> None:
+        """ADR 173 D2e: while the glyph is still unknown in a round, log the best match
+        every _UNKNOWN_LOG_S, and save the icon once after _UNKNOWN_SAVE_S (an A-4
+        round on 2026-11-15 went 90 s unrecognised, where two others took 2-6 s)."""
+        now = self._clock()
+        if self._glyph is not None:
+            self._unknown_since = None
+            return
+        if self._unknown_since is None or now - self._unknown_last > _GLYPH_FORGET_S:
+            self._unknown_since, self._unknown_logged, self._unknown_saved = now, 0.0, False
+        self._unknown_last = now
+        if now - self._unknown_logged >= _UNKNOWN_LOG_S:
+            self._unknown_logged = now
+            logger.debug("GLYPH: unknown for %.0fs, best %s %.2f, ring %d/%d lit",
+                         now - self._unknown_since, best, iou,
+                         self._last_lit, self._sectors)
+        if not self._unknown_saved and now - self._unknown_since >= _UNKNOWN_SAVE_S:
+            self._unknown_saved = True
+            self._capture_drop(frame, -1, tag=f"unknown_{best}{int(round(iou * 100)):02d}")
+
+    def note_glyph(self, glyph: "str | None", iou: float = 0.0) -> None:
+        """Record the glyph one read saw; two in a row set it.
+
+        A named glyph is read lit or dim. 'other' comes from lit reads only (a dim,
+        unmatched disc is a cooldown count or no icon, and says nothing: None), and
+        never replaces a named glyph: the cooldown digits and the active state hide
+        the glyph, and the jet keeps its ability. The glyph is forgotten when the
+        reads stop for _GLYPH_FORGET_S (the lobby between rounds), so the next
+        round's jet starts unknown."""
+        now = self._clock()
+        with self._lock:
+            if now - self._glyph_read_ts > _GLYPH_FORGET_S:
+                self._glyph = self._glyph_candidate = None
+                self._glyph_streak = 0
+            self._glyph_read_ts = now
+            if glyph is None:
+                self._glyph_candidate, self._glyph_streak = None, 0
+                return
+            if glyph == self._glyph_candidate:
+                self._glyph_streak += 1
+            else:
+                self._glyph_candidate, self._glyph_streak = glyph, 1
+            was = self._glyph
+            if self._glyph_streak >= 2 and not (
+                    glyph == "other" and was not in (None, "other")):
+                self._glyph = glyph
+            changed = self._glyph != was
+        if changed:
+            logger.info("Special weapon glyph: %s (best match %.2f)", self._glyph, iou)
+
+    def glyph(self) -> "str | None":
+        """The ring's glyph by template name ('refuel', 'gun_cooldown'), 'other' for any
+        other glyph,
+        None before two lit reads agree."""
+        with self._lock:
+            return self._glyph
+
+    def note_press(self) -> None:
+        """A `q` press went out. A second press within _PRESS_CAPTURE_S is a retry,
+        the first not taken: its picture is saved. Never raises."""
+        now = self._clock()
+        retry = now - self._last_press_ts <= _PRESS_CAPTURE_S
+        self._last_press_ts = now
+        if retry and self._last_frame is not None and self._geometry is not None:
+            self._capture_drop(self._last_frame, -1, tag="retry")
+
+    def _capture_drop(self, frame, lit: int, tag: str = "") -> None:
+        """Save the icon from a READY that dropped to a partial ring, or (`tag`
+        retry) the ring still lit at a retry. Never raises."""
         if self._capture_left <= 0:
             return
         self._capture_left -= 1
@@ -193,7 +387,8 @@ class SpecialWeaponReader:
             os.makedirs(self._capture_dir, exist_ok=True)
             now = self._clock()
             stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(now))
-            name = f"{stamp}.{int(now * 1000) % 1000:03d}_lit{lit:02d}.png"
+            what = tag if tag else f"lit{lit:02d}"
+            name = f"{stamp}.{int(now * 1000) % 1000:03d}_{what}.png"
             cv2.imwrite(os.path.join(self._capture_dir, name), crop)
             logger.debug("Special weapon icon: drop to %d/%d saved as %s",
                          lit, self._sectors, name)

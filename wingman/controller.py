@@ -32,6 +32,8 @@ from .suppressed import log_suppressed
 from .clear_path import PathGoal
 from .gun_damage import GunDamageLog
 from .lead_ring import LeadRingWatch, RingAimTrial, crosshair
+from .rocket_lead import RocketLead
+from .pursuit_hold import HOLD as _HOLD_ARM, PursuitHoldTrial
 from .target_projection import TargetProjection
 from .closing_brake import ClosingBrake
 from .target_range import TargetRangeReader
@@ -950,6 +952,10 @@ class Controller:
             _pm.get("gun_max_range_km", schema_default("pursuit_mode.gun_max_range_km")))
         self._gun_range_max_age_s = float(
             _pm.get("gun_range_max_age_s", schema_default("pursuit_mode.gun_range_max_age_s")))
+        self._gun_cooldown_max_range_km = float(
+            _pm.get("gun_cooldown_max_range_km",
+                    schema_default("pursuit_mode.gun_cooldown_max_range_km")))
+        self._gun_range_limit_logged = None
         self._target_range = (TargetRangeReader()
                               if self._pursuit_gun_on_centre and self._gun_max_range_km > 0
                               else None)
@@ -1015,10 +1021,48 @@ class Controller:
         # chase aims at it this picture; None while it aims at the marker.
         self._ring_aim_px: "float | None" = None
         self._ring_aim_was = False
+        # The same distance while a ring of the tracked target is in use, in any
+        # round. ADR 182 (operator, 2026-11-15): "as long as the gun lead is being
+        # displayed it should activate"; fire_while_ring_shows turns that on.
+        self._ring_shown_px: "float | None" = None
+        self._gun_fire_while_ring = bool(_gl_get("fire_while_ring_shows"))
         # Phase 3's measure, by arm: new pictures under 1.2 km with a tracked
         # target, and of them those with a confirmed ring within fire_px.
         self._ring_on_tally: "dict[str, list[int]]" = {}
         self._ring_tally_ts: "float | None" = None
+        # ADR 181 (operator, 2026-11-15): in a `hold` round nothing takes the
+        # airframe from a chase that has its target in view: no flare roll, no
+        # missile evade, no crash recovery and no terrain turn.
+        _ht = _pm.get("hold_target") or {}
+        self._pursuit_hold_trial = PursuitHoldTrial(float(_ht.get(
+            "share", schema_default("pursuit_mode.hold_target.share"))))
+        self._hold_target_view_s = float(_ht.get(
+            "view_s", schema_default("pursuit_mode.hold_target.view_s")))
+        # What the rule withheld this session, by kind, and when each was last logged.
+        self._hold_target_withheld: "dict[str, int]" = {}
+        self._hold_target_log_ts: "dict[str, float]" = {}
+        # ADR 180 (operator, 2026-11-15): while the selected weapon's class fires
+        # hold_on_lead (the rocket pod), `f` is held while the weapon's lead
+        # diamond is on the crosshair, not tapped.
+        _rl = _pm.get("rocket_lead") or {}
+
+        def _rl_get(key):
+            return _rl.get(key, schema_default("pursuit_mode.rocket_lead." + key))
+        self._rocket_lead: "RocketLead | None" = None
+        if bool(_rl_get("enabled")):
+            self._rocket_lead = RocketLead(_rl_get("min_score"), _rl_get("search_px"),
+                                           _rl_get("memory_s"))
+        self._weapon_fire_logged: "str | None" = None
+        self._rocket_fire_px = float(_rl_get("fire_px"))
+        self._rocket_steer = bool(_rl_get("steer"))
+        self._rocket_crosshair_pct = tuple(_gl_get("crosshair_pct"))
+        # The diamond's distance from the crosshair, px at 1200 high, on this
+        # picture; None without a confirmed diamond.
+        self._rocket_aim_px: "float | None" = None
+        self._rocket_aim_was = False
+        self._rocket_held_since: "float | None" = None
+        self._rocket_holds = 0
+        self._rocket_held_s = 0.0
         # mission_acs defers SWITCH_WEAPON until the selected weapon runs out
         # (ADR 144 D4, 2026-09-24). The key is a toggle, so this many
         # consecutive ammo==0 reads are required before pressing it. At the
@@ -2216,6 +2260,44 @@ class Controller:
             except Exception as exc:
                 log_suppressed(logger, "gun_aim_trial_note", exc)
 
+    def pursuit_hold_new_round(self) -> None:
+        """A round has started: draw ADR 181's arm for it, log it, and tag the
+        round for the summary."""
+        trial = getattr(self, "_pursuit_hold_trial", None)
+        arm = trial.new_round() if trial is not None else None
+        if arm is None:
+            return
+        logger.info("PURSUIT HOLD: round %d — %s arm (ADR 181, share %.2f)",
+                    trial.rounds, arm, trial.share)
+        if self._round_note is not None:
+            try:
+                self._round_note("hold_arm_" + arm, time.time())
+            except Exception as exc:
+                log_suppressed(logger, "pursuit_hold_note", exc)
+
+    def pursuit_holds_target(self) -> bool:
+        """ADR 181: True while, in a `hold` round, a pursuit has had its target
+        with the steering within `hold_target.view_s`. Nothing then takes the
+        airframe from the chase: not the flare roll, the missile evade, the crash
+        recovery or the terrain turn. A resupply marker, a control point or the
+        crown with the steering is not a target."""
+        trial = getattr(self, "_pursuit_hold_trial", None)
+        if trial is None or trial.arm != _HOLD_ARM or not self._pursuing.is_set():
+            return False
+        return (self._pursuit_objective_kind == "target"
+                and time.time() - self._pursuit_objective_ts < self._hold_target_view_s)
+
+    def note_hold_target_withheld(self, what: str) -> None:
+        """Count and log something ADR 181 withheld for the target in view, at most
+        once every 5 s for each kind, so the trade can be counted from the log."""
+        now = time.time()
+        if now - self._hold_target_log_ts.get(what, 0.0) < 5.0:
+            return
+        self._hold_target_log_ts[what] = now
+        self._hold_target_withheld[what] = self._hold_target_withheld.get(what, 0) + 1
+        logger.info("PURSUIT HOLD: %s withheld — the chase stays on its target (ADR 181)",
+                    what)
+
     def _agreement_breaks_holdoff(self, objective: "str | None") -> bool:
         """Code Review 019 cycle 25: whether two agreeing terrain warnings set aside
         the hold-off for `objective` now. ADR 172: not for the resupply marker in a
@@ -2853,6 +2935,7 @@ class Controller:
         self.release_roll_hold(why=why)
         self.release_pitch_hold(why=why)
         self.release_gun_hold(why=why)
+        self.release_rocket_hold(why=why)
         self._rearm_afterburner(False)
         self._rearm_airbrake(False)
         self._pitch_last_sample = None
@@ -3157,12 +3240,26 @@ class Controller:
         key is held, not tapped, and let go once the target is
         _GUN_RELEASE_FACTOR times that far out, or not visible; every other
         release (takeover, cancel, loop exit, dive recovery) comes through
-        release_tracking_holds."""
+        release_tracking_holds.
+
+        ADR 182 (operator, 2026-11-15): "as long as the gun lead is being
+        displayed it should activate, it is wingman's job to align the center of
+        the screen to the gun lead". While a lead ring of the tracked target is
+        in use (ADR 178 D2), the gun holds wherever the ring is; the chase
+        steers the crosshair onto it."""
         if not self._pursuit_gun_on_centre:
             return
         factor = self._GUN_RELEASE_FACTOR if self._gun_held_since is not None else 1.0
         ring_px = self._ring_aim_px
-        if ring_px is not None:
+        shown_px = self._ring_shown_px if self._gun_fire_while_ring else None
+        if shown_px is not None:
+            # ADR 182 D6 (operator, 2026-11-15): also while a resupply run, a
+            # resupply search or an objective has the steering. `visible` is the
+            # chase's (False then); the ring in use already needs the tracked
+            # target in view on the picture (_ring_aim).
+            ring_px = shown_px
+            centred = True
+        elif ring_px is not None:
             # Design 021 Phase 3: while the chase aims at the lead ring, the gun
             # holds while the ring is within fire_px of the crosshair.
             centred = bool(visible) and ring_px <= self._ring_fire_px * factor
@@ -3176,17 +3273,22 @@ class Controller:
         if self._target_range is not None:
             reading = self._target_range.latest(self._gun_cluster, self._gun_range_max_age_s)
             km = reading.km if reading is not None else None
-            in_range = km is not None and km < self._gun_max_range_km
+            in_range = km is not None and km < self._gun_range_limit_km()
             rng = (" range=%.2fkm" % km if km is not None else " range=none")
         if centred and in_range and self._gun_held_since is None:
             self._press_tracking_key(FIRE_MACHINE_GUN, "pursuit_gun")
             self._gun_held_since = time.time()
             if self._gun_damage is not None:
+                profile = profile_for_jet(self._jet_on_record(), self._jet_profiles) or {}
                 self._gun_damage.burst_open(
                     km if self._target_range is not None else None, self._gun_ring_px,
                     arm=self._ring_aim_trial.arm,
-                    aim="ring" if ring_px is not None else "marker")
-            if ring_px is not None:
+                    aim="ring" if ring_px is not None else "marker",
+                    gun_step_max=profile.get("gun_step_max"))
+            if shown_px is not None:
+                logger.debug("HOLD[gun]: None -> fire (lead ring showing ring_px=%.0f%s)",
+                             shown_px, rng)
+            elif ring_px is not None:
                 logger.debug("HOLD[gun]: None -> fire (ring on the crosshair ring_px=%.0f%s)",
                              ring_px, rng)
             else:
@@ -3198,6 +3300,24 @@ class Controller:
                 else ("ring off the crosshair ring_px=%.0f" % ring_px if ring_px is not None
                       else "off centre err=%+.3f err_y=%+.3f" % (err, err_y)) if not centred
                 else "out of range" + rng)
+
+    def _gun_range_limit_km(self) -> float:
+        """The range under which the gun opens: gun_max_range_km, or
+        gun_cooldown_max_range_km on a jet whose special-weapon glyph is the gun
+        cool-down (ADR 173 D2c, operator 2026-11-15: such a jet can fire sooner,
+        before the lead ring shows, and cool the gun with `q`)."""
+        limit = self._gun_max_range_km
+        try:
+            if (self._analyzer is not None
+                    and self._analyzer.special_weapon_glyph() == "gun_cooldown"):
+                limit = max(limit, self._gun_cooldown_max_range_km)
+        except Exception as exc:
+            log_suppressed(logger, "gun_range_limit", exc)
+        if limit != self._gun_range_limit_logged:
+            self._gun_range_limit_logged = limit
+            logger.info("Gun range limit: %.1f km%s", limit,
+                        " (gun cool-down jet)" if limit > self._gun_max_range_km else "")
+        return limit
 
     def _gun_lead_shadow(self, frame, obs: dict, picture_ts: float) -> None:
         """Design 021 Phase 1 (shadow): look for the lead ring around the tracked
@@ -3292,16 +3412,19 @@ class Controller:
         """Design 021 Phase 3 (D4): in a `ring` round, the steering error of the
         lead ring against the crosshair, in the tracker's half-frame units, while
         a ring of this target was confirmed within ring_memory_s; None otherwise,
-        and the chase steers at the marker as before. Sets `_ring_aim_px` for the
-        fire rule. Its failure must not cost the steering tick."""
+        and the chase steers at the marker as before. Sets `_ring_aim_px` while
+        the chase aims at the ring, and `_ring_shown_px` while a ring of this
+        target is in use in any round, for the fire rule (ADR 182). Its failure
+        must not cost the steering tick."""
+        self._ring_shown_px = None
         if self._lead_ring is None:
+            self._ring_aim_px = None
             return None
         aim = None
         try:
             # Rev 2: only where the game draws the ring. Past it, the shape
             # match can take an objective's dashed circle for one (19:53).
-            if (visible and self._ring_aim_trial.arm == "ring"
-                    and self._lead_km is not None
+            if (visible and self._lead_km is not None
                     and self._lead_km < self._ring_steer_max_km):
                 frame_shape = frame.shape
                 ring = self._lead_ring.aim_ring(picture_ts, self._ring_memory_s,
@@ -3309,12 +3432,15 @@ class Controller:
                 if ring is not None:
                     h, w = frame_shape[:2]
                     cx, cy = crosshair(frame_shape, self._lead_ring.crosshair_pct)
-                    aim = (max(-1.0, min(1.0, (ring.x - cx) / (w / 2.0))),
-                           max(-1.0, min(1.0, (ring.y - cy) / (h / 2.0))))
-                    self._ring_aim_px = math.hypot(ring.x - cx, ring.y - cy) * 1200.0 / h
+                    self._ring_shown_px = math.hypot(ring.x - cx, ring.y - cy) * 1200.0 / h
+                    if self._ring_aim_trial.arm == "ring":
+                        aim = (max(-1.0, min(1.0, (ring.x - cx) / (w / 2.0))),
+                               max(-1.0, min(1.0, (ring.y - cy) / (h / 2.0))))
+                        self._ring_aim_px = self._ring_shown_px
         except Exception as exc:
             log_suppressed(logger, "ring_aim", exc)
             aim = None
+            self._ring_shown_px = None
         if aim is None:
             self._ring_aim_px = None
         if (aim is not None) != self._ring_aim_was:
@@ -3322,6 +3448,93 @@ class Controller:
             logger.debug("GUNAIM: %s", "ring (ring_px=%.0f)" % self._ring_aim_px
                          if aim is not None else "marker")
         return aim
+
+    def _active_weapon_fire(self) -> str:
+        """How FIRE_ACTIVE_WEAPON fires the selected weapon (ADR 180 D1/D2): the
+        fire mode of its class in `weapon.classes`, from its name on the weapon
+        panel. "tap" for a name in no class, without a fresh read, and with the
+        rocket rule off: the rule every weapon had before."""
+        if self._rocket_lead is None or self._analyzer is None:
+            return "tap"
+        try:
+            weapon = self._analyzer.selected_weapon()
+        except Exception as exc:
+            log_suppressed(logger, "selected_weapon", exc)
+            return "tap"
+        return getattr(weapon, "fire", None) or "tap"
+
+    def _weapon_holds_on_lead(self) -> bool:
+        """True while the selected weapon is fired by holding `f` on its lead
+        diamond (the rocket pod), not by tapping."""
+        return self._active_weapon_fire() == "hold_on_lead"
+
+    def _rocket_view(self, frame, obs: dict, picture_ts: float
+                     ) -> "tuple[float, float] | None":
+        """ADR 180: with a weapon selected that is held on its lead (the rocket
+        pod) and a target in view, look for the lead diamond near the marker. Sets `_rocket_aim_px` for the fire rule; returns
+        the diamond's steering error against the crosshair, in the tracker's
+        half-frame units, when `steer` is on, else None. Its failure must not
+        cost the steering tick."""
+        rl = self._rocket_lead
+        if rl is None:
+            return None
+        aim = px = None
+        try:
+            if self._weapon_holds_on_lead() and obs.get("visible"):
+                d = rl.observe(frame, (obs["centroid_x"], obs["centroid_y"]), picture_ts)
+                if d is not None:
+                    h, w = frame.shape[:2]
+                    cx, cy = crosshair(frame.shape, self._rocket_crosshair_pct)
+                    px = math.hypot(d.x - cx, d.y - cy) * 1200.0 / h
+                    if self._rocket_steer:
+                        aim = (max(-1.0, min(1.0, (d.x - cx) / (w / 2.0))),
+                               max(-1.0, min(1.0, (d.y - cy) / (h / 2.0))))
+            else:
+                rl.reset()
+        except Exception as exc:
+            log_suppressed(logger, "rocket_view", exc)
+            aim = px = None
+        self._rocket_aim_px = px
+        if (px is not None) != self._rocket_aim_was:
+            self._rocket_aim_was = px is not None
+            logger.debug("ROCKETAIM: %s", "diamond (diamond_px=%.0f)" % px
+                         if px is not None else "none")
+        return aim
+
+    def _pursuit_rocket_tick(self, visible: bool) -> bool:
+        """ADR 180 (operator, 2026-11-15: "fire rockets by holding down the 'f'
+        FIRE_ACTIVE_WEAPON key"): with a hold_on_lead weapon selected, hold
+        FIRE_ACTIVE_WEAPON while the lead diamond is within fire_px of the
+        crosshair, and let go once it is 1.5 times that far out or lost. Returns
+        True while such a weapon is selected; `fire_active_weapon` taps nothing
+        then."""
+        if not self._weapon_holds_on_lead():
+            self.release_rocket_hold(why="the selected weapon is tapped")
+            return False
+        factor = self._GUN_RELEASE_FACTOR if self._rocket_held_since is not None else 1.0
+        px = self._rocket_aim_px
+        on = bool(visible) and px is not None and px <= self._rocket_fire_px * factor
+        if on and self._rocket_held_since is None:
+            self._press_tracking_key(FIRE_ACTIVE_WEAPON, "pursuit_rockets")
+            self._rocket_held_since = time.time()
+            self._rocket_holds += 1
+            logger.debug("HOLD[rockets]: None -> fire (diamond_px=%.0f)", px)
+        elif not on and self._rocket_held_since is not None:
+            self.release_rocket_hold(
+                why="target lost" if not visible else "no diamond" if px is None
+                else "diamond off the crosshair diamond_px=%.0f" % px)
+        return True
+
+    def release_rocket_hold(self, why: str = "release") -> None:
+        """Release FIRE_ACTIVE_WEAPON if the rocket rule is holding it; no-op
+        otherwise. Logs the hold's length."""
+        if self._rocket_held_since is None:
+            return
+        held = time.time() - self._rocket_held_since
+        self._rocket_held_since = None
+        self._rocket_held_s += held
+        self._release_tracking_key(FIRE_ACTIVE_WEAPON, "pursuit_rockets")
+        logger.debug("HOLD[rockets]: fire -> None after %.1fs (%s)", held, why)
 
     def release_gun_hold(self, why: str = "release") -> None:
         """Release the machine gun if the pursuit is holding it; no-op
@@ -3442,7 +3655,21 @@ class Controller:
         self._execute_key_press(FIRE_MACHINE_GUN, hold_seconds=hold_seconds, block=block, action_name='fire_machine_gun')
 
     def fire_active_weapon(self, hold_seconds: float = 0.1, block: bool = True, ignore_cancel: bool = False):
-        """Activate the currently selected weapon (short press)."""
+        """Activate the currently selected weapon (short press).
+
+        ADR 180 D2: every loop that taps `f` at an interval comes through here
+        (the pursuit, the heatdive, boresight and search-and-destroy), so this is
+        where the tap stops for a weapon whose class is not fired by tapping. The
+        rocket pod's `f` is held by `_pursuit_rocket_tick`; a tap would fire it
+        blind (38 rockets in 23 s, 2026-11-15 14:08)."""
+        fire = self._active_weapon_fire()
+        if fire != self._weapon_fire_logged:
+            self._weapon_fire_logged = fire
+            logger.info("Controller: FIRE_ACTIVE_WEAPON is %s for the selected weapon "
+                        "(ADR 180)", "tapped" if fire == "tap" else
+                        "held on the lead diamond, not tapped")
+        if fire != "tap":
+            return
         self._execute_key_press(FIRE_ACTIVE_WEAPON, hold_seconds=hold_seconds, block=block,
                                  action_name='fire_active_weapon', ignore_cancel=ignore_cancel)
 
@@ -4135,6 +4362,9 @@ class Controller:
                     frame = self._capture.grab_from_thread()
                     picture_ts = picture_clock.seen(frame, time.monotonic())
                     obs = self._target_tracker.update(frame)
+                    # ADR 180: the lead diamond of a weapon that is held on it,
+                    # for the fire rule below. The dive steers on its own error.
+                    self._rocket_view(frame, obs, picture_ts)
                     err = obs.get("error_norm")
                     cmd = None
                     if obs.get("visible") and err is not None:
@@ -4223,6 +4453,9 @@ class Controller:
                     # Also fire while the count is still the pre-switch rack's
                     # (a deferred switch just happened): a stale 0 there is not
                     # an empty secondary.
+                    # ADR 180: the rocket pod's `f` is held on the lead diamond;
+                    # the tap below stands aside for it (fire_active_weapon).
+                    self._pursuit_rocket_tick(obs.get("visible"))
                     if (ammo is None or ammo > 0
                             or (switched_at is not None
                                 and time.time() - switched_at < self._pursuit_ammo_grace_s)):
@@ -4251,6 +4484,7 @@ class Controller:
             # any reason, must release a held roll key — no-op when
             # sustained_hold was never enabled (nothing is ever held then).
             self.release_roll_hold()
+            self.release_rocket_hold(why="heatdive loop exit")
             logger.info(tally.line(
                 "DIVE",
                 ("external:%s" % (self._eject_stop_reason or "unknown"))
@@ -5334,6 +5568,12 @@ class Controller:
                         ring_aim = self._ring_aim(frame, visible, picture_ts)
                         if ring_aim is not None:
                             err, err_y = ring_aim
+                        # ADR 180: with a weapon selected that is held on its lead
+                        # (the rocket pod), the chase aims the crosshair at the
+                        # weapon's lead diamond instead.
+                        rocket_aim = self._rocket_view(frame, obs, picture_ts)
+                        if rocket_aim is not None:
+                            err, err_y = rocket_aim
                         # ADR 148: while a hard-emergency climb is flying the airframe
                         # (a dive the chase followed, or a search roll that spiralled),
                         # the chase writes neither axis: the recovery is the only writer,
@@ -5901,6 +6141,7 @@ class Controller:
                                                       or wings_level):
                                     self._search_look_down()
                         self._pursuit_gun_tick(control_visible, err, err_y)
+                        self._pursuit_rocket_tick(control_visible)
                         # ADR 176 (shadow): what the map says about the command just held.
                         self._steer_guard_shadow()
                         if icon_state is not None:
@@ -6150,6 +6391,8 @@ class Controller:
                                 break
                         # Fail open on an unreadable count, matching ADR 136
                         # D1 step 4's own reasoning for the heatdive loop.
+                        # ADR 180: the tap itself stands aside for a weapon
+                        # that is held on its lead (fire_active_weapon).
                         if ((ammo is None or ammo > 0)
                                 and not (self._resupply_priority_actuate
                                          and missile_priority.empty)):
@@ -6203,6 +6446,10 @@ class Controller:
                             logger.info(_depth_line)
                     except Exception as exc:
                         log_suppressed(logger, "depth_view_summary", exc)
+                if self._rocket_holds:
+                    logger.info("ROCKETS: %d hold(s) of `f` on the lead diamond, %.1fs "
+                                "held, this session (ADR 180)", self._rocket_holds,
+                                self._rocket_held_s)
                 if tally is not None:
                     tally.gun_s = self._gun_fired_s
                     logger.info(tally.line(
@@ -6622,6 +6869,10 @@ class Controller:
         if self._ejecting.is_set():
             logger.info("Controller: missile_evade suppressed — eject in progress")
             return
+        # ADR 181: nor while the chase has its target in view.
+        if self.pursuit_holds_target():
+            self.note_hold_target_withheld("missile evade")
+            return
         # ADR 163 D5: nor while a hard-emergency climb flies. A dive emergency
         # ends a flying evade (climb_mode), and the next alert must not take the
         # airframe straight back: the climb's own check would end the climb.
@@ -6955,6 +7206,9 @@ class Controller:
             return "not in battle"
         if self._ejecting.is_set():
             return "eject in progress"
+        # ADR 181: the chase keeps its target; the flares still go out.
+        if self.pursuit_holds_target():
+            return "the chase stays on its target (ADR 181)"
         if self.pursuit_recovery_active() or (self._climbing.is_set()
                                               and self._climb_emergency_requested):
             return "emergency climb"
@@ -7287,19 +7541,34 @@ class Controller:
             # with one of them in view, and 310 of 316 targets were gone at the
             # hand-back.
             _objective = self._pursuit_objective_in_view()
+            # ADR 181 (operator, 2026-11-15): in a `hold` round the chase stays on
+            # its target whatever the terrain warnings say. The two overrides
+            # below still break off a resupply or objective run.
+            _held = self.pursuit_holds_target()
+            if _held and _objective is None:
+                _objective = "target"
             # Code Review 019 cycle 25 (operator, 2026-10-18): two agreeing
             # terrain warnings break off the chase or objective run anyway; in an
             # ADR 172 `holdoff` round, not the resupply approach.
             if _objective is not None and self._agreement_breaks_holdoff(_objective):
-                logger.info("Controller: crash recovery starts with the %s in view — "
-                            "two terrain warnings agree", _objective)
-                _objective = None
+                if _held:
+                    self.note_hold_target_withheld(
+                        "crash recovery (two terrain warnings agree)")
+                else:
+                    logger.info("Controller: crash recovery starts with the %s in view — "
+                                "two terrain warnings agree", _objective)
+                    _objective = None
             # Code Review 019 cycle 36: so does a severe pull-out alarm.
             if _objective is not None and self._pullout_breaks_holdoff():
-                logger.info("Controller: crash recovery starts with the %s in view — a "
-                            "pull-out would bottom out at %.0f m (HLDD 001 part 2)",
-                            _objective, self._pullout_lowest_m)
-                _objective = None
+                if _held:
+                    self.note_hold_target_withheld(
+                        "crash recovery (a pull-out would bottom out at %.0f m)"
+                        % self._pullout_lowest_m)
+                else:
+                    logger.info("Controller: crash recovery starts with the %s in view — a "
+                                "pull-out would bottom out at %.0f m (HLDD 001 part 2)",
+                                _objective, self._pullout_lowest_m)
+                    _objective = None
             if _objective is not None and self._map_climb_wanted():
                 # ADR 174: every map climb held off is logged, unthrottled, so the trade
                 # (a pickup or a kill against a crash) can be counted. 2026-11-08 19:36:53
@@ -8447,6 +8716,11 @@ class Controller:
                         # alarm stands.
                         if _objective is not None and self._pullout_breaks_holdoff():
                             _objective = None
+                        # ADR 181: in a `hold` round a target in view takes the
+                        # airframe back whatever the warnings say.
+                        if (_recovering and recovery_since is not None
+                                and self.pursuit_holds_target()):
+                            _objective = "target"
                         if _objective is not None:
                             logger.info(
                                 "Controller: climb — the pursuit has the %s in view "

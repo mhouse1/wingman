@@ -1,7 +1,7 @@
 {
   "uid": "wingman-scores",
   "title": "Wingman \u2014 score and squadron ranking",
-  "description": "Design 018: the score of every round from the end-of-round PERFORMANCE panel, by period, with a marker for each change that can affect play.",
+  "description": "Design 018: the score of every round from the end-of-round PERFORMANCE panel, by period, with a marker for each change that can affect play. Below it, the resource trail of every session (Performance 008): memory, threads, open files and OCR time per sample, and each session's growth.",
   "tags": [
     "wingman"
   ],
@@ -946,6 +946,402 @@
         "overrides": []
       },
       "options": {}
+    },
+    {
+      "id": 12,
+      "title": "Memory per sample (MB)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "wingman-pg"
+      },
+      "description": "Wingman's resident memory, the game's (summed over its processes, so read it as a trend, not a footprint), and glibc's split of wingman's heap: malloc live is memory wingman is using, malloc retained is memory it freed that the allocator kept. Live climbing means something holds objects; retained climbing means fragmentation. From the RESOURCE line wingman logs every 5 minutes (wingman/resource_monitor.py, Performance 008), read from the session logs by the ingest. The figures are the machine's, not an account's, so the tags box does not apply.",
+      "gridPos": {
+        "x": 0,
+        "y": 58,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wingman-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT at AS time,\n       rss_mb AS \"wingman rss\",\n       game_rss_mb AS \"game rss\",\n       mi_use_mb AS \"malloc live\",\n       mi_free_mb AS \"malloc retained\"\nFROM resource_samples\nWHERE $__timeFilter(at)\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "showPoints": "never",
+            "spanNulls": false,
+            "insertNulls": 900000
+          },
+          "unit": "decmbytes",
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "wingman rss"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "game rss"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "malloc live"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "malloc retained"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "fill": "dash",
+                  "dash": [
+                    10,
+                    10
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 13,
+      "title": "Threads and open files per sample",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "wingman-pg"
+      },
+      "description": "Wingman's live Python threads and open file descriptors. Threads climbing means daemon threads are not reaped; open files climbing means leaked X Display connections. From the RESOURCE line wingman logs every 5 minutes (wingman/resource_monitor.py, Performance 008), read from the session logs by the ingest. The figures are the machine's, not an account's, so the tags box does not apply.",
+      "gridPos": {
+        "x": 0,
+        "y": 67,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wingman-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT at AS time, threads AS \"threads\", fds AS \"open files\"\nFROM resource_samples\nWHERE $__timeFilter(at)\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "showPoints": "never",
+            "spanNulls": false,
+            "insertNulls": 900000
+          },
+          "unit": "none",
+          "decimals": 0,
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "threads"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "open files"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 14,
+      "title": "OCR time per sample",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "wingman-pg"
+      },
+      "description": "The median and 95th percentile of wingman's OCR reads in the 5 minutes before each sample. Rising with memory is how the leak degraded perception (Performance 008); the tick budget is 1.5 s. From the RESOURCE line wingman logs every 5 minutes (wingman/resource_monitor.py, Performance 008), read from the session logs by the ingest. The figures are the machine's, not an account's, so the tags box does not apply.",
+      "gridPos": {
+        "x": 12,
+        "y": 67,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wingman-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT at AS time, ocr_med AS \"median\", ocr_p95 AS \"p95\"\nFROM resource_samples\nWHERE $__timeFilter(at)\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "showPoints": "never",
+            "spanNulls": false,
+            "insertNulls": 900000
+          },
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "median"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p95"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 15,
+      "title": "Resources per session",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "wingman-pg"
+      },
+      "description": "One row per session with at least two samples (the summary needs two; a session wingman restarted within 5 minutes has one), any of them in the time range, newest first, figures in MB. Wingman and Game are each process's memory at the last sample; both start near 680 and 500 MB. The rates match the RESOURCE SUMMARY wingman logs at the end of a session: from the first sample after the 10-minute warm-up (the OCR readers load in the first 5 minutes) to the last, so they are blank for a session under 10 minutes. Orange is above the 50 MB/h the summary calls growth, red above its 1,000 MB/h severity bar. Trim released is what malloc_trim gave back when the session went to STANDBY. The verdict is the summary's own; a session that was killed has none. From the RESOURCE line wingman logs every 5 minutes (wingman/resource_monitor.py, Performance 008), read from the session logs by the ingest. The figures are the machine's, not an account's, so the tags box does not apply.",
+      "gridPos": {
+        "x": 0,
+        "y": 75,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wingman-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "WITH picked AS (\n    SELECT DISTINCT session_start FROM resource_samples WHERE $__timeFilter(at)\n), agg AS (\n    SELECT s.session_start,\n           count(*) AS samples,\n           max(elapsed_s) AS last_s,\n           min(elapsed_s) FILTER (WHERE elapsed_s >= 600) AS anchor_s,\n           (array_agg(rss_mb ORDER BY elapsed_s DESC))[1] AS rss_last,\n           (array_agg(rss_mb ORDER BY elapsed_s) FILTER (WHERE elapsed_s >= 600))[1] AS rss_anchor,\n           (array_agg(game_rss_mb ORDER BY elapsed_s DESC))[1] AS game_last,\n           (array_agg(game_rss_mb ORDER BY elapsed_s) FILTER (WHERE elapsed_s >= 600))[1] AS game_anchor,\n           max(peak_rss_mb) AS peak,\n           (array_agg(mi_use_mb ORDER BY elapsed_s DESC))[1] AS live_last,\n           (array_agg(mi_free_mb ORDER BY elapsed_s DESC))[1] AS retained_last,\n           (array_agg(threads ORDER BY elapsed_s DESC))[1] - (array_agg(threads ORDER BY elapsed_s))[1] AS threads_d,\n           (array_agg(fds ORDER BY elapsed_s DESC))[1] - (array_agg(fds ORDER BY elapsed_s))[1] AS fds_d\n    FROM resource_samples s JOIN picked USING (session_start)\n    GROUP BY s.session_start\n    HAVING count(*) >= 2\n)\nSELECT a.session_start AS \"Start\",\n       coalesce(x.tags->>'account', 'no account') AS \"Account\",\n       round(a.last_s / 3600.0, 1) AS \"Hours\",\n       a.samples AS \"Samples\",\n       a.rss_last AS \"Wingman\",\n       round((a.rss_last - a.rss_anchor) * 3600.0 / nullif(a.last_s - a.anchor_s, 0)) AS \"Wingman MB/h\",\n       a.peak AS \"Wingman peak\",\n       a.game_last AS \"Game\",\n       round((a.game_last - a.game_anchor) * 3600.0 / nullif(a.last_s - a.anchor_s, 0)) AS \"Game MB/h\",\n       a.live_last AS \"Malloc live\",\n       a.retained_last AS \"Malloc retained\",\n       a.threads_d AS \"Threads +\",\n       a.fds_d AS \"Open files +\",\n       x.trim_released_mb AS \"Trim released\",\n       x.verdict AS \"Verdict\"\nFROM agg a LEFT JOIN resource_sessions x USING (session_start)\nORDER BY a.session_start DESC"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/MB\\/h$/"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "text",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 50
+                    },
+                    {
+                      "color": "red",
+                      "value": 1000
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Verdict"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 420
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Hours"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true
+      }
     }
   ]
 }

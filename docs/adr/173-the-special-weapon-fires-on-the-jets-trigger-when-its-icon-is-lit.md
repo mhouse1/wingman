@@ -129,6 +129,123 @@ jet_profile:
 - A jet with no `special_weapon` section, or a round whose jet was not read, never presses `q` through
   this path.
 
+Added 2026-11-15 (operator): `tornado` (`match: TORNADO`, lobby label TORNADO ADV) with
+`{ability: towed_decoy, trigger: incoming}`. Its towed decoy draws missiles, as the MiG-23's flare burst does,
+and its ring is the same ring around a radar-dish glyph. In 4 Tornado rounds on 2026-11-15 (04:55–05:19) the
+ring read READY 25 times and nothing pressed `q` (measured).
+
+**D2a. The refuel ability is recognised by its glyph, on any jet** (operator, 2026-11-15: "whenever a jet has
+the refuel special ability as shown by test_screenshots/special_weapon/live/20261111_150659.530_lit11.png
+activate it when afterburner fuel reaches 50% or lower"). The glyph is a fuel can with a circular arrow.
+The HUD draws each glyph identically, so the reader compares the white pixels inside the disc (0.62 of the
+ring's radius, scaled to 40×40) with that crop's. It reads on lit reads only, because the cooldown digits
+replace the glyph, and two reads in a row must agree. Measured on the 689 saved drop crops of 2026-11-07
+to 14:
+
+| Glyph | Overlap with the refuel template |
+|-------|----------------------------------|
+| Refuel (F-111, F-15, F-20) | 0.93–1.00 |
+| Missiles and arrow (F-100) and the J-20's | 0.69–0.72 |
+| Every other glyph (MiG-23, Tornado, Su-47, F-5, Mirage, F-106) | 0.24 or less |
+
+A match is 0.85 (`glyph_min_iou`). A jet with no `special_weapon` profile whose glyph reads refuel
+gets `{ability: refuel, trigger: low_fuel, fuel_at: refuel_fuel_at}` (50). A jet's own profile wins. The
+new `low_fuel` trigger fires when the afterburner fuel reads at or under `fuel_at` on two readings in a
+row. It counts readings, not calls, because the fuel OCR misreads now and then (92, 2, 75 % on 2026-11-11 at
+15:06:28–31), and one misread must not spend the refuel. A refuel jet also skips the 2-flare reload, as
+every jet with a special weapon does (D5).
+
+**D2b. The gun cool-down ability is recognised the same way, and pressed at 80% gun heat**
+(operator, 2026-11-15: "for jets with machine gun cool down special it should auto activate when machine
+gun overheats", from `live/20261107_214153.768_lit13.png`, an F-100 Super Sabre). Its glyph is bullets with
+a circular arrow. In D2a's table it was the "missiles and arrow" row. The reader now takes the best of
+several templates (`refuel_glyph`, `gun_cooldown_glyph`) at `glyph_min_iou` or more. On the 689 crops the
+gun template matched F-100 crops at 0.96–1.00, the refuel glyphs at 0.72 or less and every other glyph at
+0.63 or less.
+
+The overheat comes from the gun heat bar under the crosshair (Design 021: x 760–1160). A new crop
+`GUN_HEAT` covers it, read by `wingman/gun_heat.py`. The bar shows only while the gun is in use: a solid
+green bracket row (816–818) under a fill that grows from the centre (810–815). On the 13 hand-flown gun frames
+of 2026-11-13 the fill was hue 16 (orange) on all 10 heating frames, at widths 0.03 to 0.65. It was hue 6–7
+(red) on both overheated frames (11:28:33 with "OVERHEAT", and the MiG-23 frame of 2026-11-07 with
+"OVERHEAT DAMAGE TAKEN"), at widths 0.53 and 0.50. So overheated means a red fill at any width, needing the
+green bracket and two reads in a row. The bracket keeps red terrain behind that row from reading as a fill:
+on 10,000 of the 960×600 path black-box frames the reader saw the bar once (heating) and never overheated.
+Live overheats will therefore be rare, because wingman seldom holds the gun long. A jet whose glyph is gun
+cool-down gets `{ability: gun_cooldown, trigger: gun_heat}`. Then the operator, the same day: "we should
+activate when the overheat indicator reaches 80%". So `gun_heat` fires when the fill is `gun_heat_at` (0.8)
+of the bar or more, or red, on two reads in a row, and the press waits for the ring as every press does.
+The widest orange fill in the 13 frames was 0.65, so whether the bar is still orange at 0.8 has not been
+seen. The red case covers it if the game turns it red first.
+
+**D2c. A gun cool-down jet opens the gun further out** (operator, 2026-11-15: "for aircrafts with this
+special ability we can activate the machine gun sooner from a further distance, the benefit is we may be
+able to hit target even when gun reticle hasnt shown yet"). The gun's range gate is
+`pursuit_mode.gun_max_range_km` (2.0), which is also where the lead ring is first searched for. On a jet
+whose glyph reads gun cool-down the gate is `gun_cooldown_max_range_km` (3.0) instead. Between 2 and 3 km
+there is no ring, so the gun holds on the marker at the screen centre (the pre-ring rule). The longer bursts
+heat the gun, and D2b's press at 80% heat cools it. The controller reads the glyph through the Perception
+port (`special_weapon_glyph`), and logs `Gun range limit: 3.0 km (gun cool-down jet)` when the limit changes.
+3.0 km is a first value, not a measured one: whether hits land between 2 and 3 km is what the `GUNHIT:`
+lines of the first gun cool-down rounds will show.
+
+**D2d. The glyph is read dim as well as lit, and a named glyph lasts the round** (2026-11-15, from D2c's
+first round). On the F-100 the gun cool-down icon is dim with no lit ring while the gun is cold. The reader
+only looked at the glyph on lit reads, so for the first 2 min 18 s of the round (06:57:52–07:00:10) the jet
+was not recognised and the gun kept its 2 km gate. Once the ring lit, it read `gun_cooldown` at 0.98 and
+the limit went to 3.0 km. Now the glyph mask is relative to the disc (halfway from the disc to the glyph's
+brightest pixels, not an absolute white), and a template match counts lit or dim. `other` still comes from
+lit reads only. It never replaces a named glyph, because the cooldown digits and the active state hide it.
+The glyph is forgotten after 20 s without reads (the lobby). On the 689 crops the relative mask gives the
+same matches as before. The one dim live frame on file is half resolution and scores 0.75. A lit crop put
+through the same halving scores 0.78, so the full-resolution dim score is expected near the lit one
+(inferred, and the next run's `Special weapon glyph:` line will show it).
+
+**D2e. What the first gun cool-down rounds showed, and two log lines to settle the rest** (2026-11-15,
+from the 06:55 and 07:20 sessions; all measured unless marked):
+
+- **The glyph is recognised dim.** The A-4 Skyhawk also carries the gun cool-down glyph. It read
+  `gun_cooldown` at 0.99 five seconds into its first round, with the ring still unlit (D2d working), and at
+  1.00 in its second. Its third round (07:32:53) went 90 s of automatic flight without a recognition, cause
+  unseen.
+- **The gun cool-down ring lights only while the gun has heat.** Each of the A-4's five lit windows began
+  1.5–3.5 s after a burst opened and ended 1–4 s after it stopped. A cold gun shows the dim icon. That fits
+  D2b's press: the ability can only be spent on a warm gun.
+- **The 3 km gate works (D2c).** Bursts opened at 2.0–2.9 km on the F-100 and A-4. Gun damage at that
+  range: 0 in 21 bursts (about 41 s of fire), against 2 of 22 under 2 km. That is not yet a verdict (0 of
+  21 has about a 14% chance at the under-2 km rate).
+- **No press yet, and no failure.** No automatic burst (longest 4.8 s) brought the bar to `Gun heat: HOT`.
+  The one overheat on a gun cool-down jet (A-4, 07:37:33) came under manual control (07:35:19,
+  `GAME_BATTLE_MANUAL`), where wingman presses nothing (SAF-001).
+- **The bar's fill measure can under-read a full bar.** Every overheat was first seen red at a centre run of
+  0.51–0.79, never orange at 0.8. On the MiG-23 overheat frame the centre run is 0.50 while the red reaches
+  0.98 of the way to both ends. So the bar was full, with its middle covered. The live overheats may have
+  been full bars read short (inferred). If so, the 80% press would fall back to the red overheat.
+
+Two DEBUG lines, log only, to separate the open explanations before anything is tuned:
+
+- `GUNHEAT: fill=<centre run> reach=<left>/<right> hue=<h>` on every read while the bar is on screen. It shows
+  how far a burst takes the heat and which measure tracks the game's bar. If the reach leads the centre run
+  live, the 80% test moves to the reach.
+- `GLYPH: unknown for Ns, best <name> <score>, ring n/16 lit` every 10 s while a round's glyph is unknown,
+  and one icon crop (`*_unknown_<name><score>.png`) after 30 s. It shows why a round goes unrecognised.
+
+**D2f. One read at 80% is enough** (2026-11-15, from the F-100's first two cool-down presses, measured). The
+two-reads rule of D2b made the press late both times:
+
+- 12:09: GUNHEAT read 0.38, 0.66, then **0.86 orange** (12:09:16.3), and 1.5 s later 0.80 red, overheated.
+  The second read confirmed "hot" only as the overheat. `q` went out at 12:09:19.3; the ring drained and the
+  gun cooled 1.8 s later.
+- 12:10: **0.87 orange** (12:10:38.7) and **0.91 orange** (12:10:41.7), each followed by a lower read, so
+  neither was confirmed; then 0.81 red at 12:10:43.2 and the press with it. One read would have pressed at
+  12:10:38.7, 4.5 s before the overheat.
+
+Reads come every 1.5 s, and the bar rises about 0.17 a second of fire, so it goes from 0.8 to overheated in
+about a second. A second read can only confirm the overheat. A read counts only with the green bracket row
+and one orange run reaching 0.8 of the bar from the centre, and the two width measures agreed within 0.01 on
+all but one of about 40 live reads. A false read would cost one cool-down. So `hot` is now set by one read
+and cleared by one. The live 12:09 sequence is a test.
+
 Adding a jet is a profile and nothing else. The schema declares the section in `wingman/config_schema.py`
 with its defaults, as CR-018-16 requires.
 
@@ -223,6 +340,10 @@ to `ABSENT`.
    crop to `special_weapon.capture_dir` (`test_screenshots/special_weapon/live/`), up to `capture_max`
    (40) a session. A taken press makes the same drop, so a crop is a misread only when no `Special
    weapon` press line precedes it by under 2 s. A drop to 0 (the HUD gone) is not saved.
+5a. Press capture (added 2026-11-15): a READY that drops to any depth within 5 s of a press is saved, as is
+   the ring a retry finds still lit (`*_retry.png`). This shows what a press the game ignored looked like, and
+   what the 0/16 reads after Tornado presses are. A drop to 0 with no press near it (the HUD going at a death)
+   is still not saved.
 6. Tests: `tests/test_special_weapon.py`. The reader is tested on 17 enumerated frames in
    `test_screenshots/special_weapon/`: 7 ready, 3 draining arcs, 2 cooldowns and 5 with no icon (two of
    them sun glare, one from the locked session). There is one test per gate in D3, plus the retry limit,
@@ -265,3 +386,9 @@ to `ABSENT`.
 | 2026-11-07 | 04:23–05:11, acct3, `make r3` | the above + the drop capture (Implementation item 5) | MiG-23 | 7 | | 28 | 48 min. Summary: `Special weapon: 28 used, 44 triggers with the icon unlit`; score 422.9 per round. 26 drop crops: 22 were taken presses (a crop 1–1.5 s after a press line) and 4 were misreads, **every one a yellow target marker across a lit ring** (D1a). Deaths within 1 s of a press were confirmed against respawn lines; no press went out with the ring unlit. Stopped with `z` at 05:08:45 |
 | 2026-11-07 | 05:12, acct3, `make r3` | the above + D1a (covered sectors) | MiG-23 | 11 (05:13–06:14) | | 28 | 62 min. Summary: `Special weapon: 28 used, 74 triggers with the icon unlit`; score 299.6 per round, inside the round noise, so no verdict on score. 4 misreads in 11 rounds (0.36 a round, against 0.6–0.9 before D1a), all a lit ring against a bright background: 3 at 14 lit and 0 covered (2 cloud, 1 beside an objective marker), 1 at 13 and 0 covered (haze). No marker across the ring. No press went out with the ring unlit, and no retry. Stopped with `z` at 06:11:06 |
 | 2026-11-07 | 06:15, acct3, `make r3` | the above + D1b (READY at 14) | MiG-23 | 20 (06:17–08:25) | | 69 | 2 h 10 min. Summary: `Special weapon: 69 used, 140 triggers with the icon unlit`; score 346.0 per round. 0 retries, 0 errors. Misreads in the first 3 rounds: 3, none at 14 (12 and 13 lit over bright cloud, 9 lit over glare), all the bright-background limit. Ended by the operator's `z` during matchmaking at 08:25:10, followed by their own `make r` |
+| 2026-11-15 | 05:54, acct2, `make r2` | the above + the `tornado` profile + D2a (refuel by glyph) | Tornado ADV (rounds 1–3), then F-100 | running | | | Glyph read `other` (refuel match 0.19) 3 s into the round. First towed decoy at 05:58:50.600, 1 ms after the first flare, with the ring lit. The next read was 0/16, not a draining arc: the Tornado's icon changes whole while the decoy is out, an earlier crop showing a gold glyph. The aircraft was alive (health 43) 3 s later, there was no retry, and later alerts got flares only. Round 2: the first dropped press of the trial (about 200 presses). The decoy at 06:05:27.375 left the ring lit through two more reads, and D3's retry pressed again at 06:05:31.497 (3 s plus one tick, with no new alert). The ring then drained (13/16) 20 ms later. The retry cost 4 s, and alerts after it got flares only. By 06:07, 3 of 8 Tornado presses were not taken (06:05:27, 06:06:29, 06:07:11), each retried and taken 3–4 s later. That compares with 0 retries in about 190 MiG-23 presses. The Tornado's taken presses read two ways on the next read: 13/16 (a gold glyph in a draining arc, as the retries showed) or 0/16 (three presses, each life ending 8–16 s later, cause unseen). Next: the press capture (Implementation item 5a). | | | | Expect, on a Tornado ADV round: `Special weapon towed_decoy: trigger incoming, icon READY` on an alert with the ring lit. On a refuel jet (F-111, F-15, F-20): `Special weapon glyph: refuel`, then `Special weapon refuel: trigger low_fuel` at 50% fuel or lower and the fuel reading rising after |
+| 2026-11-15 | 05:54–06:32, acct2, `make r2` (totals) | as the 05:54 row | Tornado ADV ×3, F-100 ×1 | 5 started | | 15 | Baseline for D2b and D2c, measured: 4 gun bursts in the session, opened at 1.0–1.9 km; the F-100 round had 0 bursts and 0 `q` presses. Ended by the operator's `z` in the lobby |
+| 2026-11-15 | 06:55–07:17, `make r` (main account) | the above + D2b (gun cool-down at 80% heat) + D2c (gun to 3 km) + the press capture | F-100 ×3 | 3 | | 0 | Glyph unread while the ring was unlit (06:57:52–07:00:09), then `gun_cooldown` at 0.98 and `Gun range limit: 3.0 km`. Led to D2d. 14 bursts at 2.0–2.9 km, 0 gun damage. No HOT bar, no press. Ended by a `z` during matchmaking |
+| 2026-11-15 | 07:20–09:14 (operator's restart, main account) | + D2d (glyph read dim) | A-4 ×3, Mirage 2000 ×7, Su-57 ×11 | 18 started | | 0 | A-4 glyph `gun_cooldown` 0.99 at 5 s and 1.00 (D2d works); round 3 unrecognised for 90 s. A-4 ring lit only 1.5–3.5 s after a burst opened (5 of 5). 7 bursts at 2.3–2.9 km, 0 gun damage. One overheat on the A-4 (07:37:33) under manual control. Score 470.5 per round. Led to D2e |
+| 2026-11-15 | 10:42–11:10, 11:16–11:19 (operator's) | as above | F-106 ×1 | 3 and 0 started | | 0 | No special-weapon jet. One XKey listener error at start (BadLength), reconnected | Expect on a gun cool-down jet (F-100): `Special weapon glyph: gun_cooldown`, `Gun range limit: 3.0 km`, bursts opening at 2–3 km, `Gun heat: HOT`, then `Special weapon gun_cooldown: trigger gun_heat` |
+| 2026-11-15 | 11:39, `make r` (main account) | + D2e (GUNHEAT:, GLYPH: unknown) | Su-57 ×2, then F-100 (operator's pick in the lobby) | running | | 0 | Su-57: no icon at all (ability locked); `GLYPH: unknown` with a best match of 0.00–0.08 and a crop showing no Q cap, so behaving as intended. F-100 glyph `gun_cooldown` at 3–5 s (0.99, 0.87, 0.99) and a 3.0 km limit. GUNHEAT: the bar rises about 0.17 a second of fire (0.12, 0.35, 0.61 over a 4.0 s burst; 0.13, 0.38, 0.65 over 3.8 s) and falls to about 0.01 within 1.5 s of stopping. The highest read was 0.65, so 80% needs about 5 s of continuous fire and no automatic burst has lasted that long. The centre run and the reach agreed within 0.01 on every read but one (0.61 against 0.73 on one side). The ring lit 1.5–2 s into each burst and went dim after it, as on the A-4. 5 more bursts at 2.7–2.9 km with 0 gun damage, 26 in all | First gun cool-down presses at 12:09:19 and 12:10:43, both taken, both only at the overheat (two-read rule). Led to D2f |

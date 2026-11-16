@@ -524,9 +524,17 @@ and stall prevention still re-press every tick, which now only renews their leas
 **Yaw, `YAW_LEFT`.** `missile_evade` only.
 
 **Machine gun, `FIRE_MACHINE_GUN`.** `pursuit_gun` only: the pursuit holds it while
-the tracked target is centred (`pursuit_mode.gun_on_centre`, operator 2026-09-28).
+the tracked target is centred (`pursuit_mode.gun_on_centre`, operator 2026-09-28), or
+while a lead ring of that target is in use, wherever it is (ADR 182).
 It is not flight input, but it is held with the tracking holds and goes up with them
 on a cancel, a takeover and loop exit.
+
+**Active weapon, `FIRE_ACTIVE_WEAPON`.** `pursuit_rockets` holds it while the selected
+weapon's class fires `hold_on_lead` (the rocket pod; `weapon.classes`, ADR 180) and the
+weapon's lead diamond is on the crosshair. While such a weapon is selected
+`fire_active_weapon`, the tap every interval loop calls, presses nothing. Like the gun,
+it is not flight input; it goes up with the tracking holds on a cancel, a takeover and
+loop exit.
 
 This table records the code. The throttle's rows are the Actuator's priority data
 (ADR 151). The pitch keys (2026-10-24) and the roll keys (ADR 163) are leased too, with

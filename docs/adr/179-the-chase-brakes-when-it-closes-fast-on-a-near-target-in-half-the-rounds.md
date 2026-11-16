@@ -34,6 +34,11 @@ right we can slow down while turning and then speed up quickly to continue follo
   the release names the yield. Live at 04:24:37 the dive brake took the key 0.2 s in, and the key was
   released and pressed again in the same millisecond. At 04:24:52 the flare roll took the aircraft.
   Both releases were logged as "the target no longer has the steering", which was wrong both times.
+- **D8 (2026-11-14 13:50): every round brakes (`share` 1.0).** Over 77 rounds on the committed code
+  (05:00 to 13:46, mostly Su-47 Berkut), brake rounds had 0.42 encounters under 1.2 km of 3 s or more a
+  round against 0.12 (p 0.01, permutation over rounds). Seconds in range 3.8 against 2.0 (p 0.11), kills
+  2.51 against 1.76 (p 0.07), deaths 3.53 against 3.88 (p 0.37). Without a control arm the encounter
+  tally reports the brake arm only; the 05:00 to 13:46 rounds are the comparison.
 - **D7 (rev 3, 2026-11-14 04:40).** Within the chase the closing brake is asked first and the dive's
   brake second (it was the other way round). The dive goal is set in every dive of -10 degrees or
   steeper under 3,000 m, whether it brakes or not (its cap is 850 KPH). At 04:37:29 a -11 degree dive at

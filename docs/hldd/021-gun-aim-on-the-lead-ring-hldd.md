@@ -42,7 +42,7 @@ What the evidence says so far (all measured unless marked):
 | 0 | The operator's frames measured; a prototype ring reader | Done 2026-11-13: the prototype finds the ring in 12 of 12 frames | "What the screenshots show" |
 | 1 | Shadow: the ring reader and the damage reader log, and nothing flies differently | Built 2026-11-13 (`wingman/lead_ring.py`, `wingman/gun_damage.py`); 44 missions flown; baseline: no damage from 41 bursts without a missile | "Phase 1 build" and "Phase 1 trial log" |
 | 2 | The gun fires on the ring, as a per-round trial | Folded into Phase 3: with the chase on the marker the ring is a median 275 px from the crosshair, so the ring's fire rule alone would almost never open the gun | [ADR 178](../adr/178-the-chase-steers-the-crosshair-onto-the-lead-ring-in-half-the-rounds.md) |
-| 3 | The chase steers on the ring and fires on it, as a per-round trial | Built 2026-11-13 ([ADR 178](../adr/178-the-chase-steers-the-crosshair-onto-the-lead-ring-in-half-the-rounds.md)); live trial on `make r3` | "Phase 3 build" and "Phase 3 trial log" |
+| 3 | The chase steers on the ring and fires on it, as a per-round trial | Built 2026-11-13 ([ADR 178](../adr/178-the-chase-steers-the-crosshair-onto-the-lead-ring-in-half-the-rounds.md)); live trial on `make r3`. Trial ended 2026-11-15 by [ADR 182](../adr/182-the-gun-holds-while-the-lead-ring-shows.md): every round steers on the ring, and the gun holds while a ring is in use, wherever it is | "Phase 3 build" and "Phase 3 trial log" |
 | 4 | Finer aim at close range, if Phase 3's numbers call for it | Not started | |
 | 5 | Target path projection: where the target will be, for the gun beyond the ring's range, for following a crossing target, and for the missiles | Step 1 (offline) scored 2026-11-13: with wingman's own turning taken out, the projection misses the ring by a median 71 px (no lead: 134 px) and names the side the target is going 89% of the time. Not yet good enough to fire on (24% within 40 px) | "Target path projection" |
 
@@ -202,6 +202,10 @@ keep using the marker and the frame centre.
 
 ### D3. The fire rule
 
+Superseded on 2026-11-15 by [ADR 182](../adr/182-the-gun-holds-while-the-lead-ring-shows.md): the gun holds while a ring of the tracked target is in use
+(ADR 178 D2), wherever it is on the screen, and steering the crosshair onto it is the chase's job. The
+text below is the rule as first designed.
+
 - **With a ring:** hold the gun while the ring is within `fire_px` of the crosshair and ADR 177's range
   gate passes. Let go at 1.5 times that distance (the factor the gun already uses), or when no ring has
   been seen for `ring_max_age_s`.
@@ -260,8 +264,9 @@ a 1,200 px high frame and scale with the frame height.
 | Key | Default | Meaning |
 |---|---|---|
 | `enabled` | `true` | The ring reader and the damage reader run and log |
-| `steer_share` | 0.5 in `config.yaml` (schema 0) | The share of rounds that steer on the ring and fire on it (Phase 3, [ADR 178](../adr/178-the-chase-steers-the-crosshair-onto-the-lead-ring-in-half-the-rounds.md)) |
-| `fire_px` | 40 | The ring's largest distance from the crosshair for the gun to open |
+| `steer_share` | 1.0 in `config.yaml` (schema 0; 0.5 until [ADR 182](../adr/182-the-gun-holds-while-the-lead-ring-shows.md)) | The share of rounds that steer on the ring (Phase 3, [ADR 178](../adr/178-the-chase-steers-the-crosshair-onto-the-lead-ring-in-half-the-rounds.md)) |
+| `fire_while_ring_shows` | `true` in `config.yaml` (schema `false`) | The gun holds while a ring is in use, wherever it is ([ADR 182](../adr/182-the-gun-holds-while-the-lead-ring-shows.md)); `false` is ADR 178 D3 |
+| `fire_px` | 60 in `config.yaml` (schema 40) | The ring's largest distance from the crosshair for the gun to open under ADR 178 D3; with `fire_while_ring_shows` on, only the radius of the ring-on-crosshair measure |
 | `search_px` | 450 | Half-width of the search window around the marker |
 | `min_score` | 0.45 | Lowest shape match that counts as a ring |
 | `ring_memory_s` | 0.45 | The steering and the gun keep the ring as the aim point this long after it was last confirmed |
@@ -742,6 +747,46 @@ the operator took over left out. Measured 2026-11-14 04:05.
   code, so none of the gaps is a result yet; the marker arm is 12 rounds short of 40.
 - The revisions changed the ring arm as it went (the 1.2 km limit, the 160 px confirmation, `fire_px`
   60), so the earlier ring rounds are not the current rule.
+
+### Both trials on the committed code, 2026-11-14 05:00 to 13:46
+
+Measured over six logs on `b2528df` (ADR 178 rev 4, ADR 179 rev 3, hit counter rev 6): 77 rounds flown by
+wingman with a round score read, takeover rounds left out (`test_screenshots/gun_lead/tools/trials.py`;
+p is a two-sided permutation test over rounds). Su-47 Berkut in most rounds; the 09:28 session was still
+running.
+
+| Closing brake (ADR 179) | Brake (43 rounds) | Control (34) | p |
+|---|---|---|---|
+| Encounters under 1.2 km lasting 3 s or more, a round | 0.42 | 0.12 | 0.010 |
+| Seconds under 1.2 km, a round | 3.8 | 2.0 | 0.11 |
+| Score a round | 507 | 376 | 0.12 |
+| Kills a round | 2.51 | 1.76 | 0.07 |
+| Deaths a round | 3.53 | 3.88 | 0.37 |
+
+| Ring aim (ADR 178) | Ring (38 rounds) | Marker (39) | p |
+|---|---|---|---|
+| Share of close pictures with the ring within 60 px (rounds with 5 or more) | 0.12 | 0.03 | 0.12 |
+| Score a round | 465 | 434 | 0.72 |
+| Kills a round | 2.13 | 2.23 | 0.85 |
+| Deaths a round | 3.61 | 3.77 | 0.69 |
+
+- **The closing brake keeps wingman in gun range longer.** Encounters of 3 s or more were 3.5 times as
+  common in brake rounds (p 0.01). Seconds in range, kills and score lean the same way. Deaths were not
+  higher. The 68 holds were at a median 426 m/s of closing.
+- **The ring aim puts the ring on the crosshair more often** (12% against 3% of close pictures, p 0.12,
+  as at 02:07 to 04:00). It does not show in kills or score yet.
+- **Rev 7 of the hit counter (2026-11-14 13:50).** A reading counts when seen once; a lone reading above
+  both neighbours is dropped as a misread. The gun's largest step comes from the jet's profile
+  (`jet_profile.profiles.<jet>.gun_step_max`), with 60 as the default; the Su-47's is 110. Its gun
+  steps were 21, 42, 63, 84 and 105 in bursts with no missile near, and its missile steps 155 to 172.
+  Rescored with it, the 78 rounds had 9 bursts of 168 with gun hits: ring arm 6 (13.8 damage a round),
+  marker 3 (15.6), p 0.89; brake arm 6 (19.0), control 3 (9.1), p 0.40. Too few hits to separate arms.
+- **The closing brake goes to every round** (ADR 179 D8). Live with rev 7 from 2026-11-14 15:24 on
+  `make r1` (gate 4,326 passed).
+- **The gun-hit count does not carry over to this jet.** The Su-47's damage steps were 155 to 172 and
+  many changed between single readings (162, 225, 267, 429). Rev 6's limit of 60 for a gun step was set on
+  the Mirage III and MiG-23, and the "read twice" rule drops a count that changes fast. Gun damage by arm
+  is not measured for these rounds.
 
 ## Risks and open questions
 

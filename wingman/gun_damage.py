@@ -116,6 +116,7 @@ class _Burst:
     closed: "float | None" = None
     arm: "str | None" = None      # Phase 3: the round's arm, `ring` or `marker`
     aim: str = "marker"           # what the gun opened on: the ring or the marker
+    gun_step_max: "float | None" = None   # rev 7: the jet's largest gun step
     reads: int = 0
     values: list = field(default_factory=list)
 
@@ -163,11 +164,20 @@ def burst_gain(values: "list[int]") -> "tuple[int, int, int | None, int | None]"
     return gain, drops, (kept[0] if kept else None), (kept[-1] if kept else None)
 
 
-def gun_gain(values: "list[int]") -> int:
-    """The gun's share of a burst's gain: the rises of GUN_STEP_MAX or less
-    between the values `burst_gain` counts. A missile hit (about 94 to 142) and
-    a misread (300 and more) are left out, so a burst near a missile launch
-    still says what the gun did (rev 6)."""
+def gun_gain(values: "list[int]", step_max: "float | None" = None) -> int:
+    """The gun's share of a burst's gain: the rises of `step_max` (default
+    GUN_STEP_MAX) or less between consecutive readings. A missile hit and a
+    misread rise further and are left out, so a burst near a missile launch
+    still says what the gun did (rev 6).
+
+    Rev 7 (2026-11-14): a reading counts when seen once. On the Su-47 the text
+    ran 162, 225, 267, 429 a reading apart, and "read twice in a row" kept none
+    of it: no gun hit counted in 77 rounds. A reading that wraps its neighbour
+    is the neighbour, as before, and a lone reading above both neighbours is a
+    misread and dropped (live: 2204 between 162 and 225; 4433 between 153s).
+    The gun's step differs by jet (Su-47 21 a hit, Mirage III 9 to 55), so the
+    limit comes from the jet's profile (`gun_step_max`)."""
+    limit = GUN_STEP_MAX if step_max is None else step_max
     clean: "list[int]" = []
     for v in values:
         if clean and wrapped(v, clean[-1]):
@@ -176,8 +186,9 @@ def gun_gain(values: "list[int]") -> int:
             junk = clean[-1]
             clean = [v if c == junk else c for c in clean]
         clean.append(v)
-    kept = [v for i, v in enumerate(clean) if i > 0 and clean[i - 1] == v]
-    return sum(b - a for a, b in pairwise(kept) if 0 < b - a <= GUN_STEP_MAX)
+    kept = [v for i, v in enumerate(clean)
+            if not (0 < i < len(clean) - 1 and v > clean[i - 1] and v > clean[i + 1])]
+    return sum(b - a for a, b in pairwise(kept) if 0 < b - a <= limit)
 
 
 class GunDamageLog:
@@ -235,14 +246,15 @@ class GunDamageLog:
 
     def burst_open(self, km: "float | None", ring_px: "float | None",
                    now: "float | None" = None, *, arm: "str | None" = None,
-                   aim: str = "marker") -> None:
+                   aim: str = "marker", gun_step_max: "float | None" = None) -> None:
         if not self._lock.acquire(timeout=0.5):
             return
         try:
             now = time.monotonic() if now is None else now
             if self._burst is not None:
                 self._finish(self._burst)
-            self._burst = _Burst(opened=now, km=km, ring_px=ring_px, arm=arm, aim=aim)
+            self._burst = _Burst(opened=now, km=km, ring_px=ring_px, arm=arm, aim=aim,
+                                 gun_step_max=gun_step_max)
         finally:
             self._lock.release()
 
@@ -303,7 +315,7 @@ class GunDamageLog:
         closed = b.closed if b.closed is not None else time.monotonic()
         held = max(0.0, closed - b.opened)
         gain, drops, first, last = burst_gain(b.values)
-        gun = gun_gain(b.values)
+        gun = gun_gain(b.values, b.gun_step_max)
         tally = self.gun_by_arm.setdefault(b.arm or "-", [0, 0, 0.0, 0])
         tally[0] += 1
         tally[1] += gun > 0

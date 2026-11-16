@@ -346,6 +346,11 @@ class MissionStatsTracker:
             # ADR 179: whether the chase brakes on a fast closure this round.
             self._tag_round("close_brake", event_name.rsplit("_", 1)[1], ts)
 
+        elif event_name in ("hold_arm_hold", "hold_arm_evade"):
+            # ADR 181: whether the chase stays on its target through missile and
+            # terrain warnings this round. Drawn at the same round start.
+            self._tag_round("hold_target", event_name.rsplit("_", 1)[1], ts)
+
         elif event_name in ("gun_arm_ring", "gun_arm_marker"):
             # Design 021 Phase 3: whether the chase steers on the lead ring this
             # round. Drawn at the same round start.

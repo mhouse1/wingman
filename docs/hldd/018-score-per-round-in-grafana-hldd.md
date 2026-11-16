@@ -674,6 +674,29 @@ chart reached all 24 jets, and each tooltip matched the jet's row in Postgres.
   widen it. Compare jets by their ticks, and check the count in the tooltip. The margin on each mean
   is in Wingman by jet.
 
+### Resource trail
+
+Added 2026-11-15 at the operator's request: the memory figures of Performance 008 on the same
+dashboard, under the score panels.
+
+- **Source.** Wingman's `ResourceSampler` (`wingman/resource_monitor.py`) logs a
+  `RESOURCE elapsed=…` line every 5 minutes and a `RESOURCE SUMMARY` block with a `VERDICT` line at
+  the end of a session. No stats file carries them, so the ingest reads them from the session logs:
+  every rotated `logs/wingman_*.log` not yet loaded as complete, and `wingman.log` every time, since
+  the after-session ingest runs before the next start rotates it.
+- **Store.** `resource_samples` holds one row per sample, keyed by the session's start (its log's
+  first line) and the sample's elapsed seconds, so a log read again while its session runs adds
+  only the new lines. `resource_sessions` holds one row per session: its run_id and account from
+  the run-file line, the summary's verdict, and what STANDBY's `malloc_trim` released. A session is
+  complete once its log is rotated or names its run file, and its log is not read again. The first
+  load read 87 logs in about 4 seconds.
+- **Panels.** Memory per sample (wingman RSS, game RSS, malloc live and retained), Threads and open
+  files per sample, OCR time per sample (median and p95), and Resources per session. The session
+  table's MB/h is measured as the summary measures it, from the first sample past the 10-minute
+  warm-up to the last. On 2026-11-15 the 22:41 session's row read +148 and +319 MB/h, peak
+  3,737 MB, the same as its logged summary. The figures belong to the machine, not an account, so
+  the tags box does not apply to these panels.
+
 ### Make targets
 
 | Target | Does |
@@ -692,7 +715,7 @@ followed by a check that `grafana/.env` exists.
 | `grafana/compose.yaml` | The two services |
 | `grafana/.env.example` | The password template; `grafana/.env` is untracked |
 | `grafana/postgres/` | The init script that creates the read-only role |
-| `grafana/schema.sql` | The three tables and their indexes, which the ingest applies before each load |
+| `grafana/schema.sql` | The tables, their indexes and the jet-name view, which the ingest applies before each load |
 | `grafana/changes.yaml` | The change log: one entry per change that can affect play |
 | `grafana/provisioning/datasources/wingman.yaml` | The PostgreSQL data source |
 | `grafana/provisioning/dashboards/wingman.yaml` | The dashboard provider, with UI saves off |

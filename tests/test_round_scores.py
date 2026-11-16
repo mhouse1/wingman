@@ -381,9 +381,131 @@ def test_every_braced_reference_names_a_defined_variable():
 def test_every_round_panel_filters_by_the_tags_box_quoted():
     dashboard = json.loads(Path("grafana/dashboards/score-per-round.json").read_text(encoding="utf-8"))
     sqls = [t["rawSql"] for p in dashboard["panels"] for t in p["targets"]]
-    rounds = [sql for sql in sqls if "squadron_rankings" not in sql]
+    rounds = [sql for sql in sqls if "squadron_rankings" not in sql and "resource_" not in sql]
     assert rounds and all("tags @> ${tags:sqlstring}::jsonb" in sql for sql in rounds)
     assert not any("tags:raw" in sql for sql in sqls)
+
+
+# -- the resource trail (Performance 008, operator 2026-11-15) ------------------------
+
+_SAMPLE_0 = ("RESOURCE elapsed=0s rss_mb=678 d_rss=+0 anon_mb=365 d_anon=+0 mi_use_mb=140 "
+             "d_mi_use=+0 mi_free_mb=0 d_mi_free=+0 shmem_mb=n/a d_shmem=n/a peak_rss_mb=688 "
+             "swap_mb=0 threads=9 d_threads=+0 fds=14 d_fds=+0 gc=(637,8,3) ocr_med=n/a "
+             "ocr_p95=n/a n_ocr=0 pool_depth=n/a game_rss_mb=503 d_game_rss=+0 game_swap_mb=0 "
+             "sys_swap_mb=5040 load=0.7/0.37/0.27")
+_SAMPLE_1 = ("RESOURCE elapsed=900s rss_mb=2542 d_rss=+1864 anon_mb=2199 d_anon=+1834 "
+             "mi_use_mb=1543 d_mi_use=+1403 mi_free_mb=272 d_mi_free=+272 shmem_mb=n/a "
+             "d_shmem=n/a peak_rss_mb=3032 swap_mb=0 threads=31 d_threads=+22 fds=17 d_fds=+3 "
+             "gc=(134,2,8) ocr_med=0.34 ocr_p95=0.50 n_ocr=894 pool_depth=0 game_rss_mb=1404 "
+             "d_game_rss=+901 game_swap_mb=0 sys_swap_mb=5039 load=18.19/11.16/4.89")
+_SESSION_START = datetime(2026, 10, 29, 4, 0, 0, tzinfo=rs.TZ)
+# The session-end block as the logger writes it: one stamped line, then the rest
+# of the message on lines of its own.
+_RESOURCE_LOG = [
+    _line("04:00:00", _SAMPLE_0),
+    _line("04:15:00", "\x1b[92m" + _SAMPLE_1 + "\x1b[0m"),
+    _line("10:00:00", "RESOURCE SUMMARY elapsed=6.0h samples=72 measured=5.8h "
+                      "(rates exclude 10min warm-up)"),
+    "  wingman rss 678->3410MB (+2732)  rate=+148 MB/h  peak=3737MB\n",
+    "  VERDICT: BOTH processes growing above 50 MB/h (game faster) — see Performance 008\n",
+    _line("10:00:01", "STANDBY: malloc_trim released 1716 MB (rss 3335 -> 1619 MB)"),
+    _line("10:05:00", "PerformanceTracker: session data written to "
+                      "docs/performance/current/run_20261029_040000_acct2.json"),
+]
+
+
+def test_each_resource_line_is_a_sample_at_its_time_with_its_figures():
+    samples, _ = rs.resources_from_log(_RESOURCE_LOG, _SESSION_START)
+    assert [(s.elapsed_s, s.at) for s in samples] == [
+        (0, datetime(2026, 10, 29, 4, 0, 0, 123000, tzinfo=rs.TZ)),
+        (900, datetime(2026, 10, 29, 4, 15, 0, 123000, tzinfo=rs.TZ))]
+    first, second = (s.figures for s in samples)
+    assert (first["rss_mb"], first["game_rss_mb"], first["threads"], first["fds"]) == (
+        678, 503, 9, 14)
+    assert first["ocr_med"] is None and first["shmem_mb"] is None, "n/a is NULL"
+    assert (second["mi_use_mb"], second["mi_free_mb"], second["ocr_p95"]) == (1543, 272, 0.5)
+    assert (second["load1"], second["load5"], second["load15"]) == (18.19, 11.16, 4.89)
+    assert set(first) == set(rs.RESOURCE_FIGURES)
+
+
+def test_the_summary_line_is_not_a_sample():
+    samples, _ = rs.resources_from_log(_RESOURCE_LOG, _SESSION_START)
+    assert len(samples) == 2
+
+
+def test_a_resource_session_keeps_its_verdict_trim_and_account():
+    _, session = rs.resources_from_log(_RESOURCE_LOG, _SESSION_START)
+    assert session == rs.ResourceSession(
+        _SESSION_START, "20261029_040000_acct2",
+        "BOTH processes growing above 50 MB/h (game faster) — see Performance 008",
+        1716, True, {"account": "mobius2"})
+
+
+def test_a_running_session_is_not_complete_until_its_log_is_rotated():
+    running = _RESOURCE_LOG[:2]
+    _, session = rs.resources_from_log(running, _SESSION_START)
+    assert (session.run_id, session.verdict, session.complete, session.tags) == (
+        None, None, False, {})
+    _, rotated = rs.resources_from_log(running, _SESSION_START, finished=True)
+    assert rotated.complete
+
+
+def test_a_log_without_a_sample_has_no_resource_session():
+    assert rs.resources_from_log(_RESOURCE_LOG[2:], _SESSION_START) == ([], None)
+
+
+def test_a_complete_sessions_log_is_not_read_again_but_the_current_log_always_is(tmp_path):
+    done, open_, current = (tmp_path / n for n in ("a.log", "b.log", "wingman.log"))
+    done.write_text(_line("01:00:00", "x"), encoding="utf-8")
+    open_.write_text(_line("02:00:00", "x"), encoding="utf-8")
+    current.write_text(_line("03:00:00", "x"), encoding="utf-8")
+    complete = [rs.log_start(done), rs.log_start(current)]
+    found = rs.logs_for_resources([done, open_], current, complete)
+    assert [(p.name, finished) for p, _start, finished in found] == [
+        ("b.log", True), ("wingman.log", False)]
+
+
+def test_the_resource_rows_are_upserted_and_never_deleted():
+    samples, session = rs.resources_from_log(_RESOURCE_LOG, _SESSION_START)
+    script = rs.load_script("r\n", "c\n", "q\n", rs.resources_csv(samples),
+                            rs.sessions_csv([session]))
+    body = script[:script.index("COMMIT;")]
+    assert "ON CONFLICT (session_start, elapsed_s) DO UPDATE" in body
+    assert "ON CONFLICT (session_start) DO UPDATE" in body
+    assert "DELETE FROM resource" not in script
+    first = next(csv.reader(io.StringIO(rs.resources_csv(samples))))
+    assert len(first) == len(rs.RESOURCE_COLUMNS)
+    assert first[1:3] == ["0", "2026-10-29T04:00:00.123000-04:00"]
+    assert first[3] == "678" and first[rs.RESOURCE_COLUMNS.index("ocr_med")] == ""
+    (row,) = csv.reader(io.StringIO(rs.sessions_csv([session])))
+    assert row[4] == "true" and json.loads(row[5]) == {"account": "mobius2"}
+
+
+def test_the_schema_has_every_resource_column():
+    schema = Path("grafana/schema.sql").read_text(encoding="utf-8")
+    for column in rs.RESOURCE_COLUMNS + rs.SESSION_COLUMNS:
+        assert re.search(rf"^\s+{column}\s", schema, re.M), column
+
+
+def test_the_resource_panels_sit_under_the_score_panels_and_ignore_the_tags_box():
+    dashboard = json.loads(Path("grafana/dashboards/score-per-round.json").read_text(encoding="utf-8"))
+    panels = [p for p in dashboard["panels"]
+              if any("resource_samples" in t["rawSql"] for t in p["targets"])]
+    assert [p["title"] for p in panels] == ["Memory per sample (MB)",
+                                            "Threads and open files per sample",
+                                            "OCR time per sample", "Resources per session"]
+    others = [p for p in dashboard["panels"] if p not in panels]
+    assert min(p["gridPos"]["y"] for p in panels) == max(
+        p["gridPos"]["y"] + p["gridPos"]["h"] for p in others)
+    assert not any("tags @>" in t["rawSql"] for p in panels for t in p["targets"])
+
+
+def test_the_session_rates_start_after_the_summarys_warm_up():
+    """The table's MB/h must be the RESOURCE SUMMARY's: from the first sample past the
+    warm-up, as ResourceSampler measures it."""
+    from wingman import resource_monitor
+    sql = dict(_dashboard_sql())["Resources per session"]
+    assert f"elapsed_s >= {resource_monitor._WARMUP_S:.0f}" in sql
 
 
 # -- the switch -------------------------------------------------------------------
