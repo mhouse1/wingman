@@ -235,6 +235,23 @@ class TestReseed:
         p.update(None, 5100, now_s=4.5)   # next in-bounds reading seeds
         assert p.snapshot(4.5).altitude.value == 5100
 
+    def test_altitude_below_zero_is_a_real_reading(self):
+        """Design 020: the HUD shows the map mesh's height, signed; it read -206 m over
+        Crimson Canyon's water (2026-11-07). Below the deepest map's floor is garbage."""
+        p = _proc()
+        p.update(None, -206, now_s=0.0)
+        p.update(None, -195, now_s=1.5)
+        assert p.snapshot(1.5).altitude.value is not None
+        assert p.snapshot(1.5).altitude.value < 0
+        q = _proc()
+        q.update(None, -5000, now_s=0.0)          # below min_altitude_m (-1,600)
+        assert q.snapshot(0.0).altitude.value is None
+
+    def test_speed_below_zero_is_still_out_of_envelope(self):
+        p = _proc()
+        p.update(-500, None, now_s=0.0)
+        assert p.snapshot(0.0).speed.value is None
+
     def test_accept_resets_rejected_streak(self):
         p = _proc(reseed_after_rejections=3)
         p.update(None, 5000, now_s=0.0)

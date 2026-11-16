@@ -176,7 +176,7 @@ def _linux_click(x: int, y: int, count: int = 1) -> None:
       XTest clicks to a window only while the operator's real mouse is over the
       nested window, so their mouse is elsewhere;
     - the pointer is not where it was just sent. The operator's mouse is over
-      the window and moving, and is steering the pointer (2026-10-02 06:25: a
+      the window and moving, and is steering the pointer (2026-10-02: a
       PLAY click read back at (210, 382), then (360, 486) after a re-aim, and
       went out there).
 
@@ -272,7 +272,7 @@ _XKEY_ALIASES = {
     "left": "Left",
     "right": "Right",
     # Punctuation must use its X11 keysym NAME — string_to_keysym(';') returns
-    # 0 (observed 2026-08-11 07:27:22: "unknown keysym for ';'" from cleanup's
+    # 0 (observed 2026-08-11: "unknown keysym for ';'" from cleanup's
     # YAW_LEFT release; ADR 070 V1). Letters and digits resolve as themselves.
     ";": "semicolon",
     "'": "apostrophe",
@@ -446,7 +446,7 @@ def set_injected_keys(keys) -> None:
     could not happen — injection went to one display and observation to another —
     so adding the second listener introduced it.
 
-    Observed 2026-08-30 08:27: wingman's own 'u', 'p' and 'm' injections fired
+    Observed 2026-08-30: wingman's own 'u', 'p' and 'm' injections fired
     the J20-mission, padlock and force-lobby hotkeys, which drove the FSM into a
     GAME_STARTING/GAME_LOBBY oscillation that never reached battle.
 
@@ -524,13 +524,13 @@ def should_deliver_hotkey(display_name: str, key_name: str, state: int) -> bool:
 # --- deliberate display teardown (ADR 121) ----------------------------------
 # Closing the nested display kills the XRecord connection the hotkey listener is
 # blocked on, and the listener cannot tell that from a crash. Measured on every
-# session that tears :3 down — 2026-09-05 22:35, 2026-09-06 04:28 and 05:13 — the
+# session that tears :3 down — 2026-09-05 and twice on 2026-09-06 — the
 # listener logged ERROR one millisecond after wingman's own "closing Xwayland"
 # line, then scheduled a reconnect to the display it had just destroyed:
 #
-#   04:28:13,803 Nested display: closing Xwayland for :3
-#   04:28:13,804 [ERROR] XKey listener thread died: Display connection closed by server
-#   04:28:13,804 XKey: reconnecting display in 3s (attempt 1)
+# Nested display: closing Xwayland for :3
+# [ERROR] XKey listener thread died: Display connection closed by server
+# XKey: reconnecting display in 3s (attempt 1)
 #
 # Harmless — the process exits before the timer fires — but it puts an ERROR in
 # every clean shutdown, and an ERROR that always fires cannot be used to notice
@@ -758,7 +758,7 @@ class StuckModifierGuard:
 # Deaf-listener watchdog (2026-09-26, SAF-001). Wingman's own KeyPress
 # injections per display: a listener on a display where wingman pressed keys
 # in the last interval must have heard them. Measured: 3 of 21 sessions that
-# day (04:12, 04:37, 15:53) had the :3 listener hear 0 presses in every
+# day had the :3 listener hear 0 presses in every
 # one-minute interval, from the start, with nothing in the log to say why, and
 # an ENTER typed into the game window was not heard. Xlib's X.KeyPress is 2.
 _KEYPRESS = 2
@@ -859,7 +859,7 @@ def _wake_record_connection(d_rec, display_name: str) -> None:
 
     Closing a socket does not wake a thread blocked reading it on Linux, and
     python-xlib's close() flushes first, under the lock that blocked read holds:
-    on 2026-10-15 at 21:42 the deaf-listener watchdog's close left the :3
+    on 2026-10-15 the deaf-listener watchdog's close left the :3
     listener blocked, and the operator's keys on the game window unheard, for 19
     minutes (Code Review 019 CR-019-16). Shutting the socket down does wake the
     reader, without python-xlib's locks; its read then fails, and the loop's
@@ -981,6 +981,14 @@ class _LinuxXTestKeyboard:
 
     def unhook_all(self) -> None:
         self._stop.set()
+        # Every hook goes, not only the recording: standby registers Backspace and
+        # z next, and a listener that outlives this, or the one started for them,
+        # read the old table. On 2026-11-02 a `u` in standby started
+        # mission_j20 with no main loop, and it fired into the operator's game
+        # every second (ADR 169 named the leak).
+        with self._lock:
+            self._grabbed.clear()
+            self._pending.clear()
         for _disp, (_ctrl, _ctx) in list(self._contexts.items()):
             try:
                 _ctrl.record_disable_context(_ctx)

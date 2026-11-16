@@ -2,7 +2,7 @@
 
 | Status | Date | Wingman Version |
 |--------|------|-----------------|
-| Draft | 2026-05-25 | 1.6.10 |
+| Draft | 2026-11-14 | 1.9.4 |
 
 ## Purpose
 
@@ -33,26 +33,33 @@ It should quickly communicate value, current capability, and first-run path whil
    - Use README as a hub; link to ADRs and job aids for detailed material.
 6. Be maintainable.
    - Prefer concise sections that are easy to update when features change.
+7. Keep word count low.
+   - The README sells value; every extra paragraph costs reader attention.
+   - Quick Start shows the commands and links to job aids for setup and operation detail.
 
 ## Recommended README Structure
+
+A guide to section order, not a fixed template. Add a section only when it earns its words.
 
 1. Hero section
    - Project value statement
    - Current version
    - One or more visuals
-2. Vision
-   - Short aspirational statement
+2. Vision and why the project exists
+   - Short aspirational statement and the problem it answers
 3. What it does today
    - Concrete current capabilities and loop behavior
 4. Quick start
-   - Setup and core commands
+   - Run commands, then links to job aids for setup and operation detail
 5. Runtime operation
    - Hotkeys and operating model
-6. Replay/testing/performance
+6. Validation, calibration and performance
    - Current validation commands and status
-7. Roadmap
+7. Hardware target
+   - What it runs on, and why
+8. Roadmap
    - Near/mid/future direction
-8. Documentation index
+9. Documentation index
    - Links to deeper docs
 
 ## Guardrails
@@ -68,11 +75,12 @@ Before finalizing README edits, verify:
 
 1. `WINGMAN_VERSION` matches `wingman/main.py`.
 2. Commands reflect current `Makefile` targets.
-3. Hotkeys match `wingman/controller.py` bindings.
+3. Hotkeys match the bindings in `wingman/hotkeys.py` (`register_hotkeys()`).
 4. Replay/testing statements match current implemented paths.
 5. Roadmap section aligns with `docs/PROJECT_AI_ROADMAP.md`.
 6. At least one section addresses current capabilities and one addresses future direction.
+7. Every doc reference is a relative link that resolves to an existing file (CLAUDE.md, "README — Link Every Doc Reference").
 
-## Copilot Usage Note
+## Editing Note
 
-When editing `README.md` with Copilot, treat this document as the source of intent for tone, structure, and accuracy constraints.
+Anyone editing `README.md`, by hand or with an AI assistant, treats this document as the source of intent for tone, structure, and accuracy constraints.

@@ -85,6 +85,22 @@ def test_listener_thread_is_stoppable():
     assert kbd._stop.is_set()
 
 
+def test_unhook_all_drops_every_hotkey_so_standby_keeps_only_its_own(monkeypatch):
+    """2026-11-02: in standby a `u` started mission_j20 with no main loop,
+    because unhook_all left the listener's table full (ADR 169). After it, and the
+    two keys standby registers, nothing else may be there to dispatch."""
+    monkeypatch.setattr(input_linux._LinuxXTestKeyboard, "_ensure_listener", lambda self: None)
+    kbd = input_linux._LinuxXTestKeyboard()
+    kbd._grabbed[30] = ("u", lambda *_: None)       # resolved by a listener earlier
+    kbd.on_press_key("o", lambda *_: None)          # registered, not yet resolved
+    kbd.unhook_all()
+    kbd.on_press_key("backspace", lambda *_: None)
+    kbd.on_press_key("z", lambda *_: None)
+
+    assert kbd._grabbed == {}
+    assert set(kbd._pending) == {"backspace", "z"}
+
+
 def test_module_scope_imports_are_stdlib_only():
     """Invariant 2 of the module docstring: wingman runs on Windows too, and
     `controller.py` imports `input_linux` unconditionally to re-export its
@@ -372,7 +388,7 @@ def test_listener_loop_takes_its_display_rather_than_reading_the_environment():
 
 # --- ADR 099: ordinary typing must not fly the aircraft ----------------------
 #
-# Observed 2026-08-30 08:27. Before the nested lane the game held focus on the
+# Observed 2026-08-30. Before the nested lane the game held focus on the
 # operator's display, so bare single-letter hotkeys were unreachable by ordinary
 # typing — the keys went to the game. Moving the game to its own display freed
 # the operator's keyboard, which is the point, and simultaneously made every
@@ -940,7 +956,7 @@ def test_click_detaches_when_the_mouse_leaves_the_window_mid_burst(
 
 def test_click_wins_over_the_operators_mouse_moving_in_the_window(
         monkeypatch, caplog, isolation):
-    """2026-10-02 06:25: with the operator's mouse moving over the game window
+    """2026-10-02: with the operator's mouse moving over the game window
     a PLAY click read back at (210, 382), re-aimed, read (360, 486) and went
     out there. Wingman then believed it was matchmaking and refused 'm' seven
     times. The click must take the pointer for as long as it needs it."""
@@ -984,7 +1000,7 @@ def test_the_host_pointer_is_reattached_when_the_click_fails_part_way(
 
 def test_overlapping_clicks_reattach_only_when_the_last_one_finishes(isolation):
     """The lobby scanner clicks from its own thread while the main loop is
-    mid-burst (seen 2026-10-02 05:10:30). The first to finish must not hand the
+    mid-burst (seen 2026-10-02). The first to finish must not hand the
     mouse back under the other."""
     calls, _ = isolation
     assert input_linux._hold_host_pointer_away(":3") is True
@@ -1016,7 +1032,7 @@ def test_click_over_no_window_only_reports_when_isolation_is_off(monkeypatch, ca
 
 
 # --- CR-019-16: a deaf listener whose recording ignores the disable -------------
-# 2026-10-15 21:42:32: the watchdog disabled the :3 recording, the blocked
+# 2026-10-15: the watchdog disabled the :3 recording, the blocked
 # record_enable_context never returned, and its close() from the watchdog thread
 # woke nothing. The :3 listener heard no key for 19 minutes.
 
@@ -1078,7 +1094,7 @@ def _wedged_rec(created, shutdown_wakes: bool):
                 raise ConnectionError("Display connection closed by server")
 
         def record_disable_context(self, ctx):
-            pass                               # what 21:42 looked like
+            pass                               # what the incident looked like
 
         def record_free_context(self, ctx):
             pass

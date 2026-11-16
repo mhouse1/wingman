@@ -4,7 +4,7 @@ Wingman flies a fighter jet in MetalStorm (PC) on its own. It reads the screen,
 decides what to do, and presses the keys, for hours at a time, on an ordinary
 CPU.
 
-Current version: v1.9.2 — runs on **Windows** and **Linux** (GNOME Wayland, Ubuntu 24.04 or later), on **CPU only**, from a low-end laptop to a desktop workstation.
+Current version: v1.9.4 — runs on **Windows** and **Linux** (GNOME Wayland, Ubuntu 24.04 or later), on **CPU only**, from a low-end laptop to a desktop workstation.
 
 ![Wingman mid-fight: one enemy destroyed, already chasing the next](docs/images/game-battle-hud-pursuit.png)
 
@@ -17,9 +17,9 @@ already chasing the next, a JF-17 2 km away, under the magenta marker.*
   evasion on, against 68% without (122 engagements, [ADR 070](docs/adr/070-missile-evade-tactic.md)).
 - **Reacts fast.** 0.49 s on average from missile warning to flares, measured
   on the release performance baseline.
-- **Any jet, in progress.** [ACS](#acs-one-combat-mode-for-any-fighter)
-  (Autonomy Core System) is one combat mode for any fighter, meant to replace
-  the per-jet mission scripts.
+- **Any jet, in progress.** ACS (Autonomy Core System,
+  [Design 011](docs/hldd/011-acs-mode-hldd.md)) is one combat mode for any
+  fighter, meant to replace the per-jet mission scripts.
 - **Stays out of your way.** On Linux the game runs on its own display, so you
   can keep using your computer while it plays.
 
@@ -54,22 +54,26 @@ per-session statistics are written on exit.
 One full match cycle:
 
 1. Lobby, popups and matchmaking are handled end to end, into battle.
-2. In battle, the configured mission flies the aircraft. The behavior tree
-   handles navigation, climb and disengage, and ACS chases the enemies it can
+2. In battle, the mission for the jet flies the aircraft. The behavior tree
+   handles navigation, climb and disengage, and ACS
+   ([Design 011](docs/hldd/011-acs-mode-hldd.md)) chases the enemies it can
    see (see [Roadmap](#roadmap)).
 3. Incoming missile: flare bursts plus an evasive manoeuvre ([ADR 070](docs/adr/070-missile-evade-tactic.md)).
-4. Missiles empty: ACS pursuit on the secondary weapon. With every rack empty
-   it flies to the resupply point to rearm
+4. Missiles empty: ACS ([Design 011](docs/hldd/011-acs-mode-hldd.md)) pursuit
+   on the secondary weapon. With every rack empty it flies to the resupply
+   point to rearm
    ([ADR 152](docs/adr/152-pursuit-resupply-priority.md), in live trial). The
    eject-and-dive for a rearmed respawn remains when pursuit is off or its
-   time cap expires.
+   time cap expires. A J-20 comes down to the ACS altitude before this pursuit,
+   and after the rearm climbs back and resumes search and destroy
+   ([ADR 171](docs/adr/171-the-jet-picks-the-mission-and-j20-comes-back-from-a-rearm.md), in live trial).
 5. Respawn detection (dual-sensor, [ADR 064](docs/adr/064-dual-sensor-respawn-detection.md)) and immediate restart the moment
    health returns.
 6. Match-end click-through and return to lobby, then the loop repeats.
 
-Manual takeover is always available: press **Enter** at the game window (see
-Runtime Hotkeys). A respawn returns control to wingman and restarts the
-mission, so the aircraft is never left flying uncommanded.
+Manual takeover is always available: press **Enter** at the game window, from
+the Good Luck countdown on (see Runtime Hotkeys). It holds until the round ends
+or you press **`u`**, and the next round starts under wingman.
 
 ### Current Capabilities
 
@@ -84,7 +88,7 @@ mission, so the aircraft is never left flying uncommanded.
 | Resupply priority in pursuit: steers to the resupply point as missiles run out, and rearms instead of ejecting ([ADR 152](docs/adr/152-pursuit-resupply-priority.md)) | ⚙️ live trial |
 | Priority target in pursuit: steers to the crown objective's marker, and by its pin on the indicator ring when it is off screen ([Design 015](docs/hldd/015-target-tracking-pursuit-mode-hldd.md)) | ⚙️ live trial |
 | Air superiority in pursuit: flies through the control points the enemy holds, the one in view first, then by the red pins on the indicator ring ([Design 015](docs/hldd/015-target-tracking-pursuit-mode-hldd.md)) | ⚙️ live trial |
-| Ground-crash recovery: nose-up on the afterburner when altitude and descent rate predict an impact, with the airbrake in a steep dive or at 900 KPH and over, including inside an ACS pursuit (ADR [086](docs/adr/086-climb-exit-attitude-and-time-to-ground-recovery.md)/[137](docs/adr/137-emergency-climb-airbrake-and-crash-instrument.md)/[148](docs/adr/148-a-dive-recovery-flies-through-a-pursuit.md)/[159](docs/adr/159-the-emergency-climbs-nose-up-carries-the-afterburner.md)) | ✅ |
+| Ground-crash recovery: nose-up on the afterburner when altitude and descent rate predict an impact, with the airbrake in a steep dive or at 900 KPH and over, including inside an ACS ([Design 011](docs/hldd/011-acs-mode-hldd.md)) pursuit (ADR [086](docs/adr/086-climb-exit-attitude-and-time-to-ground-recovery.md)/[137](docs/adr/137-emergency-climb-airbrake-and-crash-instrument.md)/[148](docs/adr/148-a-dive-recovery-flies-through-a-pursuit.md)/[159](docs/adr/159-the-emergency-climbs-nose-up-carries-the-afterburner.md)) | ✅ |
 | Speed limit in dives during a pursuit: under 3,000 m, a dive steeper than 10 degrees gets the airbrake whenever the speed reads over 850 KPH, as objective approaches already do ([Design 001](docs/hldd/001-terrain-avoidance-hldd.md)) | ⚙️ live trial |
 | Terrain warnings from the forward view: the picture expanding round the flight path, outlines that grow, and a clear-path planner that checks the line to the target. Each one only logs; two agreeing within a second start the emergency climb ([Design 001](docs/hldd/001-terrain-avoidance-hldd.md)) | ⚙️ live trial |
 | Metric HUD telemetry (altitude, speed, flight-path angle) feeding eject, evade and climb (ADR [038](docs/adr/038-game-battle-altitude-speed-signals-for-phase3-and-eject-dive.md)/[067](docs/adr/067-metric-hud-units-pitch-normalization-recalibration.md)) | ✅ |
@@ -122,82 +126,18 @@ magenta band runs from it to the target being pursued.*
 
 ## Quick Start
 
-### Prerequisites
-
 ```bash
 uv sync --all-groups
+make r      # launches MetalStorm (Linux) and runs Wingman; logs to wingman.log
 ```
 
-**Linux only (one-time setup):** See [`docs/job-aids/010-run-metalstorm-on-linux.md`](docs/job-aids/010-run-metalstorm-on-linux.md) for the full checklist. The short version:
+The game runs on its own nested display, so you can keep using the computer.
+Press Enter in the game window to fly it yourself; `ctrl+alt+z` finishes the
+round and exits. Every key is under [Runtime Hotkeys](#runtime-hotkeys).
 
-1. Install MetalStorm via Heroic Games Launcher (Flatpak) with Proton-GE.
-2. Install `umu-run` standalone — Makefile variables `UMU_RUN`, `PROTON_ROOT`, `WINE_PREFIX`, `GAME_EXE` point to your install.
-3. Run `make r` once to trigger the one-time PipeWire screen-share dialog; subsequent runs skip it automatically. (Not needed while the nested display lane is enabled — it captures its own X server directly and never uses the portal.)
-4. Set MetalStorm's Controls mode to **Controller / Joystick** in-game settings (required for pitch input under Wine — see [ADR 051](docs/adr/051-linux-pitch-control-joystick-binding.md)).
-5. Configure in-game keybindings as described in [`docs/job-aids/011-wingman-keybindings.md`](docs/job-aids/011-wingman-keybindings.md).
-
-No `sudo`, no `input` group membership, no root access required.
-
-### Run
-
-```bash
-make r     # run Wingman, with DEBUG logs written to wingman.log
-```
-
-On Linux, `make r` automatically launches MetalStorm via `umu-run` if it is not already running, waits for the lobby to appear, then starts Wingman. No manual game launch step is needed.
-
-On Windows, launch MetalStorm manually before running `make r`.
-
-**Only one wingman runs at a time.** A second instance is refused at startup
-([SAF-014](docs/requirements/001-safety.md)): two of them inject into the same display and fight each other and the
-operator, and neither can detect the other — each behaves correctly in
-isolation, so nothing shows up in either log.
-
-### Using the computer while Wingman runs
-
-By default (`nested.enabled: true` in `wingman/config.yaml`) the game runs on its
-own nested X display. Wingman captures and injects there, so its keystrokes
-cannot reach whatever you are typing in — you can use the machine normally while
-a session runs. Your hotkeys still work: wingman watches for them on both your
-display and the nested one, so they register whether you are looking at the game
-or at an X11 window of your own. (Native-Wayland windows such as VS Code cannot
-be observed by any X11 listener — a pre-existing limitation.)
-
-```bash
-make r               # honours nested.enabled
-make r NESTED=0      # force the on-screen lane for one run
-make nested-status   # is the lane up, and what holds focus
-make nested-stop     # tear the nested server down
-```
-
-Stopping a session:
-
-- **`z`** — finish the round, then close MetalStorm and the nested display.
-- **Backspace** — two-stage. The first press stops wingman and **leaves
-  MetalStorm running**, so you can take over and keep flying by hand, even
-  mid-battle; wingman waits in standby. Press Backspace again, whenever you are
-  done, to close MetalStorm and the nested display and exit. Ctrl-C during
-  standby leaves everything up.
-
-Guard-triggered exits leave both up, because they mean "restart wingman". Set
-`finish_round_then_exit.close_game: false` to stop wingman only.
-
-**Manual takeover:** press **Enter** at the game window to take the aircraft —
-wingman stops instantly, releases every key, and from then on only deploys
-flares. Press **`u`** to hand it back. Arrow keys also take over, and
-`ctrl+alt+i/j/k/l` works from your own display. Bare `i/j/k/l` at the game
-window are wingman's own roll commands and are ignored there. A respawn ends the
-takeover and the last mission resumes automatically — set
-`mission.manual_takeover.persist_through_respawn: true` to keep flying across
-deaths instead.
-
-**Hotkeys need `ctrl+alt` while the nested lane is on** — `ctrl+alt+z`,
-`ctrl+alt+backspace`, and so on. Without the game holding your keyboard, bare
-single letters would fire from ordinary typing: the letter `z` in a text editor
-would close the game. Bare keys still work when the nested game window itself
-has focus.
-
-See [ADR 099](docs/adr/099-nested-display-lane-for-unattended-operation.md) and [`docs/hldd/009-nested-display-isolation-hldd.md`](docs/hldd/009-nested-display-isolation-hldd.md) for the design.
+- First-time Linux setup: [Job Aid 010](docs/job-aids/010-run-metalstorm-on-linux.md)
+- In-game keybindings: [Job Aid 011](docs/job-aids/011-wingman-keybindings.md)
+- Nested display design: [ADR 099](docs/adr/099-nested-display-lane-for-unattended-operation.md)
 
 ---
 
@@ -211,7 +151,7 @@ on your own display, and work bare when the nested game window has focus. See [A
 | Key | Action |
 |-----|--------|
 | `enter` | **Manual takeover** — wingman releases every control instantly; only flare deployment continues |
-| `u` | Start the configured mission (`mission.default_mission`) — and, while in manual, hand control back to wingman |
+| `u` | Start the mission for the jet on record (`mission.default_mission` when it has no profile) — and, while in manual, hand control back to wingman |
 | `o` | Start ACS_MISSION, taking the aircraft from a running mission |
 | `n` | Activate unattended mode (also auto-enabled from config) |
 | `end` | Cancel active mission |
@@ -224,11 +164,13 @@ on your own display, and work bare when the nested game window has focus. See [A
 | `backspace` | Stop wingman, leaving MetalStorm up for manual flight; press again to close everything |
 | `z` | Finish the round, then exit and close MetalStorm |
 
-**Missions.** `mission.default_mission` in `wingman/config.yaml` picks the
-mission, and battle entry, respawn and `u` all launch it ([ADR 145](docs/adr/145-mission-jas39-cloak-and-u-launches-the-configured-mission.md)). There are
-two. `acs` (ACS_MISSION, shipped) climbs, fires along the bore sight and hands
-over to pursuit; it was the Su-30 script, renamed once it flew other jets.
-`j20` is the original padlock mission. The loiter, survey, JAS39 and F-111
+**Missions.** The jet picks the mission ([ADR 171](docs/adr/171-the-jet-picks-the-mission-and-j20-comes-back-from-a-rearm.md)): the name on the lobby label is matched against
+`jet_profile.profiles`, and any other jet flies `mission.default_mission` in
+`wingman/config.yaml`. Battle entry and `u` launch it, and a respawn restarts it ([ADR 145](docs/adr/145-mission-jas39-cloak-and-u-launches-the-configured-mission.md)). There are
+two. `acs` (ACS_MISSION, the default, [Design 011](docs/hldd/011-acs-mode-hldd.md))
+climbs, fires along the bore sight and hands over to pursuit; it was the Su-30 script, renamed once it flew other jets.
+`j20`, flown by the J-20, is the original padlock mission: when the primaries run out it descends, levels
+out and attacks as `acs` does, then resupplies, climbs back and resumes search and destroy. The loiter, survey, JAS39 and F-111
 missions were removed ([ADR 160](docs/adr/160-acs-mission-and-j20-are-the-only-missions.md)). Each mission is specified in
 [`docs/missions/`](docs/missions/). In every mission, flares are fired by the
 incoming-missile detector, so they go out only when a missile is actually
@@ -364,8 +306,8 @@ The behavior tree ([ADR 024](docs/adr/024-phase3-behavior-tree-architecture.md),
 
 - **Engage** — minimap ring-engage geometry: steer toward contacts, orbit when merged ([ADR 024](docs/adr/024-phase3-behavior-tree-architecture.md) 3.1a, [ADR 028](docs/adr/028-enemy-quadrant-detection-and-nose-orientation.md))
 - **MissileEvade** — evasive manoeuvre on incoming-missile detection ([ADR 070](docs/adr/070-missile-evade-tactic.md)); live sessions measure 90% vs 68% ten-second survival with the evade on (n=122 engagements)
-- **Climb** — closed-loop climb-to-operating-altitude, including the mission-start climb prologue ([ADR 073](docs/adr/073-climb-tactic-shadow-first.md)), and ground-crash recovery: when altitude over descent rate predicts an impact, it pulls up on the afterburner, braking only while the dive is steep, and that recovery also flies through an ACS pursuit once the pursuit has neither its target nor the resupply marker in view, handing the chase back when the flight path is level or one of them comes into view ([ADR 086](docs/adr/086-climb-exit-attitude-and-time-to-ground-recovery.md), [ADR 148](docs/adr/148-a-dive-recovery-flies-through-a-pursuit.md), [ADR 159](docs/adr/159-the-emergency-climbs-nose-up-carries-the-afterburner.md), [Action Item 002](docs/action-item/002-emergency-climb-abandons-resupply.md)). Terrain ahead is watched from the forward view, and two warnings that agree start the recovery. [Design 001](docs/hldd/001-terrain-avoidance-hldd.md) now puts speed, dive angle and height first, starting with a speed limit in dives (live trial)
-- **Eject** — the missiles-empty response: ACS pursuit on the secondary weapon, a flight to the resupply point once every rack is empty ([ADR 152](docs/adr/152-pursuit-resupply-priority.md)), and the eject-and-dive that trades an empty airframe for a rearmed respawn (ADR [056](docs/adr/056-game-battle-eject-fsm-state.md)/[069](docs/adr/069-eject-impulse-rotation-and-ballistic-descent.md))
+- **Climb** — closed-loop climb-to-operating-altitude, including the mission-start climb prologue ([ADR 073](docs/adr/073-climb-tactic-shadow-first.md)), and ground-crash recovery: when altitude over descent rate predicts an impact, it pulls up on the afterburner, braking only while the dive is steep, and that recovery also flies through an ACS ([Design 011](docs/hldd/011-acs-mode-hldd.md)) pursuit once the pursuit has neither its target nor the resupply marker in view, handing the chase back when the flight path is level or one of them comes into view ([ADR 086](docs/adr/086-climb-exit-attitude-and-time-to-ground-recovery.md), [ADR 148](docs/adr/148-a-dive-recovery-flies-through-a-pursuit.md), [ADR 159](docs/adr/159-the-emergency-climbs-nose-up-carries-the-afterburner.md), [Action Item 002](docs/action-item/002-emergency-climb-abandons-resupply.md)). Terrain ahead is watched from the forward view, and two warnings that agree start the recovery. [Design 001](docs/hldd/001-terrain-avoidance-hldd.md) now puts speed, dive angle and height first, starting with a speed limit in dives (live trial)
+- **Eject** — the missiles-empty response: ACS ([Design 011](docs/hldd/011-acs-mode-hldd.md)) pursuit on the secondary weapon, a flight to the resupply point once every rack is empty ([ADR 152](docs/adr/152-pursuit-resupply-priority.md)), and the eject-and-dive that trades an empty airframe for a rearmed respawn (ADR [056](docs/adr/056-game-battle-eject-fsm-state.md)/[069](docs/adr/069-eject-impulse-rotation-and-ballistic-descent.md))
 - **Disengage / Idle / RespawnWait** — supporting tactics and selection-only states
 
 New tactics enter through a **shadow-first pipeline** ([ADR 073](docs/adr/073-climb-tactic-shadow-first.md)): a candidate tactic first runs selection-only, logging what it *would* do against live data; only after shadow evidence holds up does it get actuation. Per-engagement survival stats (ADR [055](docs/adr/055-mission-level-statistics-tracker.md)/[070](docs/adr/070-missile-evade-tactic.md)) close the loop with A/B evidence from unattended soaks.
@@ -395,9 +337,15 @@ Built and flying today:
   holds in air superiority
   ([Design 015](docs/hldd/015-target-tracking-pursuit-mode-hldd.md)).
 
-Not built yet: weapon-lock confirmation, and choosing ACS or padlock
-automatically from the jet profile. Today ACS_MISSION
-(`acs`) and the missiles-empty response start the ACS pieces
+- **Jet detection** (live): the jet read off the lobby
+  picks the mission, so a J-20 flies `j20` and any other jet `acs`
+  ([ADR 171](docs/adr/171-the-jet-picks-the-mission-and-j20-comes-back-from-a-rearm.md)).
+
+Not built yet: weapon-lock confirmation, and choosing the engagement tactic
+inside the behavior tree from the jet profile
+([Design 011](docs/hldd/011-acs-mode-hldd.md)). Today ACS_MISSION
+(`acs`) and the missiles-empty response start the ACS
+([Design 011](docs/hldd/011-acs-mode-hldd.md)) pieces
 ([ADR 160](docs/adr/160-acs-mission-and-j20-are-the-only-missions.md)).
 
 ---
@@ -421,10 +369,11 @@ Roadmap: [`docs/PROJECT_AI_ROADMAP.md`](docs/PROJECT_AI_ROADMAP.md) · Architect
 
 | Document | Description |
 |---|---|
+| [`docs/adr/171-the-jet-picks-the-mission-and-j20-comes-back-from-a-rearm.md`](docs/adr/171-the-jet-picks-the-mission-and-j20-comes-back-from-a-rearm.md) | The jet read off the lobby picks the mission; mission_j20's rearm cycle |
 | [`docs/adr/070-missile-evade-tactic.md`](docs/adr/070-missile-evade-tactic.md) | MISSILE_EVADE_MODE tactic (d1–d13, live V5 survival evidence) |
 | [`docs/adr/073-climb-tactic-shadow-first.md`](docs/adr/073-climb-tactic-shadow-first.md) | Climb tactic and the shadow-first validation pipeline for new tactics |
 | [`docs/adr/086-climb-exit-attitude-and-time-to-ground-recovery.md`](docs/adr/086-climb-exit-attitude-and-time-to-ground-recovery.md) | Dive recovery on predicted time to ground |
-| [`docs/adr/148-a-dive-recovery-flies-through-a-pursuit.md`](docs/adr/148-a-dive-recovery-flies-through-a-pursuit.md) | Ground-crash recovery inside an ACS pursuit: airbrake, pull-up, hand-back, with live evidence |
+| [`docs/adr/148-a-dive-recovery-flies-through-a-pursuit.md`](docs/adr/148-a-dive-recovery-flies-through-a-pursuit.md) | Ground-crash recovery inside an ACS ([Design 011](docs/hldd/011-acs-mode-hldd.md)) pursuit: airbrake, pull-up, hand-back, with live evidence |
 | [`docs/adr/159-the-emergency-climbs-nose-up-carries-the-afterburner.md`](docs/adr/159-the-emergency-climbs-nose-up-carries-the-afterburner.md) | The emergency climb pulls up on the afterburner; the airbrake is for a steep dive only |
 | [`docs/adr/152-pursuit-resupply-priority.md`](docs/adr/152-pursuit-resupply-priority.md) | Resupply priority in pursuit: rearm at the resupply point instead of ejecting |
 | [`docs/adr/056-game-battle-eject-fsm-state.md`](docs/adr/056-game-battle-eject-fsm-state.md) | Eject as a first-class FSM state |
@@ -436,10 +385,10 @@ Roadmap: [`docs/PROJECT_AI_ROADMAP.md`](docs/PROJECT_AI_ROADMAP.md) · Architect
 | Document | Description |
 |---|---|
 | [`docs/hldd/011-acs-mode-hldd.md`](docs/hldd/011-acs-mode-hldd.md) | **ACS**: the airframe-independent combat layer: what exists, what is still to build |
-| [`docs/hldd/015-target-tracking-pursuit-mode-hldd.md`](docs/hldd/015-target-tracking-pursuit-mode-hldd.md) | ACS pursuit and icon-directed search, with rollout evidence and open questions |
-| [`docs/hldd/005-target-tracking-hldd.md`](docs/hldd/005-target-tracking-hldd.md) | ACS target tracker: finding and locking enemy nameplates on screen |
+| [`docs/hldd/015-target-tracking-pursuit-mode-hldd.md`](docs/hldd/015-target-tracking-pursuit-mode-hldd.md) | ACS ([Design 011](docs/hldd/011-acs-mode-hldd.md)) pursuit and icon-directed search, with rollout evidence and open questions |
+| [`docs/hldd/005-target-tracking-hldd.md`](docs/hldd/005-target-tracking-hldd.md) | ACS ([Design 011](docs/hldd/011-acs-mode-hldd.md)) target tracker: finding and locking enemy nameplates on screen |
 | [`docs/hldd/001-terrain-avoidance-hldd.md`](docs/hldd/001-terrain-avoidance-hldd.md) | Terrain avoidance: the direction (speed, dive angle and height first; the forward view second), the forward-view detectors, and the measurements behind both |
-| [`docs/hldd/017-terrain-map-from-flight-footage-hldd.md`](docs/hldd/017-terrain-map-from-flight-footage-hldd.md) | Terrain map from flight footage: position from the minimap and the full map. Dormant: the survey mission that flew an arena in passes was removed ([ADR 160](docs/adr/160-acs-mission-and-j20-are-the-only-missions.md)); its "Where this stands" section says how to resume |
+| [`docs/hldd/017-terrain-map-from-flight-footage-hldd.md`](docs/hldd/017-terrain-map-from-flight-footage-hldd.md) | Free airspace record and golden resupply paths: where aircraft have flown safely on each arena, the flight planner's query on it, and a recorded path to each resupply ring. Builds on [Design 020](docs/hldd/020-terrain-service-from-the-maps-own-geometry-hldd.md)'s position fix. Not built yet |
 | [`docs/hldd/009-nested-display-isolation-hldd.md`](docs/hldd/009-nested-display-isolation-hldd.md) | Nested display lane: the four `DISPLAY` consumers and the takeover-key listener |
 | [`docs/hldd/008-gpu-accelerated-realtime-wingman-hldd.md`](docs/hldd/008-gpu-accelerated-realtime-wingman-hldd.md) | **A GPU-accelerated real-time profile** — batched GPU OCR, per-frame missile detection, and what must not regress. Design only; the CPU path stays the default |
 

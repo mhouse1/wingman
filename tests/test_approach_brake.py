@@ -328,8 +328,13 @@ def test_the_pursuit_ticks_the_brake_while_the_marker_has_the_steering():
                                               else "control point")
                             else:
                                 # Cycle 27: a fast dive with no objective steering,
-                                # the chase included.
-                                brake_goal = self._dive_brake_goal()
+                                # the chase included. ADR 179 rev 3: the chase
+                                # closing fast on a near target first. The dive
+                                # goal is set in any dive of -10 deg under 3 km,
+                                # braking or not, and cut the closing brake at
+                                # 726 KPH (live 04:37:29); both hold the same key.
+                                brake_goal = (self._closing_brake_goal(control_visible)
+                                              or self._dive_brake_goal())
                         self._approach_brake_tick(brake_goal)""") in src
     exit_ = src.index('self.release_tracking_holds(why="pursuit loop exit")')
     assert src.index('self._approach_brake_off("pursuit loop exit")') > exit_
@@ -448,10 +453,13 @@ def test_levelling_out_lets_the_dive_brake_go(monkeypatch, clock):
 def test_the_pursuit_arms_the_dive_brake_only_with_no_objective_steering():
     src = inspect.getsource(Controller.pursue_and_engage)
     i = src.index("brake_goal = None")
-    window = src[i:i + 900]
+    window = src[i:i + 1400]
     assert "elif priority_control:" in window
-    assert "brake_goal = self._dive_brake_goal()" in window
-    assert window.index("brake_goal = self._dive_brake_goal()") > window.index("elif priority_control:")
+    # ADR 179 rev 3: the chase closing fast on a near target first, then the dive.
+    closing = "brake_goal = (self._closing_brake_goal(control_visible)"
+    assert closing in window
+    assert window.index(closing) > window.index("elif priority_control:")
+    assert window.index("or self._dive_brake_goal())") > window.index(closing)
 
 
 def test_the_shipped_config_brakes_in_dives():

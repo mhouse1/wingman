@@ -42,6 +42,8 @@ TACTIC_EJECT = "Eject"
 TACTIC_MISSILE_EVADE = "MissileEvade"
 TACTIC_EVADE = "Evade"
 TACTIC_BOUNDARY_TURN = "BoundaryTurn"
+# ADR 174 revised (Design 020 way out): a bank-and-pull to the side the terrain service chose.
+TACTIC_TERRAIN_TURN = "TerrainTurn"
 TACTIC_DISENGAGE = "Disengage"
 TACTIC_CLIMB = "Climb"
 TACTIC_ENGAGE = "Engage"
@@ -77,7 +79,7 @@ class AnalyzerSnapshot:
     # ADR 086 d2: signed altitude rate in m/s, negative while descending. The
     # emergency recovery trigger needs the RATE, not just the value — an
     # altitude threshold cannot distinguish a cruise through 4000 m from a
-    # 560 m/s dive through it, and on 2026-08-21 18:41 it did not.
+    # 560 m/s dive through it, and on 2026-08-21 it did not.
     altitude_rate: "float | None" = None
     # ADR 028 revision 4: friendly / objective minimap icons. Consumed only by
     # Regroup, which fills the ticks where no enemy renders — 59% of them,
@@ -111,6 +113,12 @@ class AnalyzerSnapshot:
     # Code Review 019 cycle 25: two terrain warnings agreed within the hold
     # (wingman/warning_agreement.py). The trigger lives in ClimbCondition.
     terrain_warnings_agree: bool = False
+    # ADR 174: the terrain service's path meets the map's ground within warn_s, in a
+    # round of the `map` arm (False in `control` rounds and on maps without data).
+    terrain_map_warning: bool = False
+    # ADR 174 revised: the side the terrain service's way out turns to ("left"/"right"),
+    # in a round of the `map` arm; None otherwise. Selects the TerrainTurn leaf.
+    terrain_turn: "str | None" = None
     # Code Review 019 cycle 32 (HLDD 001 part 2): the latest raw HUD altitude
     # and speed and the flight-path angle, each None unless fresh, for the
     # pull-out trigger in ClimbCondition. `altitude` above is the stable value,
@@ -132,14 +140,22 @@ class MinimumHold(py_trees.decorators.Decorator):
     anti-flapping hold ADR 024 assigns to EVADE and DISENGAGE. The child is
     still ticked every cycle, so a genuinely persisting condition simply
     refreshes the hold.
+
+    ``release_fn(snapshot)``, when given, ends the hold early on a tick it returns
+    True (ADR 174 revision 4: a terrain turn gives way at once to the map's climb).
     """
 
     def __init__(self, name: str, child: py_trees.behaviour.Behaviour,
-                 hold_s: float, clock=time.time):
+                 hold_s: float, clock=time.time, release_fn=None):
         super().__init__(name=name, child=child)
         self._hold_s = float(hold_s)
         self._clock = clock
         self._held_until = 0.0
+        self._release_fn = release_fn
+        self._bb = None
+        if release_fn is not None:
+            self._bb = py_trees.blackboard.Client(name=f"{name}HoldClient")
+            self._bb.register_key(key=SNAPSHOT_KEY, access=py_trees.common.Access.READ)
 
     def update(self) -> py_trees.common.Status:
         now = self._clock()
@@ -147,6 +163,10 @@ class MinimumHold(py_trees.decorators.Decorator):
         if status == py_trees.common.Status.RUNNING:
             self._held_until = now + self._hold_s
             return status
+        if self._release_fn is not None and now < self._held_until:
+            if self._release_fn(self._bb.get(SNAPSHOT_KEY)):
+                self._held_until = 0.0
+                return status
         if now < self._held_until:
             return py_trees.common.Status.RUNNING
         return status
@@ -304,7 +324,7 @@ _SETTLED = 2
 
 # Code Review 019 cycle 33: a flight path this steep says the altitude fell
 # faster than the aircraft flies, which only a misread does (the path clamps at
-# 90 deg when the rate outruns the speed). Live 2026-10-18 20:13:20 the HUD read
+# 90 deg when the rate outruns the speed). Live 2026-10-18 the HUD read
 # 2,791, 2,143 and 2,675 m 1.5 s apart and the pull-out trigger fired on the
 # middle one at -90 deg. Over 401 missions such readings neither firing nor
 # clearing it cut its alarms 10% and lifted its precision from 16.5% to 18.5%,
@@ -375,8 +395,12 @@ class BoundaryCondition:
                 release_frac: "float | None" = None,
                 min_clear_frac: float = 0.35,
                 blind_ticks: int = 3,
-                entry_ratio: float = 0.25):
+                entry_ratio: float = 0.25,
+                scale_fn=None):
         self._turn_frac = turn_frac
+        # ADR 171: () -> a factor of 1 or more on every distance below, for a fast
+        # jet that needs the turn sooner; None, or a failing read, is 1.
+        self._scale_fn = scale_fn
         self._recede_frac = recede_frac
         self._yields_to_fn = yields_to_fn
         self._release_frac = release_frac
@@ -415,7 +439,7 @@ class BoundaryCondition:
         # indicator that something upstream has latched.
         #
         # ADR 138: is_respawning alone left a gap. Measured live 2026-09-10
-        # 03:03:26 — the respawn screen clears (is_respawning -> False) up to
+        # — the respawn screen clears (is_respawning -> False) up to
         # ~1.5s BEFORE mission_j20 actually restarts (the ADR 059 respawn-clear
         # stability window), and THAT restart is what arms the ADR 132 turn
         # guard. This condition doesn't wait for mission_running, so it
@@ -449,7 +473,15 @@ class BoundaryCondition:
                 return False
             return self._active
         self._blind = 0
-        clear_at = self._release_frac if self._release_frac else self._turn_frac
+        scale = 1.0
+        if self._scale_fn is not None:
+            try:
+                scale = max(1.0, float(self._scale_fn() or 1.0))
+            except Exception:
+                scale = 1.0
+        turn_frac = self._turn_frac * scale
+        min_clear = self._min_clear_frac * scale
+        clear_at = (self._release_frac if self._release_frac else self._turn_frac) * scale
         # ADR 120: ENTER on the filtered reading, LEAVE on the nearest one.
         #
         # The two errors do not cost the same. A spurious near reading buys one
@@ -465,7 +497,7 @@ class BoundaryCondition:
         # 0.019 -> 0.516. A single reading above `clear_at` releases the turn
         # outright, so that path released turns with the aircraft at the edge.
         if (near if self._active else dist) >= (
-                clear_at if self._active else self._turn_frac):
+                clear_at if self._active else turn_frac):
             # Entering uses turn_frac; leaving uses the wider release_frac, so
             # the two thresholds cannot sit on top of each other and flap.
             self._reset()
@@ -495,7 +527,7 @@ class BoundaryCondition:
         # Recession is also a clearance claim, so it reads the nearest value
         # too — otherwise a filtered reading can manufacture a recession the
         # aircraft never flew.
-        if near >= self._min_clear_frac and near >= self._min_dist + self._recede_frac:
+        if near >= min_clear and near >= self._min_dist + self._recede_frac:
             self._reset()
             return False
         return True
@@ -507,13 +539,15 @@ def make_boundary_condition(turn_frac: "float | None",
                             release_frac: "float | None" = None,
                             min_clear_frac: float = 0.35,
                             blind_ticks: int = 3,
-                            entry_ratio: float = 0.25) -> BoundaryCondition:
+                            entry_ratio: float = 0.25,
+                            scale_fn=None) -> BoundaryCondition:
     """ADR 139 D3: thin factory kept so every existing call site — production
     and test — is unchanged. See ``BoundaryCondition`` for the logic."""
     return BoundaryCondition(turn_frac, recede_frac, yields_to_fn=yields_to_fn,
                              release_frac=release_frac,
                              min_clear_frac=min_clear_frac,
-                             blind_ticks=blind_ticks, entry_ratio=entry_ratio)
+                             blind_ticks=blind_ticks, entry_ratio=entry_ratio,
+                             scale_fn=scale_fn)
 
 
 class ClimbCondition:
@@ -584,6 +618,7 @@ class ClimbCondition:
         self._agreement_enabled = agreement_enabled
         self._agreement_shadow = agreement_shadow
         self._agreement_active = False
+        self._map_warning_active = False      # ADR 174: edge-log state for the map warning
         self._exit_above_alt = exit_above_alt
         self._is_running_fn = is_running_fn
         self._confirm_reads = confirm_reads
@@ -755,7 +790,7 @@ class ClimbCondition:
             return False   # ADR 073: disabled until calibrated
 
         # ADR 086 d2: the emergency trigger is predicted TIME to ground, not
-        # altitude. On 2026-08-21 18:41 the aircraft dived 9203 m -> 2301 m in
+        # altitude. On 2026-08-21 the aircraft dived 9203 m -> 2301 m in
         # 27 s with 2 missiles aboard while the tree kept selecting Engage:
         # the altitude band never opened because the smoothed altitude lags
         # ~1500 m in a 560 m/s dive and the aircraft hit the ground first.
@@ -765,7 +800,7 @@ class ClimbCondition:
         # ADR 086 d2: a respawn is an altitude DISCONTINUITY, not a descent.
         # The smoothed value carries the dead aircraft's numbers across it, so
         # the first post-respawn samples describe a fall that already ended.
-        # Observed 2026-08-21 21:28:49 — fired "2s to ground" at a smoothed
+        # Observed 2026-08-21 — fired "2s to ground" at a smoothed
         # 324m while the new aircraft was at 10m and climbing away at +513m/s.
         if snapshot.is_respawning:
             self._post_respawn = 0
@@ -838,6 +873,15 @@ class ClimbCondition:
             self._agreement_active = agree
             if not self._agreement_shadow:
                 emergency = emergency or agree
+
+        # ADR 174 (Design 020 Phase 5): the map's own ground on the projected path.
+        # The field is set only in rounds of the `map` arm, so it always flies.
+        map_warning = bool(getattr(snapshot, "terrain_map_warning", False))
+        if map_warning and not self._map_warning_active:
+            logger.warning("BT: MAP WARNING — the path meets the map's ground within 2 s — "
+                           "climb forced (ADR 174)")
+        self._map_warning_active = map_warning
+        emergency = emergency or map_warning
 
         # Code Review 019 cycle 32 (HLDD 001 part 2): the lowest point of a
         # pull-out started now (wingman/pullout.py), from the raw altitude, speed
@@ -1070,7 +1114,7 @@ def always(_snapshot: AnalyzerSnapshot) -> bool:
 # followed it, and adding Regroup pushed Climb below Engage.
 _PRIORITY_ORDER = (
     TACTIC_IDLE, TACTIC_RESPAWN_WAIT, TACTIC_EJECT, TACTIC_MISSILE_EVADE,
-    TACTIC_BOUNDARY_TURN, TACTIC_EVADE, TACTIC_DISENGAGE, TACTIC_CLIMB,
+    TACTIC_TERRAIN_TURN, TACTIC_BOUNDARY_TURN, TACTIC_EVADE, TACTIC_DISENGAGE, TACTIC_CLIMB,
     TACTIC_ENGAGE, TACTIC_REGROUP, TACTIC_ATTACK_SUPPORT,
 )
 
@@ -1099,6 +1143,8 @@ class _BuildContext:
     # altitude floor too). Only BoundaryTurn reads this one. See
     # _build_boundary_slot's docstring for why.
     climb_hard_emergency_fn: "Callable[[], bool] | None" = None
+    # ADR 171: the mission in play's speed scale on BoundaryTurn's distances.
+    boundary_scale_fn: "Callable[[], float] | None" = None
     # ADR 143: RespawnHandler reads this to classify a died-armed death as a
     # likely terrain crash — was the hard emergency active recently, not
     # just this instant (a death detected a tick or two after the dive
@@ -1363,9 +1409,35 @@ def _build_boundary_slot(ctx: "_BuildContext"):
                 min_clear_frac=float(
                     boundary_cfg.get("min_clear_frac", 0.35)),
                 blind_ticks=int(boundary_cfg.get("blind_ticks", 3)),
-                entry_ratio=float(boundary_cfg.get("entry_ratio", 0.25))),
+                entry_ratio=float(boundary_cfg.get("entry_ratio", 0.25)),
+                scale_fn=ctx.boundary_scale_fn),
             **boundary_kwargs),
         hold_s=float(boundary_cfg.get("hold_s", 3.0)), clock=ctx.clock,
+    )
+
+
+def is_terrain_turn(snapshot: AnalyzerSnapshot) -> bool:
+    """ADR 174 revised: the terrain service chose a turn this tick."""
+    return getattr(snapshot, "terrain_turn", None) in ("left", "right")
+
+
+def _build_terrain_turn_slot(ctx: "_BuildContext"):
+    """ADR 174 revised: only where it actuates. A selection-only TerrainTurn would take the
+    selection from the leaf below it and fly nothing (replay and capture lanes)."""
+    fns = ctx.actuators.get(TACTIC_TERRAIN_TURN)
+    if fns is None:
+        return None
+    # ADR 174 revision 4: the turn's 2 s hold gives way at once when the map's call
+    # becomes a climb. 2026-11-08: during 49 terrain turns the call became a climb 31
+    # times; the climb took over a median 1.5 s later, and 11 of the 31 were followed by
+    # a crash within 20 s (Icebound 20:09:52.9: the left turn hit at 2.5 s, the climb
+    # started at 20:09:54.5 with every way out at 0.3 s).
+    return MinimumHold(
+        TACTIC_TERRAIN_TURN,
+        ConditionTactic(f"{TACTIC_TERRAIN_TURN}Condition", is_terrain_turn,
+                        start_fn=fns[0], is_running_fn=fns[1]),
+        hold_s=2.0, clock=ctx.clock,
+        release_fn=lambda snap: bool(getattr(snap, "terrain_map_warning", False)),
     )
 
 
@@ -1413,6 +1485,9 @@ def _build_slots(ctx: "_BuildContext") -> dict:
     # on _build_climb_slot as _build_boundary_slot above — moved here from
     # the dict literal so that dependency is real, not incidental.
     built[TACTIC_MISSILE_EVADE] = _build_missile_evade_slot(ctx)
+    terrain_turn_leaf = _build_terrain_turn_slot(ctx)
+    if terrain_turn_leaf is not None:
+        built[TACTIC_TERRAIN_TURN] = terrain_turn_leaf
     built[TACTIC_IDLE] = _build_idle_slot(ctx)
     regroup_leaf = _build_regroup_slot(ctx)
     if regroup_leaf is not None:
@@ -1425,6 +1500,7 @@ def build_tree(bt_cfg: dict, clock=time.time,
                regroup_enabled: bool = False,
                alt_floor_override_fn: "Callable[[], float | None] | None" = None,
                sustain_suppressed_fn: "Callable[[], bool] | None" = None,
+               boundary_scale_fn: "Callable[[], float] | None" = None,
                ) -> py_trees.trees.BehaviourTree:
     """Construct the ADR 024 selector. Pure construction — no analyzer refs.
 
@@ -1447,7 +1523,8 @@ def build_tree(bt_cfg: dict, clock=time.time,
     ctx = _BuildContext(bt_cfg=bt_cfg, clock=clock, actuators=actuators or {},
                         regroup_enabled=regroup_enabled,
                         alt_floor_override_fn=alt_floor_override_fn,
-                        sustain_suppressed_fn=sustain_suppressed_fn)
+                        sustain_suppressed_fn=sustain_suppressed_fn,
+                        boundary_scale_fn=boundary_scale_fn)
     built = _build_slots(ctx)
     children = [built[name] for name in _PRIORITY_ORDER if name in built]
 

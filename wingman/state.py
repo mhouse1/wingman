@@ -31,6 +31,15 @@ BATTLE_STATES = frozenset({
     GameState.GAME_BATTLE_EJECT,
 })
 
+# States a battle can follow directly, where Enter claims the coming round
+# rather than being lobby chat (SAF-001.4). GAME_STARTING is the countdown; the
+# other two are the way into battle when Good Luck is never read.
+ROUND_START_STATES = frozenset({
+    GameState.GAME_STARTING,
+    GameState.GAME_STARTING_STALLED,
+    GameState.GAME_UNKNOWN,
+})
+
 
 class GameEvent(Enum):
     """Orchestration events the analyzer publishes (ADR 060 Phase 1).

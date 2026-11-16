@@ -69,6 +69,10 @@ class ControllerConfig:
     approach_brake: dict = field(default_factory=dict)
     # ADR 144: mission_acs's block (climb altitude, nose angle, pulse timing).
     acs: dict = field(default_factory=dict)
+    # ADR 171: `j20_mission`, read for mission_j20's rearm cycle, and
+    # `jet_profile.profiles`, read for which mission a jet flies.
+    j20: dict = field(default_factory=dict)
+    jet_profiles: dict = field(default_factory=dict)
     # ADR 140: only `confirm_seconds` is read here — the vision fields
     # (region_pct/green_lower/green_upper/min_pixels) belong to
     # TargetTracker, which is constructed directly from the raw config dict
@@ -120,6 +124,8 @@ class ControllerConfig:
             stall_prevention=bt.get("stall_prevention", {}) or {},
             fuel=cfg.get("fuel", {}) or {},
             acs=cfg.get("acs_mission", {}) or {},
+            j20=j20,
+            jet_profiles=(cfg.get("jet_profile", {}) or {}).get("profiles", {}) or {},
             padlock_center_indicator=cfg.get("padlock_center_indicator", {}) or {},
             pursuit_mode=cfg.get("pursuit_mode", {}) or {},
             tracking=cfg.get("tracking", {}) or {},

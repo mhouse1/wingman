@@ -53,6 +53,23 @@ def test_constructing_a_controller_registers_nothing(monkeypatch):
         "Controller.__init__ must not touch the keyboard backend"
 
 
+def test_the_mission_keys_release_the_enter_hold(monkeypatch):
+    """SAF-001.4: 'u' hands the aircraft back, and 'o' means "fly it now". The
+    hold has to go with them or the next battle entry would take it straight
+    back from the mission they started."""
+    kb = _RecordingKeyboard()
+    ctrl = _ctrl(monkeypatch, kb)
+    ctrl._analyzer.trigger_event = lambda _name: True
+    ctrl._analyzer.note_battle_event = lambda: None
+    monkeypatch.setattr(ctrl, "_start_default_mission", lambda: None)
+    monkeypatch.setattr(ctrl, "mission_acs", lambda **_kw: None)
+    ctrl.register_hotkeys()
+    for key in (MISSION_J20_KEY, MISSION_ACS_KEY):
+        ctrl._manual_round_hold.set()
+        kb.pressed_keys[key](None)
+        assert not ctrl.manual_held_for_round(), key
+
+
 def test_register_hotkeys_registers_every_operator_key(monkeypatch):
     kb = _RecordingKeyboard()
     ctrl = _ctrl(monkeypatch, kb)
@@ -94,3 +111,21 @@ def test_main_registers_them_straight_after_construction():
     registered = src.index("ctrl.register_hotkeys()", built)
     next_wiring = src.index("ctrl.set_target_tracker(", built)
     assert registered < next_wiring
+
+
+def test_the_stop_key_says_where_it_came_from(monkeypatch, caplog):
+    """Four stops in a row on 2026-11-01 came in matchmaking, and the log could not
+    say whose hand they were."""
+    from wingman.hotkeys import register_hotkeys
+    from wingman.input_linux import _XKeyEvent
+    from wingman.keybindings import FINISH_ROUND_THEN_EXIT
+    caplog.set_level("INFO")
+    keyboard = _RecordingKeyboard()
+    ctrl = _ctrl(monkeypatch, keyboard)
+    register_hotkeys(ctrl, keyboard)
+
+    keyboard.pressed_keys[FINISH_ROUND_THEN_EXIT](_XKeyEvent(
+        name=FINISH_ROUND_THEN_EXIT, is_injected=False, display=":3", state=0))
+
+    assert "Controller: 'z' received from display :3 (injected=False, state=0x0)" in [
+        r.getMessage() for r in caplog.records]

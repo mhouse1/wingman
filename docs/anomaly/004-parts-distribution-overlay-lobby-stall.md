@@ -84,6 +84,30 @@ stall, ending at the liveness guard's hard limit rather than continuing to
 play. Frequency unknown — this is the first observed occurrence in the
 sessions run so far today.
 
+## Resolution (2026-11-10)
+
+The operator gave the rule on 2026-11-10, on
+`tests/test-output/screenshot_20261110_190158.png`: **select the second jet
+and click CONFIRM**. It is wired in, the same shape as Anomaly 006:
+
+- `STALL_PARTS_SELECT` reads the title, `STALL_PARTS_PICK` is the middle of
+  the second card, and `STALL_PARTS_CONFIRM` is clicked 1.5 s later
+  (`_give_parts_to_second_jet`, `wingman/main.py`).
+- The title is scanned in `GAME_LOBBY`, `GAME_UNKNOWN` and
+  `GAME_STARTING_STALLED`, but only once the liveness guard reports a stall
+  (`liveness_guard.stall_limit_s`, 300 s with no state change and no OCR).
+  Operator, 2026-11-13: this gives an operator at the desk time to choose the
+  jet themselves. A choice by hand restores progress, which clears the stall.
+  The session's hard limit (900 s) leaves the handler 600 s to act.
+- The cards sit at the same pixels on the frames of 2026-09-13, 11-04, 11-09
+  and 11-10, and the title read as `SELECTANAIRCRAFTTORECEIVEPARTS` on all four.
+- Recurrences since this record: 2026-11-04 (cleared by hand after 9 min),
+  2026-11-09 (account 2, session ended at the 900 s limit), 2026-11-10 (at a
+  start, in `GAME_UNKNOWN`).
+
+Not yet seen live: the handler clearing the overlay, and what the game shows
+after CONFIRM. The Disposition below is the record as it stood before the rule.
+
 ## Disposition
 
 **Detection implemented and verified; auto-click deliberately withheld

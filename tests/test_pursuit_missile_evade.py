@@ -23,8 +23,11 @@ thread:
 """
 
 import logging
+import pathlib
 import threading
 import time
+
+import yaml
 
 import wingman.controller as controller_module
 from wingman.analyzer import GameState
@@ -139,6 +142,15 @@ def test_share_zero_is_the_old_behaviour(monkeypatch, caplog):
         finally:
             _end_chase(ctrl)
     assert "MISSILE EVADE[pursuit]" not in caplog.text
+
+
+def test_the_shipped_config_flies_no_evade_inside_a_pursuit():
+    """ADR 165 V3 (2026-11-04): the evade arm trailed on score, kills, deaths and
+    assists over 848 read rounds, and survived fewer engagements (64% against 69%,
+    z 3.5). A share above 0 runs the trial again and needs a new verdict."""
+    cfg = yaml.safe_load((pathlib.Path(__file__).resolve().parents[1] / "wingman" / "config.yaml")
+                         .read_text(encoding="utf-8"))
+    assert cfg["behavior_tree"]["missile_evade"]["pursuit_share"] == 0
 
 
 def test_no_evade_starts_while_the_dive_recovery_flies(monkeypatch, caplog):

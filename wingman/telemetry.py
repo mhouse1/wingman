@@ -295,6 +295,9 @@ class TelemetryProcessor:
         cfg = config or {}
         self.max_speed_mph = float(cfg.get("max_speed_mph", 2000.0))
         self.max_altitude_ft = float(cfg.get("max_altitude_ft", 60000.0))
+        # Design 020: the HUD altitude is the map mesh's height, signed, so it goes
+        # below zero in canyons and over Crimson Canyon's water (-232 m).
+        self.min_altitude_m = float(cfg.get("min_altitude_m", schema_default("telemetry.min_altitude_m")))
         self.max_speed_change_mph_s = float(cfg.get("max_speed_change_mph_s", 300.0))
         self.plausibility_margin = float(cfg.get("plausibility_margin", 1.5))
         # Upper bound on the dt multiplier in the delta gates — the design tick
@@ -367,6 +370,7 @@ class TelemetryProcessor:
                 raw=float(altitude_raw),
                 now_s=now_s,
                 absolute_max=self.max_altitude_ft,
+                absolute_min=self.min_altitude_m,
                 digit_drop_ratio=self.digit_drop_ratio,
                 digit_drop_window_s=self.digit_drop_window_s,
                 max_delta_per_s=self._altitude_bound_mps(),
@@ -448,8 +452,9 @@ class TelemetryProcessor:
         gate_dt_cap_s: float,
         digit_drop_ratio: float = 0.0,
         digit_drop_window_s: float = 0.0,
+        absolute_min: float = 0.0,
     ) -> TelemetrySignal:
-        if raw < 0.0 or raw > absolute_max:
+        if raw < absolute_min or raw > absolute_max:
             # Out-of-envelope readings are never seedable — a consistent
             # stream of absolute-bound garbage must not become the new seed.
             return self._reject(signal, hist, raw, now_s, seedable=False)

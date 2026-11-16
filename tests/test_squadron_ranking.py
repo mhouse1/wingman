@@ -2,7 +2,7 @@
 
 import logging
 import threading
-from datetime import datetime, time
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,6 +19,14 @@ from wingman.squadron_ranking import (Navigation, RowRead, SquadronRanking, Squa
 
 MAIN_SRC = Path("wingman/main.py").read_text(encoding="utf-8")
 ANALYZER_SRC = Path("wingman/analyzer.py").read_text(encoding="utf-8")
+
+
+@pytest.fixture(autouse=True)
+def last_read(tmp_path, monkeypatch):
+    """Where the day of the last reading is kept: never the operator's own file."""
+    path = tmp_path / "squadron_ranking.json"
+    monkeypatch.setattr(sr, "LAST_READ_FILE", str(path))
+    return path
 
 
 # -- parsing ----------------------------------------------------------------------
@@ -104,6 +112,8 @@ class _Game:
              "players": {sr.BOARD_TITLE: "LEADERBOARDS"},
              "squadrons": {sr.BOARD_TITLE: "LEADERBOARDS"},
              "other": {}}
+    # Where the open menu shows LEADERBOARDS: the 2026-11-06 layout's box.
+    ENTRY = CropCoords(0.823, 0.188, 0.926, 0.213)
 
     def __init__(self, screen="lobby", ignore=(), slow=None, row=SquadronReading(659, 358032),
                  tab_lag=0):
@@ -113,10 +123,12 @@ class _Game:
         self.row = row
         self.tab_lag = tab_lag      # frames the old tab's rows stay up after the click
         self.clicks = []
+        self.coords = []
         self.pending = None
 
-    def click(self, name):
+    def click(self, name, coords=None):
         self.clicks.append(name)
+        self.coords.append(coords)
         if name in self.ignore:
             return
         nxt = self.MOVES.get((self.screen, name))
@@ -138,6 +150,9 @@ class _Game:
         if fn is sr.shows:
             crop, word = args
             return word in self.SHOWS[frame].get(crop.text[0], "")
+        if fn is sr.word_box:
+            crop, word = args
+            return self.ENTRY if word in self.SHOWS[frame].get(crop.text[0], "") else None
         if fn is sr.read_row:
             if frame == "squadrons" and self.tab_lag <= 0:
                 return RowRead(self.row, "CURRENT TOP SQUADRONS")
@@ -169,6 +184,14 @@ def test_the_leaderboard_is_read_and_left_by_its_own_back_arrow():
     assert (reading, why) == (SquadronReading(659, 358032), "read")
     assert game.clicks == [sr.MENU, sr.MENU_LEADERBOARDS, sr.TAB_SQUADRONS, sr.BACK]
     assert game.screen == "lobby"
+
+
+def test_the_menu_entry_is_clicked_where_ocr_found_it():
+    """2026-11-06: the menu came up smaller and LEADERBOARDS left the crop's
+    middle; a click on the crop's middle would miss it. Only that click moves."""
+    game = _Game()
+    _navigate(game)
+    assert game.coords == [None, _Game.ENTRY, None, None]
 
 
 def test_a_slow_page_is_waited_for():
@@ -228,8 +251,8 @@ def test_a_stop_ends_the_navigation_at_once():
     stop = threading.Event()
     original = game.click
 
-    def click(name):
-        original(name)
+    def click(name, coords=None):
+        original(name, coords)
         if name == sr.MENU_LEADERBOARDS:
             stop.set()
     game.click = click
@@ -287,29 +310,17 @@ def test_the_reading_queues_at_the_time_of_day_and_waits_for_a_lobby():
     assert schedule.due(), "it stays queued while the round in progress ends"
 
 
-@pytest.mark.parametrize("navigation", [_Read(), _GaveUp()], ids=["read", "gave up"])
-def test_one_navigation_a_day_read_or_not(navigation):
-    """2026-10-31 02:17 also read back to back in one lobby, and no round would
-    have started: PLAY must go ahead after the navigation."""
+def test_one_reading_a_day():
+    """2026-10-31 also read back to back in one lobby, and no round would
+    have started: PLAY must go ahead after a reading."""
     clock = _Steps(_morning(9, 38, 30))
     schedule = SquadronRanking(True, QUEUE_AT, _Steps(_morning(4, 39)))
     schedule.now = clock
-    schedule.start(navigation, lambda *a: None).join(5)
+    schedule.start(_Read(), lambda *a: None).join(5)
     assert not schedule.due() and not schedule.holds_play()
     for later in (_morning(9, 38, 31), _morning(23, 59, 59), _next_morning(9, 38, 29)):
         clock.t = later
         assert not schedule.due()
-    clock.t = _next_morning(9, 38, 30)
-    assert schedule.due()
-
-
-@pytest.mark.parametrize("started", [_morning(9, 38, 30), _morning(9, 38, 31), _morning(20, 0)])
-def test_a_session_started_after_the_time_waits_for_the_next_day(started):
-    """Nothing is saved between sessions, so this is what keeps a restart from
-    reading a second time in a day."""
-    clock = _Steps(started)
-    schedule = SquadronRanking(True, QUEUE_AT, clock)
-    assert not schedule.due()
     clock.t = _next_morning(9, 38, 30)
     assert schedule.due()
 
@@ -342,7 +353,7 @@ def test_the_schedule_while_a_navigation_runs():
 
 
 def test_play_stays_held_from_due_through_the_start_of_the_navigation():
-    """2026-10-31 02:17:56: the quick-scan clicked PLAY while a navigation was
+    """2026-10-31: the quick-scan clicked PLAY while a navigation was
     starting. The hold must not drop between due and active."""
     seen = []
 
@@ -389,6 +400,210 @@ def test_a_navigation_that_raises_still_ends_and_reports():
     assert answers == [(None, "the navigation failed")] and not schedule.active()
 
 
+# -- a day's reading, carried between sessions (ADR 170) ---------------------------
+
+class _Left:
+    def run(self):
+        return None, "stopped: wingman is leaving"
+
+
+class _Raises:
+    def run(self):
+        raise RuntimeError("boom")
+
+
+def _session(started, path):
+    return SquadronRanking(True, QUEUE_AT, _Steps(started), last_read_file=str(path))
+
+
+@pytest.mark.parametrize("started", [_morning(9, 38, 30), _morning(9, 42, 57), _morning(23, 59, 59)])
+def test_a_session_started_after_the_time_owes_the_day_its_reading(last_read, started):
+    """2026-11-01: no session ran at the queue time, the next began 4.5 min later and
+    booked the next day's, and the day had no reading."""
+    sr.save_last_read(str(last_read), date(2026, 10, 30))
+    assert _session(started, last_read).due()
+
+
+def test_with_no_reading_on_record_the_day_is_owed(last_read):
+    assert not last_read.exists()
+    assert _session(_morning(20, 0), last_read).due()
+
+
+def test_a_session_stopped_with_the_reading_queued_leaves_it_to_the_next(last_read):
+    stopped = _session(_morning(9, 7, 2), last_read)
+    stopped.now = _Steps(_morning(9, 40))
+    assert stopped.due()
+    assert _session(_morning(9, 41, 14), last_read).due()
+
+
+def test_a_session_before_the_time_waits_for_it_whatever_was_missed(last_read):
+    """A day is a calendar day: yesterday's miss is not read this morning ahead
+    of today's time, or today would read twice."""
+    sr.save_last_read(str(last_read), date(2026, 10, 20))
+    schedule = _session(_morning(5, 31), last_read)
+    assert not schedule.due()
+    schedule.now = _Steps(_morning(9, 38, 29))
+    assert not schedule.due()
+    schedule.now = _Steps(_morning(9, 38, 30))
+    assert schedule.due()
+
+
+def test_a_reading_is_saved_so_a_restart_that_day_does_not_read_again(last_read):
+    schedule = _session(_morning(9, 40), last_read)
+    schedule.start(_Read(), lambda *a: None).join(5)
+    assert sr.load_last_read(str(last_read)) == date(2026, 10, 31)
+    for restarted in (_morning(9, 41), _morning(23, 59, 59)):
+        assert not _session(restarted, last_read).due()
+    restart = _session(_next_morning(5, 0), last_read)
+    assert not restart.due()
+    restart.now = _Steps(_next_morning(9, 38, 30))
+    assert restart.due(), "the next day has a reading of its own"
+
+
+@pytest.mark.parametrize("navigation", [_GaveUp(), _Left(), _Raises()],
+                         ids=["gave up", "stopped", "raised"])
+def test_a_navigation_that_read_nothing_leaves_the_day_to_the_next_session(last_read, navigation):
+    schedule = _session(_morning(9, 40), last_read)
+    schedule.start(navigation, lambda *a: None).join(5)
+    assert not last_read.exists()
+    assert _session(_morning(11, 0), last_read).due()
+
+
+def test_a_navigation_over_midnight_counts_for_the_day_it_started(last_read):
+    clock = _Steps(_morning(23, 59, 58))
+    schedule = SquadronRanking(True, QUEUE_AT, clock, last_read_file=str(last_read))
+
+    class _Nav:
+        def run(self):
+            clock.t = _next_morning(0, 0, 5)
+            return SquadronReading(659, 358046), "read"
+    schedule.start(_Nav(), lambda *a: None).join(5)
+    assert sr.load_last_read(str(last_read)) == date(2026, 10, 31)
+    assert _session(_next_morning(9, 38, 30), last_read).due()
+
+
+def test_the_reading_is_booked_before_its_day_is_saved(last_read):
+    """The other way round, a session killed between the two would lose the
+    reading and stop the next session from taking it."""
+    saved_when_booked = []
+    schedule = _session(_morning(9, 40), last_read)
+    schedule.start(_Read(), lambda *a: saved_when_booked.append(last_read.exists())).join(5)
+    assert saved_when_booked == [False] and last_read.exists()
+
+
+@pytest.mark.parametrize("text", ["", "not json", "[]", "{}", '{"last_read": 5}',
+                                  '{"last_read": "yesterday"}'])
+def test_a_damaged_file_reads_as_no_reading(last_read, text, caplog):
+    last_read.write_text(text, encoding="utf-8")
+    with caplog.at_level(logging.WARNING):
+        assert sr.load_last_read(str(last_read)) is None
+    assert "could not read" in caplog.text
+
+
+def test_a_file_that_cannot_be_saved_does_not_lose_the_reading(tmp_path, caplog):
+    blocked = tmp_path / "a_file"
+    blocked.write_text("", encoding="utf-8")
+    answers = []
+    schedule = _session(_morning(9, 40), blocked / "squadron_ranking.json")
+    with caplog.at_level(logging.WARNING):
+        schedule.start(_Read(), lambda reading, why, nav: answers.append(reading)).join(5)
+    assert answers == [SquadronReading(659, 358046)]
+    assert "could not save" in caplog.text
+
+
+# -- trying again after a navigation that read nothing (ADR 170) -------------------
+
+def _fail(schedule, tries):
+    for _ in range(tries):
+        assert schedule.due()
+        schedule.start(_GaveUp(), lambda *a: None).join(5)
+
+
+def test_a_failed_navigation_is_tried_again_in_the_same_lobby_with_play_held(caplog):
+    schedule = SquadronRanking(True, QUEUE_AT, _Steps(_morning(9, 40)))
+    with caplog.at_level(logging.INFO):
+        _fail(schedule, 1)
+    assert schedule.due() and schedule.holds_play()
+    assert f"try 1 of {sr.MAX_TRIES} did not read; due again now" in caplog.text
+
+
+def test_a_click_the_game_dropped_is_made_good_by_the_next_try(last_read):
+    """2026-11-01: the click on LEADERBOARDS did nothing, the navigation
+    shut the menu and gave up, and PLAY went a second later. The same account
+    read 82 s later."""
+    game = _Game(ignore={sr.MENU_LEADERBOARDS})
+    answers = []
+    schedule = _session(_morning(11, 2, 55), last_read)
+
+    def _try():
+        navigation = Navigation(_crops(), game.grab, game.ocr, game.click, lambda: False,
+                                "Mobius Squadron", step_timeout_s=2.0,
+                                sleep_fn=lambda s: None, clock=_Clock())
+        schedule.start(navigation, lambda reading, why, nav: answers.append(
+            (reading, why))).join(5)
+    _try()
+    assert answers == [(None, "the leaderboards did not open")]
+    assert game.screen == "lobby" and schedule.due() and not last_read.exists()
+    game.ignore.clear()
+    _try()
+    assert answers[-1] == (SquadronReading(659, 358032), "read")
+    assert not schedule.due() and last_read.exists()
+
+
+def test_a_finished_navigation_never_looks_due():
+    """The next queue is set before the navigation stops counting as active. The
+    other way round, the main loop could find a reading already taken still due
+    in the gap, and start a second navigation."""
+    schedule = SquadronRanking(True, QUEUE_AT, _Steps(_morning(9, 40)))
+    due_when_cleared = []
+
+    class _Active(threading.Event):
+        def clear(self):
+            due_when_cleared.append(schedule.now() >= schedule.next_queue)
+            super().clear()
+    schedule._active = _Active()
+    schedule.start(_Read(), lambda *a: None).join(5)
+    assert due_when_cleared == [False]
+
+
+def test_after_a_lobbys_tries_play_goes_ahead_and_a_later_lobby_tries_again():
+    clock = _Steps(_morning(9, 40))
+    schedule = SquadronRanking(True, QUEUE_AT, clock)
+    _fail(schedule, sr.TRIES_PER_LOBBY)
+    assert not schedule.due() and not schedule.holds_play(), "the round is not held up"
+    clock.t += timedelta(seconds=sr.RETRY_AFTER_S - 1)
+    assert not schedule.due()
+    clock.t += timedelta(seconds=1)
+    assert schedule.due()
+
+
+def test_a_try_that_reads_ends_the_day():
+    clock = _Steps(_morning(9, 40))
+    schedule = SquadronRanking(True, QUEUE_AT, clock)
+    _fail(schedule, 2)
+    schedule.start(_Read(), lambda *a: None).join(5)
+    assert not schedule.due()
+    clock.t = _next_morning(9, 38, 30)
+    assert schedule.due()
+
+
+def test_a_session_stops_at_the_last_try_and_the_day_stays_owed(last_read, caplog):
+    """A route a game update broke must not cost every round of a long session."""
+    clock = _Steps(_morning(9, 40))
+    schedule = SquadronRanking(True, QUEUE_AT, clock, last_read_file=str(last_read))
+    with caplog.at_level(logging.INFO):
+        for _ in range(sr.MAX_TRIES):
+            _fail(schedule, 1)
+            clock.t += timedelta(seconds=sr.RETRY_AFTER_S)
+    assert f"try {sr.MAX_TRIES} of {sr.MAX_TRIES} did not read; next at" in caplog.text
+    clock.t = _morning(23, 59, 59)
+    assert not schedule.due() and not schedule.holds_play()
+    assert _session(_morning(11, 0), last_read).due(), "a new session starts its count again"
+    clock.t = _next_morning(9, 38, 30)
+    _fail(schedule, 1)
+    assert schedule.due(), "the next day has its own tries"
+
+
 # -- the analyzer's holds ----------------------------------------------------------
 
 class _FakeAnalyzer:
@@ -432,7 +647,7 @@ def test_a_due_reading_holds_play_but_not_ready():
 
 def test_play_and_ready_are_not_clicked_once_a_navigation_runs():
     """The hold at the top of the cycle is not enough: a navigation can start
-    while the cycle's OCR is out (2026-10-31 02:17:56)."""
+    while the cycle's OCR is out (2026-10-31)."""
     guard = ANALYZER_SRC.index("                        elif self.lobby_errand_active():")
     click = ANALYZER_SRC.index("self.emit(GameEvent.LOBBY_PLAY_CLICK, crop, frame)", guard)
     branch = ANALYZER_SRC[guard:ANALYZER_SRC.index("\n                        elif", guard + 10)]
@@ -529,6 +744,22 @@ def test_the_schedule_takes_its_time_from_the_config_and_runs_live_only():
     assert _schedule_from({"enabled": False}).enabled is False
 
 
+def test_main_keeps_the_day_in_the_file_and_says_when_it_is_owed(last_read, caplog):
+    with caplog.at_level(logging.INFO):
+        schedule = _schedule_from({"enabled": True, "queue_at": "00:00:00"})
+    assert schedule.last_read_file == str(last_read) and schedule.due()
+    assert "today's reading is still owed" in caplog.text
+    assert "next reading queues at" not in caplog.text
+
+
+def test_main_says_when_the_next_one_queues_once_today_is_read(last_read, caplog):
+    sr.save_last_read(str(last_read), date.today())
+    with caplog.at_level(logging.INFO):
+        schedule = _schedule_from({"enabled": True, "queue_at": "00:00:00"})
+    assert not schedule.due()
+    assert "next reading queues at" in caplog.text
+
+
 def test_a_queue_time_that_is_no_time_of_day_stops_the_start():
     with pytest.raises(ValueError):
         _schedule_from({"enabled": True, "queue_at": "9:99"})
@@ -570,6 +801,9 @@ _SCREENS = [
     # (file, in the lobby, the menu open, the leaderboard up, the reading)
     ("lobby.png", True, False, False, None),
     ("menu.png", False, True, False, None),
+    # 2026-11-06: the menu drawn smaller, on another account; every reading failed.
+    ("lobby_2026-11-06.png", True, False, False, None),
+    ("menu_2026-11-06.png", False, True, False, None),
     ("total_trophies.png", False, False, True, None),
     ("squadrons_659_358032.png", False, False, True, SquadronReading(659, 358032)),
 ]
@@ -586,6 +820,19 @@ def test_the_screens_read_as_labelled(reader, name, lobby, menu, board, reading)
     assert on[sr.MENU_LEADERBOARDS] == menu
     assert on[sr.BOARD_TITLE] == board
     assert read_row(reader, frame, crops, "Mobius Squadron").reading == reading
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("name, word_px", [
+    # LEADERBOARDS in the menu, in pixels of the 1920x1200 frame, read by eye.
+    ("menu.png", (1448, 320, 1720, 355)),
+    ("menu_2026-11-06.png", (1583, 228, 1773, 252))])
+def test_the_menu_entry_box_lands_on_the_word(reader, name, word_px):
+    box = sr.word_box(reader, _load(name), _config_crops()[sr.MENU_LEADERBOARDS], "LEADERBOARDS")
+    assert box is not None
+    cx, cy = (box.x1 + box.x2) / 2 * 1920, (box.y1 + box.y2) / 2 * 1200
+    x1, y1, x2, y2 = word_px
+    assert x1 < cx < x2 and y1 < cy < y2
 
 
 @pytest.mark.slow

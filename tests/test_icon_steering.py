@@ -183,7 +183,7 @@ def test_the_score_vector_is_capped_by_length():
 
 @pytest.mark.parametrize("angle", [100.0, 130.0, 144.0, 159.0])
 def test_a_held_direction_keeps_the_icons_angle(angle):
-    """Measured 2026-09-26 05:27: a per-axis cap read every lower-left icon as
+    """Measured 2026-09-26: a per-axis cap read every lower-left icon as
     (-25, +25), i.e. 135 deg. The length cap keeps each angle apart."""
     clock = _Clock()
     p = IconPoints(CFG, clock=clock)
@@ -363,7 +363,7 @@ def test_above_the_horizon_a_side_icon_still_turns():
 
 
 # ---------------------------------------------------------------------------
-# Code Review 019 cycle 39 (2026-10-19 04:17): the ammo pin moved from below-left
+# Code Review 019 cycle 39 (2026-10-19): the ammo pin moved from below-left
 # (116 deg) to level on the right (-1 to +5 deg); the pitch score it had left
 # kept the push on for 3 s, into a -50 deg dive. With level_band_deg the icon's
 # own position decides "below the horizon" too.
@@ -373,7 +373,7 @@ LEVEL_CFG = IconSteeringConfig(enabled=True, level_band_deg=5.0)
 
 
 def _the_resupply_case(cfg):
-    """The pin's angles as logged, 0.33 s apart (ICONPTS, 04:17:00 to 04:17:06)."""
+    """The pin's angles as logged, 0.33 s apart (ICONPTS)."""
     clock = _Clock()
     p = IconPoints(cfg, clock=clock)
     _run(p, clock, [_icon(116.0)], 4, dt=0.33)
@@ -392,7 +392,7 @@ def test_a_level_icon_gets_no_push_from_the_score_a_low_icon_left():
 
 
 def test_without_the_band_the_leftover_score_pushes():
-    """What flew at 04:17."""
+    """What flew."""
     _, intents = _the_resupply_case(CFG)
     assert intents[:4] == ["down"] * 4
 
@@ -433,10 +433,10 @@ def test_the_shipped_config_sets_the_level_band():
 
 
 # ---------------------------------------------------------------------------
-# A refused push turns toward the icon (2026-09-27 18:51:51). Below the horizon
+# A refused push turns toward the icon (2026-09-27). Below the horizon
 # the law pushes with the wings level; below push_floor_m the push is refused,
 # and before this the jet then flew straight with the enemy off to one side:
-# 686 of 916 icon ticks, 95 s over 9 stretches, in the 18:42 session.
+# 686 of 916 icon ticks, 95 s over 9 stretches, in the session.
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("angle", [145.0, 165.0, 172.0])
@@ -470,3 +470,114 @@ def test_icons_above_the_horizon_ignore_down_allowed():
     p = IconPoints(CFG, clock=clock)
     _run(p, clock, [_icon(-170.0)], 8)
     assert p.intent(down_allowed=False) == p.intent()
+
+
+# ---------------------------------------------------------------------------
+# Operator, 2026-11-03: an icon below the horizon but off to one side turns
+# toward its side until the target appears; only push_cone_deg around straight
+# down pushes. At 2026-11-02 an icon at 121 deg (lower left, the
+# enemies behind) pushed the nose from +2 to -52 deg; the terrain guards pulled
+# it back up on the same heading and the jet flew out of the map.
+# ---------------------------------------------------------------------------
+
+CONE_CFG = IconSteeringConfig(enabled=True, level_band_deg=5.0, push_cone_deg=20.0)
+
+
+def _the_out_of_map_case(cfg):
+    """The icon's angles and times as logged (ICONPTS)."""
+    clock = _Clock()
+    p = IconPoints(cfg, clock=clock)
+    intents = []
+    for dt, angle in ((0.0, 121.0), (0.154, 121.0), (0.206, 121.0), (0.208, 120.0)):
+        clock.t += dt
+        p.scan([_icon(angle)])
+        intents.append(p.intent())
+    return p, intents
+
+
+def test_without_the_cone_the_lower_left_icon_pushes():
+    """What flew."""
+    p, intents = _the_out_of_map_case(CFG)
+    assert [i[0] for i in intents] == ["none", "none", "down", "down"]
+    assert p.turn_active == 0
+
+
+def test_with_the_cone_the_lower_left_icon_turns_left():
+    _, intents = _the_out_of_map_case(CONE_CFG)
+    assert intents == [("none", ()), ("none", ()),
+                       ("turn", (ROLL_LEFT, NOSE_UP)), ("turn", (ROLL_LEFT, NOSE_UP))]
+
+
+@pytest.mark.parametrize("angle", [97.6, 100.0, 110.0, 70.0])
+def test_inside_the_cone_the_icon_still_pushes(angle):
+    """The operator's nose-down reference icon (97.6 deg) is the cone's reason."""
+    clock = _Clock()
+    p = IconPoints(CONE_CFG, clock=clock)
+    _run(p, clock, [_icon(angle)], 8)
+    assert p.intent() == ("down", (NOSE_DOWN,))
+
+
+@pytest.mark.parametrize("angle, roll", [(115.0, ROLL_LEFT), (121.0, ROLL_LEFT),
+                                         (145.0, ROLL_LEFT), (172.0, ROLL_LEFT),
+                                         (59.0, ROLL_RIGHT), (30.0, ROLL_RIGHT),
+                                         (8.0, ROLL_RIGHT)])
+def test_outside_the_cone_the_icon_turns_toward_its_side(angle, roll):
+    clock = _Clock()
+    p = IconPoints(CONE_CFG, clock=clock)
+    _run(p, clock, [_icon(angle)], 8)
+    assert p.intent() == ("turn", (roll, NOSE_UP))
+
+
+def test_a_side_icon_turns_before_its_turn_score_is_active():
+    """At 115 deg each scan adds left 2, down 5: pitch is active a scan or more
+    before turn. Waiting for the turn switch would fly straight meanwhile."""
+    clock = _Clock()
+    p = IconPoints(CONE_CFG, clock=clock)
+    _run(p, clock, [_icon(115.0)], 3)
+    assert p.pitch_active == 1 and p.turn_active == 0
+    assert p.intent() == ("turn", (ROLL_LEFT, NOSE_UP))
+
+
+def test_the_turn_holds_until_the_target_appears():
+    """No icon changes nothing; the lock (reset) is what ends it."""
+    clock = _Clock()
+    p = IconPoints(CONE_CFG, clock=clock)
+    _run(p, clock, [_icon(121.0)], 4)
+    _run(p, clock, [], 30)
+    assert p.intent() == ("turn", (ROLL_LEFT, NOSE_UP))
+    p.reset()
+    assert p.icon_side_of_push_cone() is None and p.intent() == ("none", ())
+
+
+def test_a_side_icon_turns_whatever_down_allowed_says():
+    clock = _Clock()
+    p = IconPoints(CONE_CFG, clock=clock)
+    _run(p, clock, [_icon(121.0)], 8)
+    assert p.intent(down_allowed=False) == p.intent() == ("turn", (ROLL_LEFT, NOSE_UP))
+
+
+def test_the_cone_side_reads_below_the_horizon_only():
+    p = IconPoints(CONE_CFG, clock=_Clock())
+    for angle, side in ((121.0, "left"), (110.0, None), (90.0, None), (70.0, None),
+                        (69.0, "right"), (179.0, "left"), (1.0, "right"),
+                        (0.0, None), (180.0, None), (-120.0, None), (-30.0, None)):
+        p.last_icon_angle_deg = angle
+        assert p.icon_side_of_push_cone() == side, angle
+
+
+def test_the_cone_is_off_unless_set():
+    assert IconSteeringConfig.from_dict(None).push_cone_deg is None
+    assert IconSteeringConfig.from_dict({"push_cone_deg": None}).push_cone_deg is None
+    assert IconSteeringConfig.from_dict({"push_cone_deg": 20}).push_cone_deg == 20.0
+    p = IconPoints(CFG, clock=_Clock())
+    p.last_icon_angle_deg = 121.0
+    assert p.icon_side_of_push_cone() is None
+
+
+def test_the_shipped_config_sets_the_push_cone():
+    import yaml
+    shipped = yaml.safe_load((Path(__file__).resolve().parents[1]
+                              / "wingman" / "config.yaml").read_text())
+    cone = shipped["pursuit_mode"]["icon_steering"]["push_cone_deg"]
+    assert IconSteeringConfig.from_dict(
+        shipped["pursuit_mode"]["icon_steering"]).push_cone_deg == cone == 20.0

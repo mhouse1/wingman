@@ -903,6 +903,21 @@ class HudRenderer:
             label = f"{selected_label} (lost)" if selected_stale else selected_label
             self._text(label, px + 20, py - 14, _PURSUIT, scale=0.4)
 
+        # ── Target projection (Design 021 Phase 5, shadow) ───────────────
+        # Where the chase reckons the tracked target is going: an arrow from
+        # the marker to a white diamond. The game's own lead ring, when it
+        # shows, is in the picture underneath to compare against.
+        projection = obs.get("projection") if obs is not None else None
+        if projection is not None and obs.get("centroid_x") is not None:
+            mx, my = int(obs["centroid_x"]), int(obs["centroid_y"])
+            px, py = int(projection.x), int(projection.y)
+            cv2.arrowedLine(canvas, (mx, my), (px, py), _DARK, 4, cv2.LINE_AA, tipLength=0.15)
+            cv2.arrowedLine(canvas, (mx, my), (px, py), _WHITE, 2, cv2.LINE_AA, tipLength=0.15)
+            cv2.drawMarker(canvas, (px, py), _DARK, cv2.MARKER_DIAMOND, 30, 5, cv2.LINE_AA)
+            cv2.drawMarker(canvas, (px, py), _WHITE, cv2.MARKER_DIAMOND, 30, 2, cv2.LINE_AA)
+            self._text("PROJ %.0f px/s" % projection.speed, px - 50, py + 52, _WHITE,
+                       scale=0.4)
+
         # ── Acquisition region outline ───────────────────────────────────
         acq_x1, acq_y1, acq_x2, acq_y2 = self._acq_pct
         ax1 = int(w * acq_x1)

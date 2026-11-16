@@ -211,7 +211,7 @@ def test_takeover_names_what_wingman_was_holding(fresh_actuator, caplog):
 
 # --- Phase 2: the throttle is leased --------------------------------------------
 #
-# Measured before Phase 2 (2026-09-27 09:15 run, first 30 min): `climb` dropped the
+# Measured before Phase 2 (2026-09-27 run, first 30 min): `climb` dropped the
 # `e` that `cruise` was holding 18 times and `stall_prevention` and `cruise` dropped
 # each other's 11 times. Each drop left the burner off until the holder's next tick.
 
@@ -310,7 +310,7 @@ def pitch_ctrl(leased_ctrl, monkeypatch):
 
 
 def test_the_pursuits_yield_no_longer_drops_the_climbs_nose_up(pitch_ctrl):
-    """2026-10-24 00:54:22: the climb pressed nose-up at .808 and the pursuit's
+    """2026-10-24: the climb pressed nose-up at .808 and the pursuit's
     ADR 148 yield released its own nose-up at .892, lifting the climb's too."""
     c, kb = pitch_ctrl
     c._climb_key(NOSE_UP_KEY, press=True, action="tracking_pitch")
@@ -358,7 +358,9 @@ def test_the_climb_reevaluates_the_throttle_where_the_emergency_starts():
     # escalation into that rule): every place the airbrake goes on re-evaluates the
     # throttle.
     assert hold.count("self._climb_emergency_active = True") == 2
-    assert hold.count("_actuator.reevaluate(AFTERBURNER_KEY)") == 2
+    # Those two, and ADR 171's burner cut at a jet's own pitch limit, which cruise
+    # yields to by the same table.
+    assert hold.count("_actuator.reevaluate(AFTERBURNER_KEY)") == 3
 
 
 def test_the_policy_table_is_what_may_hold_key_answers():

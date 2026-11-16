@@ -194,7 +194,7 @@ def probe_display(display: str, timeout_s: float = DISPLAY_PROBE_TIMEOUT_S) -> s
 
     `Xlib.display.Display()` has NO timeout. A server that accepts the
     connection and never completes the handshake blocks the caller forever —
-    measured 2026-09-05 07:09, where `make rd` hung with no output at all
+    measured 2026-09-05, where `make rd` hung with no output at all
     because this probe never returned. The X server was alive (pid 324709, the
     game still on it) and simply did not answer.
 
@@ -245,6 +245,15 @@ SNAP_TOOLKIT_VARS = (
 )
 SNAP_ORIG_SUFFIX = "_VSCODE_SNAP_ORIG"
 
+# The saved `_VSCODE_SNAP_ORIG` values are not always clean. When the code snap
+# refreshed to rev 276 on 2026-11-06, the editor restarted from inside rev 271's
+# environment and saved rev 271's paths as the "originals". Restored as is,
+# XDG_DATA_DIRS put ~/snap/code/271/.local/share ahead of /usr/share, so GLib
+# found that copy's compiled schemas (no font-antialiasing key) and aborted
+# Xwayland again. GLib also searches these path lists for schemas, so the code
+# removes every snap entry from them after the restore.
+SNAP_PATH_LIST_VARS = ("XDG_DATA_DIRS", "XDG_CONFIG_DIRS")
+
 
 def host_session_env(environ=None) -> dict:
     """The operator's desktop env with a snap terminal's toolkit overrides undone.
@@ -265,6 +274,14 @@ def host_session_env(environ=None) -> dict:
     for key in SNAP_TOOLKIT_VARS:
         if "/snap/" in env.get(key, ""):
             del env[key]
+    for key in SNAP_PATH_LIST_VARS:
+        if key not in env:
+            continue
+        kept = [p for p in env[key].split(":") if p and "/snap/" not in p]
+        if kept:
+            env[key] = ":".join(kept)
+        else:
+            del env[key]
     return env
 
 
@@ -278,7 +295,7 @@ def start(display: str, size: str) -> int:
     fresh `make r` starts. launch-game kills and relaunches the game
     unconditionally regardless — but reusing the SAME Xwayland underneath
     that kill-and-relaunch left hotkey observation dead for an entire
-    session (2026-09-13 05:54-06:01, wingman.log): matchmaking stalled with
+    session (2026-09-13, 7 min, wingman.log): matchmaking stalled with
     "Good Luck" never detected, and neither backspace nor 'z' was ever even
     observed as pressed, forcing a Ctrl-C to get out. A stale server left the
     operator's compositor with an old, no-longer-relevant window in the mix
@@ -292,7 +309,7 @@ def start(display: str, size: str) -> int:
         except Exception:
             stale_game = False
         if not stale_game:
-            # Reuse only our own server. 2026-10-25 12:04 and 12:49: a pytest
+            # Reuse only our own server. 2026-10-25, twice: a pytest
             # Xvfb (-displayfd picked :3 while the nested display was down) was
             # left behind on :3, `make r2` reused it, the game could not start
             # on a GPU-less Xvfb, and wingman captured an all-black frame.

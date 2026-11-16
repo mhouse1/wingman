@@ -56,6 +56,7 @@ class _Stub:
     def __init__(self, crops, blackout_since=0.0, stall_since=0.0, after_s=15.0):
         self.crops = crops
         self._lobby_blackout_since = blackout_since
+        self._liveness_stalled = False
         self._stall_state_since = stall_since
         self._stall_action_after_s = after_s
         self._unready_since = 0.0
