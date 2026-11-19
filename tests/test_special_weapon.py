@@ -231,12 +231,21 @@ class _Stats:
         self.events.append(name)
 
 
+def _shipped_abilities():
+    """The shipped `special_weapon.abilities` table (ADR 186): the glyph-known
+    abilities are config rows now, not code."""
+    import yaml
+    with open("wingman/config.yaml", encoding="utf-8") as f:
+        return yaml.safe_load(f)["special_weapon"]["abilities"]
+
+
 def _handler(profile, analyzer):
     from wingman.tick_handlers import AmmoEventsHandler
     ctrl = _Ctrl(profile)
     stats = _Stats()
     h = AmmoEventsHandler(analyzer, ctrl, {}, stats_tracker=stats,
-                          special_weapon_cfg={"press_retry_s": 3.0, "max_presses": 2})
+                          special_weapon_cfg={"press_retry_s": 3.0, "max_presses": 2,
+                                              "abilities": _shipped_abilities()})
     return h, ctrl, stats
 
 
@@ -556,7 +565,10 @@ def test_refuel_waits_for_the_ring():
 
 
 def test_a_jet_without_the_refuel_glyph_gets_no_refuel():
-    a = _FuelAnalyzer(glyph="other")
+    # Another known glyph (a cold gun's cool-down), not 'other': since ADR 190 an
+    # unknown glyph is pressed whenever lit (tests/test_unknown_ability.py).
+    a = _FuelAnalyzer(glyph="gun_cooldown")
+    a.gun_hot = lambda: False
     h, ctrl, _ = _handler(None, a)
     _fuel_ticks(h, a, [40, 38, 36])
     assert ctrl.keys == []

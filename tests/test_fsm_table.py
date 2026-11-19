@@ -36,6 +36,9 @@ EXPECTED = {
     "starting_stalled_reclassify": {"GAME_STARTING_STALLED": "GAME_UNKNOWN"},
     "starting_recovery": {"GAME_STARTING_STALLED": "GAME_STARTING"},
     "starting_give_up": {"GAME_STARTING_STALLED": "GAME_LOBBY"},
+    # ADR 195: the battle HUD is gone (no weapon panel, no speed or altitude).
+    "battle_hud_lost": {"GAME_BATTLE": "GAME_UNKNOWN", "GAME_BATTLE_MANUAL": "GAME_UNKNOWN",
+                        "GAME_BATTLE_EJECT": "GAME_UNKNOWN"},
     "click_to_detected": {"GAME_BATTLE": "GAME_END_B", "GAME_BATTLE_MANUAL": "GAME_END_B",
                           "GAME_BATTLE_EJECT": "GAME_END_B"},
     "manual_takeover": {"GAME_BATTLE": "GAME_BATTLE_MANUAL",

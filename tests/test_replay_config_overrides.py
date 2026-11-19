@@ -19,7 +19,15 @@ PATH1 = pathlib.Path("tests/replay_paths/adr044_runtime_path1.yaml")
 
 
 def test_path1_flies_the_mission_its_checkpoints_model():
-    assert load_replay_config_overrides(PATH1) == {"mission": {"default_mission": "j20"}}
+    assert load_replay_config_overrides(PATH1) == {
+        "mission": {"default_mission": "j20", "starting_signal": "good_luck"}}
+
+
+def test_the_live_gate_pins_the_good_luck_entry_it_models():
+    """ADR 189: both PATH1 gates assert the Good-Luck log lines."""
+    live = pathlib.Path("tests/replay_paths/adr045_live_path1.yaml")
+    assert load_replay_config_overrides(live) == {"mission": {"starting_signal": "good_luck"}}
+    assert set(load_replay_paths(live)) == {"PATH1_LIVE"}
 
 
 def test_the_override_block_is_not_mistaken_for_a_path():
@@ -45,8 +53,11 @@ def test_a_malformed_block_is_rejected(tmp_path):
 
 
 def test_main_applies_and_validates_them_only_in_replay_mode():
+    """Replay and live-capture lanes only (ADR 189 added the capture lane);
+    never a live run."""
     src = pathlib.Path("wingman/main.py").read_text(encoding="utf-8")
-    block = src[src.index("    if args.replay_config:\n        # A replay path pins"):]
+    assert "    _path_config = args.replay_config or args.capture_path_config\n" in src
+    block = src[src.index("    if _path_config:\n"):]
     block = block[:block.index("    if _live_run:")]
-    assert "load_replay_config_overrides(Path(args.replay_config))" in block
+    assert "load_replay_config_overrides(Path(_path_config))" in block
     assert "assert_valid_config(cfg" in block

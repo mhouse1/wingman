@@ -26,6 +26,7 @@ class PerceptionFake:
     # Plain attributes rather than properties, so a subclass or a test can set them.
     game_state = GameState.GAME_UNKNOWN
     game_battle_alive = False
+    starting_battle_confirmed = False
 
     # --- reads -------------------------------------------------------------------
     def get_telemetry(self):
@@ -49,10 +50,16 @@ class PerceptionFake:
     def get_incoming_cache_result(self):
         return (False, 0.0, None)
 
+    def incoming_last_seen_ts(self) -> float:
+        return 0.0
+
     def get_afterburner_fuel_pct(self):
         return None
 
     def special_weapon_glyph(self):
+        return None
+
+    def special_weapon_ready(self):
         return None
 
     def selected_weapon(self):
@@ -79,6 +86,9 @@ class PerceptionFake:
     def disarm_starting_health_scan(self):
         pass
 
+    def probe_starting_frame(self, frame) -> None:
+        self.__dict__.setdefault("probed_frames", []).append(frame)
+
     def mark_health_dead_synthetic(self):
         pass
 
@@ -90,6 +100,9 @@ class PerceptionFake:
 
     def note_battle_event(self) -> None:
         self._last_battle_event_ts = time.time()
+
+    def note_special_weapon_press(self) -> None:
+        self.__dict__["special_weapon_presses"] = self.__dict__.get("special_weapon_presses", 0) + 1
 
     def stop_if_lobby_on_screen(self) -> None:
         pass

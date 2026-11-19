@@ -39,10 +39,49 @@ _RING_BAND = (0.85, 1.15)
 _INSIDE_BAND = (0.55, 0.78)
 _OUTSIDE_BAND = (1.22, 1.45)
 
-TRIGGERS = ("incoming", "low_flares", "low_fuel", "gun_heat", "ready")
+TRIGGERS = ("incoming", "low_flares", "low_fuel", "gun_heat", "ready", "lead_aligned")
+# Triggers the pursuit answers on its own pictures (aimed_ability.py), several
+# times a second, not the battle tick: the ability has to be aimed first (ADR 186).
+AIMED_TRIGGERS = ("lead_aligned",)
 
-# The glyphs recognised on any jet, by name, and the config key of each template.
-GLYPH_TEMPLATE_KEYS = {"refuel": "refuel_glyph", "gun_cooldown": "gun_cooldown_glyph"}
+
+def abilities(cfg: "dict | None") -> "dict[str, dict]":
+    """`special_weapon.abilities`: the abilities known by their glyph on any jet,
+    name -> row ({glyph, trigger, ...}). ADR 186: an ability is a row here, not
+    a jet's profile, so every jet that draws the glyph gets the same rule."""
+    table = (cfg or {}).get("abilities") or {}
+    return {str(name): dict(row) for name, row in table.items() if isinstance(row, dict)}
+
+
+def resolve_profile(jet_section: "dict | None", glyph: "str | None",
+                    cfg: "dict | None") -> "dict | None":
+    """The special weapon this jet spends, and how: its own profile section when it
+    has one, else the row of the ability its glyph names (ADR 186). One answer for
+    the battle tick (tick_handlers) and the pursuit (aimed abilities), so the two
+    cannot disagree about the jet."""
+    if jet_section:
+        return dict(jet_section)
+    return ability_profile(glyph, cfg)
+
+
+def ability_profile(glyph: "str | None", cfg: "dict | None") -> "dict | None":
+    """What the ability named by `glyph` does: its row without the template path,
+    plus `ability`. None for a glyph with no row.
+
+    'other' (a lit ring round a glyph no row knows) gets `unknown_trigger`
+    (ADR 190: "anytime an undefined special weapon appears activate it
+    automatically"), as ability 'unknown'; "none" leaves it unpressed."""
+    if glyph == "other":
+        trigger = _setting(cfg or {}, "unknown_trigger")
+        if not trigger or trigger == "none" or trigger in AIMED_TRIGGERS:
+            return None
+        return {"ability": "unknown", "trigger": str(trigger)}
+    row = abilities(cfg).get(glyph) if glyph else None
+    if not row or not row.get("trigger"):
+        return None
+    profile = {key: value for key, value in row.items() if key != "glyph"}
+    profile["ability"] = glyph
+    return profile
 
 
 def _setting(cfg: dict, key: str):
@@ -231,14 +270,14 @@ class SpecialWeaponReader:
         # press log (2026-11-07: 8 one-read drops to 11-14/16 in 7 rounds).
         self._capture_dir = str(_setting(cfg, "capture_dir"))
         self._capture_left = int(_setting(cfg, "capture_max"))
-        # The ability glyphs recognised on any jet (refuel, gun cool-down): read on
-        # lit reads only (cooldown digits replace the glyph), two in a row agreeing.
-        # The best template at glyph_min_iou or more names it; none, 'other'.
+        # The ability glyphs recognised on any jet (the `abilities` table: refuel,
+        # gun cool-down, nuke): two reads in a row agreeing. The best template at
+        # glyph_min_iou or more names it; none, 'other'.
         self._glyph_min_iou = float(_setting(cfg, "glyph_min_iou"))
         self._templates = {}
         if crop_box is not None:
-            for name, key in GLYPH_TEMPLATE_KEYS.items():
-                path = str(_setting(cfg, key))
+            for name, row in abilities(cfg).items():
+                path = str(row.get("glyph") or "")
                 try:
                     template = load_glyph_template(path, crop_box)
                 except Exception as exc:
@@ -354,9 +393,9 @@ class SpecialWeaponReader:
             logger.info("Special weapon glyph: %s (best match %.2f)", self._glyph, iou)
 
     def glyph(self) -> "str | None":
-        """The ring's glyph by template name ('refuel', 'gun_cooldown'), 'other' for any
-        other glyph,
-        None before two lit reads agree."""
+        """The ring's glyph by its ability's name in the `abilities` table ('refuel',
+        'gun_cooldown', 'nuke'), 'other' for any other glyph, None before two reads
+        agree."""
         with self._lock:
             return self._glyph
 
@@ -434,7 +473,7 @@ class SpecialWeaponPresser:
     """When a jet's special weapon is pressed (ADR 173 D3).
 
     `tick(now, ready, fired)`: `fired` is the jet's trigger this tick, an edge for
-    `incoming` and a level for `low_flares` and `ready`. Returns True when `q` should
+    `incoming` and a level for the others. Returns True when `q` should
     go out now. A press that the icon does not answer (it stays READY) is repeated
     after `retry_s`, up to `max_presses` presses for one trigger; a new edge, or the
     icon leaving READY, starts the count again. A trigger that fires while the icon
@@ -473,6 +512,9 @@ class SpecialWeaponPresser:
                 self._presses = 0
         else:
             self._pending = fired
+            if not fired and self.trigger in AIMED_TRIGGERS:
+                # The aim came off: the next time it is on is a new attempt.
+                self._presses = 0
         if not self._pending:
             return False
         if self._last_press is not None and now - self._last_press < self._retry_s:

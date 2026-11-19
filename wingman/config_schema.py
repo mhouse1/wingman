@@ -93,6 +93,10 @@ STR = Leaf(types=(str,))
 FRACTION = _num(0.0, 1.0)
 SECONDS = _num(0.0)
 _STR_LIST = Leaf(types=(list,), item_types=(str,))
+# ADR 173/186: what spends a special weapon; special_weapon.TRIGGERS is the same
+# tuple (tests/test_aimed_ability.py checks), kept here so the schema stays numpy-free.
+SPECIAL_WEAPON_TRIGGERS = ("incoming", "low_flares", "low_fuel", "gun_heat", "ready",
+                           "lead_aligned")
 _NUM_LIST = Leaf(types=(list,), item_types=NUMBER)
 _HSV = Leaf(types=(list,), item_types=(int,), length=3)
 
@@ -122,12 +126,22 @@ _JET_PROFILE = Section(children={
     # operator, 2026-11-02). Absent: no special-weapon press on this jet.
     "special_weapon": Section(children={
         "ability": STR,
-        "trigger": Leaf(types=(str,), choices=("incoming", "low_flares", "low_fuel",
-                                                "gun_heat", "ready")),
+        "trigger": Leaf(types=(str,), choices=SPECIAL_WEAPON_TRIGGERS),
         "flares_at": _int(0),
         # low_fuel: the afterburner fuel percentage at or under which it fires.
         "fuel_at": _num(0, 100),
+        # lead_aligned (ADR 186): the colour of the ability's lead diamond.
+        "lead": Leaf(types=(str,), choices=("green", "yellow")),
     }, required=frozenset({"ability", "trigger"})),
+    # Operator, 2026-11-16: the jet's auxiliary feature on `w` (was the wing
+    # sweep), pressed once a life when the missile count reads `missiles_at` or
+    # fewer (the KF-21's drone into defense mode at 3), or, with `on_incoming`, on
+    # the life's first incoming missile alert if that comes first. Absent: no press.
+    "auxiliary_feature": Section(children={
+        "trigger": Leaf(types=(str,), choices=("low_missiles",)),
+        "missiles_at": _int(0),
+        "on_incoming": BOOL,
+    }, required=frozenset({"trigger", "missiles_at"})),
     # Design 021 hit counter rev 7: the largest rise of the damage text that
     # is the gun's on this jet. Absent: gun_damage.GUN_STEP_MAX.
     "gun_step_max": _num(1),
@@ -233,6 +247,10 @@ SCHEMA = Section(
             # A squad lobby (READY shown, not PLAY) with no battle this long
             # also leaves the squad, whatever the button reads.
             "squad_no_battle_s": Leaf(types=NUMBER, minimum=0, default=900.0),
+            # Top and bottom of the band (screen fractions) searched for the
+            # red X in the PARTY panel; the X moves down as the panel grows.
+            "red_x_search_y": Leaf(types=(list,), item_types=NUMBER, length=2,
+                                   default=[0.12, 0.75]),
             "scan_interval_s": SECONDS,
             "play_click_delay_s": SECONDS,
             "leave_click_delay_s": SECONDS,
@@ -302,6 +320,9 @@ SCHEMA = Section(
             "enabled": Leaf(types=(bool,), default=True),
             # A reading older than this is no reading: `f` is tapped.
             "stale_after_s": Leaf(types=NUMBER, minimum=0, default=6.0),
+            # FR-012: battle seconds without a usable count or weapon-name read
+            # before a WARNING says the crop is off the HUD. 0 = no warning.
+            "panel_silent_warn_s": Leaf(types=NUMBER, minimum=0, default=120.0),
             # Class name -> how `f` fires it and the words its weapons' names
             # contain. Tried in order; a name in no class is tapped.
             "classes": MapOf(Section(children={
@@ -327,19 +348,35 @@ SCHEMA = Section(
             # Crops of a READY dropping to a partial ring (a press or a misread).
             "capture_dir": Leaf(types=(str,), default="test_screenshots/special_weapon/live"),
             "capture_max": Leaf(types=(int,), minimum=0, default=40),
-            # The refuel ability, recognised by its glyph on any jet (operator,
-            # 2026-11-15): a template crop, the overlap that counts as a match, and
-            # the afterburner fuel percentage at or under which it is pressed.
-            "refuel_glyph": Leaf(types=(str,),
-                                 default="test_screenshots/special_weapon/glyphs/refuel.png"),
+            # The overlap of a glyph with its template that counts as a match.
             "glyph_min_iou": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.85),
-            # The gun cool-down ability, recognised by its glyph on any jet and
-            # pressed when the gun heat bar reaches gun_heat_at (operator, 2026-11-15:
-            # "we should activate when the overheat indicator reaches 80%") or red.
+            # The gun heat bar's fill at which the gun cool-down is pressed
+            # (operator, 2026-11-15: "when the overheat indicator reaches 80%").
             "gun_heat_at": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.8),
-            "gun_cooldown_glyph": Leaf(
-                types=(str,), default="test_screenshots/special_weapon/glyphs/gun_cooldown.png"),
+            # The refuel's afterburner fuel percentage when its row sets none.
             "refuel_fuel_at": Leaf(types=NUMBER, minimum=0, maximum=100, default=50),
+            # ADR 190: what a lit glyph with no row in `abilities` does ("other"):
+            # a non-aimed trigger, or "none" to leave unknown abilities unpressed.
+            "unknown_trigger": Leaf(types=(str,), default="ready",
+                                    choices=("none",) + tuple(
+                                        t for t in SPECIAL_WEAPON_TRIGGERS
+                                        if t != "lead_aligned")),
+            # ADR 186: the abilities known by their glyph on any jet.
+            "abilities": MapOf(Section(children={
+                "glyph": STR,
+                "trigger": Leaf(types=(str,), choices=SPECIAL_WEAPON_TRIGGERS),
+                "flares_at": _int(0),
+                "fuel_at": _num(0, 100),
+                "lead": Leaf(types=(str,), choices=("green", "yellow")),
+            }, required=frozenset({"glyph", "trigger"}))),
+            # ADR 186: an ability fired on its lead diamond.
+            "aimed": Section(children={
+                "enabled": Leaf(types=(bool,), default=True),
+                "search_px": Leaf(types=NUMBER, minimum=20, default=600),
+                "min_score": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.65),
+                "memory_s": Leaf(types=NUMBER, minimum=0, default=0.45),
+                "fire_px": Leaf(types=NUMBER, minimum=1, default=60),
+            }),
         }),
 
         "fuel": Section(children={
@@ -370,6 +407,11 @@ SCHEMA = Section(
             "respawn_clear_stability_s": SECONDS,
             "starting_max_wait_s": SECONDS,
             "startup_stall_exit_after_s": SECONDS,
+            # ADR 189: what tells wingman a match has started. hud = health, speed
+            # and altitude read off the HUD, no key pressed; good_luck = the old
+            # loop that taps 'u' (the Good Luck emote) and OCRs the chat reply.
+            "starting_signal": Leaf(types=(str,), choices=("hud", "good_luck"),
+                                    default="hud"),
             "good_luck_wait_s": SECONDS,
             "good_luck_bypass_on_alive": BOOL,
             "starting_health_probe_interval_s": SECONDS,
@@ -469,6 +511,12 @@ SCHEMA = Section(
             "tick_s": SECONDS,
             "lock_timeout_s": SECONDS,
             "yield_to_target": BOOL,   # operator, 2026-09-26
+            # ADR 191: seconds each life flies level looking for a target
+            # before mission_acs climbs; 0 = climb at once, as before.
+            "target_watch_s": Leaf(types=NUMBER, minimum=0, default=2.0),
+            # ADR 191 D7: the spawn guard spawns an acs life level instead of
+            # pulsing nose-up (D4). Off: it raised terrain deaths.
+            "spawn_watch_only": Leaf(types=(bool,), default=False),
         }),
 
         # ADR 024 / 070 / 073 / 076 / 081 / 083

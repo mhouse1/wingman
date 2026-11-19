@@ -251,7 +251,7 @@ def test_hotkey_is_not_a_maneuver_key():
     assert k.FINISH_ROUND_THEN_EXIT not in k._WATCHED_MANEUVER_KEYS, \
         "would read as manual takeover (ADR 070 d4)"
     game_keys = {k.NOSE_UP_KEY, k.NOSE_DOWN_KEY, k.ROLL_LEFT_KEY, k.ROLL_RIGHT_KEY,
-                 k.YAW_LEFT, k.AFTERBURNER_KEY, k.AIRBRAKE_KEY, k.WINGSWEEP_KEY,
+                 k.YAW_LEFT, k.AFTERBURNER_KEY, k.AIRBRAKE_KEY, k.AUXILIARY_FEATURE_KEY,
                  k.DEPLOY_FLARES_KEY, k.FIRE_MACHINE_GUN, k.FIRE_ACTIVE_WEAPON,
                  k.SWITCH_WEAPON, k.SPECIAL_ABILITY, k.PADLOCK_CAMERA}
     assert k.FINISH_ROUND_THEN_EXIT not in game_keys

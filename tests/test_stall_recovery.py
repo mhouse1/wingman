@@ -633,3 +633,73 @@ class TestPartsToSecondJet:
         src = Path("wingman/main.py").read_text(encoding="utf-8")
         branch = src[src.index('if crop == "STALL_PARTS_SELECT":'):]
         assert "_give_parts_to_second_jet(" in branch[:branch.index("return")]
+
+
+class TestInviteRestartsTheSquadClock:
+    """2026-11-19 10:14: an accepted invite inherited the 09:12 squad's clock
+    and refused READY two minutes later ("no battle for 64 min")."""
+
+    def test_accepting_an_invite_clears_the_clock(self, analyzer):
+        analyzer._squad_lobby_since = time.time() - 3800.0
+        analyzer._unready_since = time.time() - 3800.0
+        assert analyzer.squad_leave_pending() is True
+        analyzer.note_invite_accepted()
+        assert analyzer.squad_leave_pending() is False
+        assert analyzer._unready_since == 0.0
+
+    def test_main_restarts_the_clock_on_accept(self):
+        src = Path("wingman/main.py").read_text(encoding="utf-8")
+        branch = src[src.index('elif popup == "INVITED":'):]
+        branch = branch[:branch.index("def _click_ready_after_invite")]
+        reject = branch.index("if not accept_invite:")
+        reset = branch.index("analyzer.note_invite_accepted()")
+        # After the REJECT return, before the replay-mode return.
+        assert reject < reset < branch.index("if replay_mode:")
+
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _party_frame(strip_name):
+    """A 1920x1200 frame holding the saved PARTY-panel column at x 1690."""
+    import cv2
+    strip = cv2.imread(str(FIXTURES / strip_name))
+    frame = np.zeros((1200, 1920, 3), dtype=np.uint8)
+    frame[:, 1690:1690 + strip.shape[1]] = strip
+    return frame
+
+
+class TestRedXLocator:
+    """The red X moves down the PARTY panel; the crop must follow it."""
+
+    @pytest.mark.parametrize("strip, x_centre_px", [
+        ("party_red_x_strip_20261102.png", 300.5),          # the calibration frame
+        ("party_red_x_strip_banner_20261119.png", 374.5),   # event banner above the panel
+        ("party_red_x_strip_three_20261119.png", 426.5),    # a third member
+    ])
+    def test_crop_is_centred_on_the_x(self, strip, x_centre_px):
+        crop = analyzer_module.load_crops(load_config()["crops"])[STALL_UNREADY_CROP]
+        found = analyzer_module.locate_red_x(
+            _party_frame(strip), crop, schema_default("stall_recovery.red_x_search_y"))
+        assert found is not None
+        assert abs((found.y1 + found.y2) / 2 * 1200 - x_centre_px) <= 2.0
+        # Same size and column as the calibrated crop: OCR of the X is size-sensitive.
+        assert found.y2 - found.y1 == pytest.approx(crop.y2 - crop.y1)
+        assert (found.x1, found.x2, found.text) == (crop.x1, crop.x2, crop.text)
+
+    def test_no_red_means_no_crop(self):
+        crop = analyzer_module.load_crops(load_config()["crops"])[STALL_UNREADY_CROP]
+        frame = np.full((1200, 1920, 3), 60, dtype=np.uint8)
+        assert analyzer_module.locate_red_x(frame, crop, (0.12, 0.75)) is None
+
+    def test_click_uses_the_located_crop(self, analyzer):
+        calibrated = analyzer.crops[STALL_UNREADY_CROP]
+        assert analyzer.red_x_crop() == calibrated
+        moved = calibrated._replace(y1=calibrated.y1 + 0.06, y2=calibrated.y2 + 0.06)
+        analyzer._red_x_crop = moved
+        assert analyzer.red_x_crop() == moved
+
+    def test_main_clicks_the_located_crop(self):
+        src = Path("wingman/main.py").read_text(encoding="utf-8")
+        assert 'crops["STALL_MULTI_PLAYER"]' not in src
+        assert "click_crop(analyzer.red_x_crop()" in src

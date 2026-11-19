@@ -230,6 +230,9 @@ def _make_starting_ctrl(monkeypatch, analyzer, starting_max_wait_s: float = 90.0
         capture=None,
         config=ControllerConfig(
             starting_max_wait_s=starting_max_wait_s,
+            # These tests pin the Good-Luck loop; the HUD loop (ADR 189, the
+            # default) has its own in test_starting_hud.py.
+            starting_signal="good_luck",
         )
     )
 
@@ -426,6 +429,8 @@ def _make_starting_ctrl_with_capture(monkeypatch, analyzer, capture) -> Controll
         config=ControllerConfig(
             simulate_os_input=True,
             capture_stale_inject_s=10.0,
+            # The 'u' press these tests guard exists only in the Good-Luck loop.
+            starting_signal="good_luck",
         )
     )
 

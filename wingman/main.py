@@ -20,8 +20,8 @@ try:
 except ImportError:
     colorama = None
 
-WINGMAN_VERSION = "1.9.4"
-WINGMAN_VERSION_DETAILS = "ACS: J20 update"
+WINGMAN_VERSION = "1.9.5"
+WINGMAN_VERSION_DETAILS = "ACS: improvements2"
 
 from . import capture_budget
 from .capture import Capture
@@ -801,14 +801,16 @@ def main():
     _live_run = not (args.replay_config or args.capture_path_config)
     cfg = load_config(args.config, local_overlay=_live_run)
     logger.info("Configuration loaded from %s", args.config)
-    if args.replay_config:
-        # A replay path pins the configuration it models (its config_overrides),
-        # validated like any other config.
-        _replay_overrides = load_replay_config_overrides(Path(args.replay_config))
+    _path_config = args.replay_config or args.capture_path_config
+    if _path_config:
+        # A replay or live-capture path pins the configuration it models (its
+        # config_overrides), validated like any other config. ADR 189 extends this
+        # to the capture lane, so the ADR 045 live gate can pin its Good-Luck path.
+        _replay_overrides = load_replay_config_overrides(Path(_path_config))
         if _replay_overrides:
             cfg = merge_config(cfg, _replay_overrides)
-            assert_valid_config(cfg, source=f"{args.config} + {args.replay_config}")
-            logger.info("Replay: %s overrides %s", args.replay_config,
+            assert_valid_config(cfg, source=f"{args.config} + {_path_config}")
+            logger.info("Replay: %s overrides %s", _path_config,
                         ", ".join(overlay_keys(_replay_overrides)))
     if _live_run:
         _overlay = read_overlay(args.config)
@@ -1334,6 +1336,7 @@ def main():
                 # REJECT closes the dialog outright — there is no squad to ready up in.
                 logger.info("\033[93m📋 INVITED declined — REJECT clicked\033[0m")
                 return
+            analyzer.note_invite_accepted()
             if replay_mode:
                 logger.info("INVITED popup click-through skipped in replay mode")
                 return
@@ -1478,7 +1481,7 @@ def main():
             logger.warning(
                 "\033[93m🔧 Stall recovery: '%s' — leaving squad via red X (state=%s)\033[0m",
                 crop, current.name)
-            ctrl.click_crop(analyzer.crops["STALL_MULTI_PLAYER"], block=False, count=1,
+            ctrl.click_crop(analyzer.red_x_crop(), block=False, count=1,
                             region_name="STALL_MULTI_PLAYER")
             if replay_mode:
                 logger.info("STALL_MULTI_PLAYER PLAY click-through skipped in replay mode")
@@ -2082,6 +2085,11 @@ def main():
                         ctrl.log_round_objectives()
                     except Exception as e:
                         logger.warning("Controller: log_round_objectives failed: %s", e)
+                if (new_game_state == GameState.GAME_UNKNOWN
+                        and prev_game_state in BATTLE_STATES):
+                    # ADR 195: the battle HUD is gone; nothing flies until
+                    # GAME_UNKNOWN has read the screen again.
+                    ctrl.cancel_mission()
                 if new_game_state == GameState.GAME_LOBBY:
                     if prev_game_state is not None:
                         ctrl.cancel_mission()

@@ -8,9 +8,15 @@
 # aircraft into GAME_BATTLE_EJECT before missiles run out, so the missiles_empty
 # checkpoint failed on every run from then on (measured 2026-09-27, identically on
 # eb709e5 and after the code review 018 changes).
+#
+# ADR 189: PATH1 models the Good-Luck entry (P1_020 is the spawn intro, where the
+# Good Luck reply shows and the HUD does not), and the validator requires its log
+# lines. The shipped starting_signal is hud; the HUD entry is covered by
+# tests/test_starting_hud.py.
 config_overrides:
   mission:
     default_mission: j20
+    starting_signal: good_luck
 
 PATH1_RUNTIME:
   # Startup frame only: no assertion on this step.

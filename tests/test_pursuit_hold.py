@@ -28,7 +28,6 @@ from tests import test_mission_stats as ms
 from tests.test_pursuit_recovery import _Analyzer, _crash_ctrl, _stop, _wait
 from wingman.analyzer import GameState
 from wingman.config_schema import schema_default, validate_config
-from wingman.controller import ROLL_RIGHT_KEY
 from wingman.pursuit_hold import EVADE, HOLD, PursuitHoldTrial
 from wingman.tick_handlers import BehaviorTreeHandler
 from wingman.warning_agreement import WarningAgreement
@@ -155,17 +154,48 @@ def test_agreeing_warnings_do_not_start_the_recovery_while_it_holds(monkeypatch,
     assert ctrl._hold_target_withheld == {"crash recovery (two terrain warnings agree)": 1}
 
 
-def test_a_severe_pull_out_alarm_does_not_start_it_either(monkeypatch, caplog):
+def test_a_severe_pull_out_alarm_breaks_the_hold(monkeypatch, caplog):
+    """ADR 192 (operator, 2026-11-18): a predicted impact pulls up even with the
+    target in view. Withheld, it preceded 15 of 21 terrain deaths that day
+    ('a pull-out would bottom out at -646 m', 14:18:39)."""
     ctrl = _hold_ctrl(monkeypatch)
     ctrl._pullout_bypass_below_m = 300.0
     ctrl.set_pullout_lowest_m(200.0)
     ctrl._note_pursuit_objective("target")
     with caplog.at_level(logging.INFO, logger="wingman.controller"):
         ctrl.climb_mode(emergency=True)
+    try:
+        assert ctrl.is_climbing()
+        assert not _withheld(caplog)
+        assert any("breaks the chase hold" in r.getMessage() for r in caplog.records)
+    finally:
+        _stop(ctrl)
+
+
+def test_a_mild_pull_out_alarm_is_still_held(monkeypatch, caplog):
+    """Above bypass_holdoff_below_m the pull-out is not an impact: the chase holds."""
+    ctrl = _hold_ctrl(monkeypatch)
+    ctrl._pullout_bypass_below_m = 300.0
+    ctrl.set_pullout_lowest_m(450.0)
+    ctrl._note_pursuit_objective("target")
+    ctrl.climb_mode(emergency=True)
     assert not ctrl.is_climbing()
-    assert _withheld(caplog) == [
-        "PURSUIT HOLD: crash recovery (a pull-out would bottom out at 200 m) withheld — "
-        "the chase stays on its target (ADR 181)"]
+
+
+def test_the_target_does_not_take_back_a_recovery_from_a_predicted_impact(monkeypatch):
+    """ADR 181 handed a flying recovery back when the target came into view; under
+    ADR 192 not while the severe pull-out alarm stands."""
+    ctrl = _hold_ctrl(monkeypatch)
+    ctrl._pullout_bypass_below_m = 300.0
+    ctrl.set_pullout_lowest_m(200.0)
+    ctrl.climb_mode(emergency=True)
+    try:
+        assert _wait(ctrl.pursuit_recovery_active)
+        ctrl._note_pursuit_objective("target")
+        time.sleep(1.0)
+        assert ctrl.is_climbing(), "the impact alarm keeps the recovery"
+    finally:
+        _stop(ctrl)
 
 
 def test_in_an_evade_round_agreeing_warnings_still_start_the_recovery(monkeypatch, caplog):
@@ -245,25 +275,25 @@ def _roll_ctrl(monkeypatch, share=1.0):
     return ctrl
 
 
-def test_no_flare_roll_starts_while_it_holds(monkeypatch, caplog):
+def test_the_flare_roll_starts_with_the_target_in_view(monkeypatch):
+    """Operator, 2026-11-16: the roll holds on every incoming warning, so ADR 181
+    no longer withholds it while the chase has its target."""
     ctrl = _roll_ctrl(monkeypatch)
     ctrl._note_pursuit_objective("target")
-    with caplog.at_level(logging.INFO, logger="wingman.controller"):
-        assert ctrl.flare_roll(threading.Event()) is False
-    assert not ctrl.is_flare_rolling() and fr._roll_intents(ctrl) == []
-    assert any("flare roll not started — the chase stays on its target (ADR 181)"
-               in r.getMessage() for r in caplog.records)
+    try:
+        assert ctrl.flare_roll(threading.Event()) is True
+        assert ctrl.is_flare_rolling()
+    finally:
+        ctrl._flare_roll.stop()
 
 
-def test_a_flare_roll_ends_when_the_target_comes_into_view(monkeypatch):
+def test_a_flare_roll_holds_when_the_target_comes_into_view(monkeypatch):
     ctrl = _roll_ctrl(monkeypatch)
     try:
-        assert ctrl.flare_roll(threading.Event()) is True      # nothing in view: it rolls
-        assert ctrl.is_flare_rolling()
+        assert ctrl.flare_roll(threading.Event()) is True
         ctrl._note_pursuit_objective("target")
-        assert fr._wait(lambda: not ctrl.is_flare_rolling(), timeout=2.0)
-        assert [(a, k) for a, k, _ in fr._roll_intents(ctrl)] == [
-            ("key_press", ROLL_RIGHT_KEY), ("key_release", ROLL_RIGHT_KEY)]
+        time.sleep(0.3)
+        assert ctrl.is_flare_rolling()
     finally:
         ctrl._flare_roll.stop()
 

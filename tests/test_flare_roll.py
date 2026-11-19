@@ -29,7 +29,7 @@ import wingman.controller as controller_module
 from wingman.analyzer import GameState
 from wingman.config_schema import schema_default
 from wingman.controller import (
-    Controller, NOSE_DOWN_KEY, NOSE_UP_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY,
+    BARREL_ROLL_KEY, Controller, NOSE_DOWN_KEY, NOSE_UP_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY,
 )
 from wingman.controller_config import ControllerConfig
 from wingman.tick_handlers import AmmoEventsHandler
@@ -75,7 +75,7 @@ def _stop(ctrl):
 
 # --- the hold ---------------------------------------------------------------------
 
-def test_an_alert_holds_roll_right_until_after_s_past_the_last_flare(monkeypatch):
+def test_an_alert_holds_the_barrel_roll_until_after_s_past_the_last_flare(monkeypatch):
     ctrl = _ctrl(monkeypatch)
     flares_done = threading.Event()
     try:
@@ -87,8 +87,8 @@ def test_an_alert_holds_roll_right_until_after_s_past_the_last_flare(monkeypatch
         flares_done.set()
         assert _wait(lambda: not ctrl.is_flare_rolling(), timeout=2.0)
         intents = _roll_intents(ctrl)
-        assert [(a, k) for a, k, _ in intents] == [("key_press", ROLL_RIGHT_KEY),
-                                                  ("key_release", ROLL_RIGHT_KEY)]
+        assert [(a, k) for a, k, _ in intents] == [("key_press", BARREL_ROLL_KEY),
+                                                  ("key_release", BARREL_ROLL_KEY)]
         assert _AFTER_S - 0.02 <= intents[-1][2] - out_at <= _AFTER_S + 0.25
     finally:
         _stop(ctrl)
@@ -112,6 +112,55 @@ def test_a_burst_during_the_roll_extends_it_with_one_press(monkeypatch):
         intents = _roll_intents(ctrl)
         assert [a for a, _, _ in intents] == ["key_press", "key_release"]
         assert _AFTER_S - 0.02 <= intents[-1][2] - out_at <= _AFTER_S + 0.25
+    finally:
+        _stop(ctrl)
+
+
+# --- the warning itself (operator, 2026-11-16) -------------------------------------
+
+def _warning_ctrl(monkeypatch, max_s=5.0):
+    """A controller whose analyzer reports when it last saw the incoming warning."""
+    ctrl = _ctrl(monkeypatch, max_s=max_s)
+    ctrl._analyzer.seen_ts = 0.0
+    ctrl._analyzer.incoming_last_seen_ts = lambda: ctrl._analyzer.seen_ts
+    return ctrl
+
+
+def test_the_roll_holds_while_the_warning_shows_and_2s_after_it_goes(monkeypatch):
+    """"as soon as LOCK WARNING is detected it holds the roll until no more incoming
+    missile detected for 2 seconds": the flares being done does not end it."""
+    ctrl = _warning_ctrl(monkeypatch)
+    flares_done = threading.Event()
+    try:
+        ctrl._analyzer.seen_ts = time.time()
+        ctrl.flare_roll(flares_done)
+        flares_done.set()
+        for _ in range(4):                      # the warning stays up 4 x 0.2 s
+            ctrl._analyzer.seen_ts = time.time()
+            time.sleep(0.2)
+            assert ctrl.is_flare_rolling(), "released while the warning still showed"
+        gone_at = ctrl._analyzer.seen_ts
+        assert _wait(lambda: not ctrl.is_flare_rolling(), timeout=2.0)
+        release = _roll_intents(ctrl)[-1]
+        assert release[0] == "key_release"
+        assert _AFTER_S - 0.02 <= release[2] - gone_at <= _AFTER_S + 0.25
+    finally:
+        _stop(ctrl)
+
+
+def test_a_long_warning_outlasts_the_cap(monkeypatch):
+    """The cap is for a burst that never reports; it does not cut the roll short
+    while the warning is still on screen."""
+    ctrl = _warning_ctrl(monkeypatch, max_s=0.3)
+    flares_done = threading.Event()
+    try:
+        ctrl.flare_roll(flares_done)
+        deadline = time.time() + 0.8
+        while time.time() < deadline:
+            ctrl._analyzer.seen_ts = time.time()
+            time.sleep(0.05)
+        assert ctrl.is_flare_rolling()
+        assert _wait(lambda: not ctrl.is_flare_rolling(), timeout=2.0)
     finally:
         _stop(ctrl)
 
@@ -198,8 +247,8 @@ class _BattleIncoming(_FakeIncomingAnalyzer):
     game_state = GameState.GAME_BATTLE
 
 
-def test_the_roll_and_the_evade_share_roll_right(monkeypatch):
-    """Both hold ROLL_RIGHT, under their own owners: the flare roll letting go
+def test_the_roll_and_the_evade_share_the_barrel_roll_key(monkeypatch):
+    """Both hold `;` (ADR 185), under their own owners: the flare roll letting go
     first must not lift the evade's roll, and the evade's own release lifts it."""
     kb = _FakeKeyboard()
     monkeypatch.setattr(controller_module, "keyboard_module", kb)
@@ -212,21 +261,21 @@ def test_the_roll_and_the_evade_share_roll_right(monkeypatch):
     try:
         ctrl.missile_evade_mode()
         assert ctrl.flare_roll(flares_done) is True
-        assert _wait(lambda: sum(1 for e in kb.events if e[:2] == ("press", ROLL_RIGHT_KEY)) >= 2)
+        assert _wait(lambda: sum(1 for e in kb.events if e[:2] == ("press", BARREL_ROLL_KEY)) >= 2)
         flares_done.set()
         assert _wait(lambda: not ctrl.is_flare_rolling())
-        assert _releases(kb, ROLL_RIGHT_KEY) == [], "the flare roll lifted the evade's roll"
+        assert _releases(kb, BARREL_ROLL_KEY) == [], "the flare roll lifted the evade's roll"
         ctrl._me_stop.set()
         assert _wait(lambda: not ctrl.is_missile_evading())
-        assert len(_releases(kb, ROLL_RIGHT_KEY)) == 1, "the evade's own release lifts it"
+        assert len(_releases(kb, BARREL_ROLL_KEY)) == 1, "the evade's own release lifts it"
     finally:
         ctrl._flare_roll.stop()
         ctrl._me_stop.set()
         _wait(lambda: not ctrl.is_flare_rolling() and not ctrl.is_missile_evading())
-        controller_module._actuator.release_all((ROLL_RIGHT_KEY,), "test cleanup", "")
+        controller_module._actuator.release_all((BARREL_ROLL_KEY,), "test cleanup", "")
 
 
-# --- the chase yields -------------------------------------------------------------
+# --- the chase steers through the roll (ADR 193) -----------------------------------
 
 def _steering_presses(ctrl, since=0):
     """The chase's own steering presses, not the flare roll's."""
@@ -235,8 +284,10 @@ def _steering_presses(ctrl, since=0):
             and i.get("action") != "flare_roll"]
 
 
-def test_the_chase_yields_pitch_and_roll_while_it_rolls_and_steers_after(monkeypatch, caplog):
-    """A barrel roll leaves the flight path alone only if nothing pitches during it."""
+def test_the_chase_keeps_steering_while_the_jet_rolls(monkeypatch, caplog):
+    """Operator, 2026-11-19: "flare roll should still happen but flight control
+    should also work at the same time, the jet can roll while still steering
+    towards targets". ADR 164's yield flew a 22 s roll into a cliff."""
     with caplog.at_level(logging.INFO, logger="wingman.controller"):
         ctrl = _ctrl(monkeypatch, state=GameState.GAME_BATTLE_EJECT)
         ctrl.set_target_tracker(_Tracker())
@@ -247,23 +298,27 @@ def test_the_chase_yields_pitch_and_roll_while_it_rolls_and_steers_after(monkeyp
             time.sleep(0.5)                                   # steering is running
             assert _steering_presses(ctrl), "the chase never steered"
             ctrl.flare_roll(flares_done)
-            time.sleep(0.4)                                   # let the loop notice and release
+            assert _wait(ctrl.is_flare_rolling)
             mark = len(ctrl.get_action_intents())
-            time.sleep(0.6)                                   # several loop cycles, still rolling
+            time.sleep(1.0)                                   # several loop cycles, rolling
             assert ctrl.is_flare_rolling()
-            assert _steering_presses(ctrl, mark) == []
-            assert ctrl._roll_held is None and ctrl._pitch_held is None
+            keys = {k for k, _ in _steering_presses(ctrl, mark)}
+            # Steering is a sustained hold: a key already down from before the
+            # roll stays down (no new press), so the held state counts too.
+            assert ROLL_RIGHT_KEY in keys or ctrl._roll_held is not None, \
+                "the chase steers on roll while the barrel roll is held"
+            assert NOSE_UP_KEY in keys or ctrl._pitch_held is not None, \
+                "the chase steers on pitch while the barrel roll is held"
+            rolls = [i for i in ctrl.get_action_intents()
+                     if i.get("action") == "flare_roll" and i["action_type"] == "key_press"]
+            assert [i["key"] for i in rolls] == [BARREL_ROLL_KEY]
             flares_done.set()
             assert _wait(lambda: not ctrl.is_flare_rolling(), timeout=2.0)
-            time.sleep(0.5)
-            keys = {k for k, _ in _steering_presses(ctrl, mark)}
-            assert ROLL_RIGHT_KEY in keys and NOSE_UP_KEY in keys
         finally:
             ctrl._flare_roll.stop()
             ctrl.stop_eject_sequence("respawn_detected")
             _wait(lambda: not ctrl.is_pursuing() and not ctrl.is_flare_rolling())
-    assert "yielding pitch and roll to the flare roll (ADR 164)" in caplog.text
-    assert "flare roll over, steering resumes" in caplog.text
+    assert "yielding pitch and roll to the flare roll" not in caplog.text
 
 
 # --- end to end from the flare handler ---------------------------------------------
@@ -315,3 +370,11 @@ def test_the_shipped_wait_is_the_operators_two_seconds():
     cfg = yaml.safe_load(pathlib.Path("wingman/config.yaml").read_text(encoding="utf-8"))
     assert cfg["behavior_tree"]["missile_evade"]["flare_roll_after_s"] == 2.0
     assert schema_default("behavior_tree.missile_evade.flare_roll_after_s") == 2.0
+
+
+def test_the_roll_is_the_semicolon_key_not_the_bank_and_turn_keys():
+    """ADR 185, operator 2026-11-16: "the l key turns nose right the roll key is ;".
+    Held `l` banked the jet to knife-edge and held it there (frames of the
+    16:29:38 roll); the barrel roll is `;`."""
+    assert BARREL_ROLL_KEY == ";"
+    assert BARREL_ROLL_KEY not in (ROLL_LEFT_KEY, ROLL_RIGHT_KEY)

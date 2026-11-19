@@ -299,6 +299,17 @@ def test_rank_and_trophies_are_charted_over_time_as_one_series(title, column):
     assert "FROM squadron_rankings" in target["rawSql"]
 
 
+def test_the_rank_axis_runs_from_high_to_low_to_line_up_with_the_trophies():
+    """Operator, 2026-11-17: a better place is a smaller rank, so the rank chart is flipped
+    to rise with the trophies chart beside it. Grafana's time series has no reversed axis;
+    negative-Y plots the values negated and keeps the real ones in the tooltip."""
+    dashboard = json.loads(Path("grafana/dashboards/score-per-round.json").read_text(encoding="utf-8"))
+    rank, trophies = (next(p for p in dashboard["panels"] if p["title"].startswith(t))
+                      for t in ("Squadron rank per reading", "Squadron trophies per reading"))
+    assert rank["fieldConfig"]["defaults"]["custom"].get("transform") == "negative-Y"
+    assert "transform" not in trophies["fieldConfig"]["defaults"].get("custom", {})
+
+
 def test_no_squadron_panel_depends_on_the_account():
     """A filter by account could only hide a reading of the same figure."""
     sqls = [sql for _title, sql in _dashboard_sql() if "squadron_rankings" in sql]
@@ -331,10 +342,48 @@ def test_the_schema_names_each_jet_once_by_its_letters_and_digits():
     assert "regexp_replace(upper(tags->>'jet'), '[^A-Z0-9]', '', 'g')" in schema
 
 
+def _account_and_jet():
+    dashboard = json.loads(Path("grafana/dashboards/score-per-round.json").read_text(encoding="utf-8"))
+    panel = next(p for p in dashboard["panels"] if p["title"] == "Account and jet score per round")
+    return dashboard, panel
+
+
+def test_the_account_and_jet_chart_follows_the_two_boxes():
+    """Operator, 2026-11-17: isolate one jet on one account and see whether its score per
+    round improves over time."""
+    _dashboard, panel = _account_and_jet()
+    for target in panel["targets"]:
+        sql = target["rawSql"]
+        assert "coalesce(tags->>'account', 'no account') IN (${account:sqlstring})" in sql
+        assert "coalesce(jet, 'not recorded') IN (${jet:sqlstring})" in sql
+        assert "manual_takeovers = 0" in sql
+    (avg,) = [t["rawSql"] for t in panel["targets"] if "moving average" in t["rawSql"]]
+    assert "${window:raw} - 1 PRECEDING" in avg
+
+
+def test_the_account_and_jet_boxes_pick_several_or_all_and_the_jets_follow_the_accounts():
+    dashboard, _panel = _account_and_jet()
+    boxes = {v["name"]: v for v in dashboard["templating"]["list"]}
+    for name in ("account", "jet"):
+        assert boxes[name]["multi"] and boxes[name]["includeAll"], name
+    assert "IN (${account:sqlstring})" in boxes["jet"]["query"]
+    assert "JOIN jet_names ON spelling = tags->>'jet'" in boxes["jet"]["query"]
+
+
+def test_the_account_and_jet_chart_keeps_the_account_colours():
+    _dashboard, panel = _account_and_jet()
+    colours = {o["matcher"]["options"]: o["properties"][0]["value"]["fixedColor"]
+               for o in panel["fieldConfig"]["overrides"] if o["matcher"]["id"] == "byRegexp"}
+    score = {o["matcher"]["options"]: o["properties"][0]["value"]["fixedColor"]
+             for o in _score_panel()["fieldConfig"]["overrides"]
+             if o["matcher"]["id"] == "byRegexp" and "manual" not in o["matcher"]["options"]}
+    assert colours == score
+
+
 def test_every_panel_that_names_a_jet_names_it_through_the_view():
     """A panel that groups by the spelling read splits one jet in two again."""
     by_jet = [(title, sql) for title, sql in _dashboard_sql() if "tags->>'jet'" in sql]
-    assert len(by_jet) == 3
+    assert len(by_jet) == 5
     for title, sql in by_jet:
         assert "JOIN jet_names ON spelling = tags->>'jet'" in sql, title
         assert "tags->>'jet' AS" not in sql and "coalesce(tags->>'jet'" not in sql, title
@@ -381,7 +430,8 @@ def test_every_braced_reference_names_a_defined_variable():
 def test_every_round_panel_filters_by_the_tags_box_quoted():
     dashboard = json.loads(Path("grafana/dashboards/score-per-round.json").read_text(encoding="utf-8"))
     sqls = [t["rawSql"] for p in dashboard["panels"] for t in p["targets"]]
-    rounds = [sql for sql in sqls if "squadron_rankings" not in sql and "resource_" not in sql]
+    rounds = [sql for sql in sqls if "squadron_rankings" not in sql and "resource_" not in sql
+              and "run_timings" not in sql]
     assert rounds and all("tags @> ${tags:sqlstring}::jsonb" in sql for sql in rounds)
     assert not any("tags:raw" in sql for sql in sqls)
 
@@ -494,7 +544,8 @@ def test_the_resource_panels_sit_under_the_score_panels_and_ignore_the_tags_box(
     assert [p["title"] for p in panels] == ["Memory per sample (MB)",
                                             "Threads and open files per sample",
                                             "OCR time per sample", "Resources per session"]
-    others = [p for p in dashboard["panels"] if p not in panels]
+    others = [p for p in dashboard["panels"] if p not in panels
+              and not any("run_timings" in t["rawSql"] for t in p["targets"])]
     assert min(p["gridPos"]["y"] for p in panels) == max(
         p["gridPos"]["y"] + p["gridPos"]["h"] for p in others)
     assert not any("tags @>" in t["rawSql"] for p in panels for t in p["targets"])
@@ -506,6 +557,104 @@ def test_the_session_rates_start_after_the_summarys_warm_up():
     from wingman import resource_monitor
     sql = dict(_dashboard_sql())["Resources per session"]
     assert f"elapsed_s >= {resource_monitor._WARMUP_S:.0f}" in sql
+
+
+# -- the run timings (the runtime trend HTML's figures, operator 2026-11-16) ----------
+
+def _run(**over):
+    data = {"version": "1.9.4", "run_id": "20261115_210159_acct2",
+            "start_ts": _START, "end_ts": _START + 3600,
+            "ocr_crops": {"incoming": {"n": 4731, "mean": 0.4296, "p50": 0.406, "p95": 0.5941,
+                                       "p99": 0.6851},
+                          "telemetry": {"n": 0, "mean": 0.0}},
+            "reaction": {"n": 354, "mean": 0.4374, "p50": 0.4128, "p95": 0.577, "p99": 0.9119,
+                         "max": 1.3517},
+            "host": {"hostname": "veda"}}
+    return data | over
+
+
+def test_each_crop_and_the_reaction_of_a_run_file_is_a_timing_row():
+    rows = rs.timings_from_run(_run())
+    assert [(t.figure, t.n, t.mean, t.p95) for t in rows] == [
+        ("incoming", 4731, 0.4296, 0.5941), ("reaction", 354, 0.4374, 0.577)]
+    first = rows[0]
+    assert (first.run_id, first.wingman_version) == ("20261115_210159_acct2", "1.9.4")
+    assert first.started_at == datetime.fromtimestamp(_START, timezone.utc)
+    assert first.ended_at - first.started_at == timedelta(hours=1)
+    assert first.tags == {"account": "mobius2", "host": "veda"}
+
+
+def test_a_figure_without_samples_gives_no_timing():
+    """Its mean of 0 is not a time: the zero telemetry crop above, a run with no
+    warning, and an old file's empty blocks."""
+    rows = rs.timings_from_run(_run(reaction={"n": 0, "mean": 0.0}, ocr_crops={}))
+    assert rows == []
+
+
+def test_a_run_file_without_a_run_id_or_a_start_gives_no_timing():
+    assert rs.timings_from_run(_run(run_id=None)) == []
+    assert rs.timings_from_run(_run(start_ts=None)) == []
+
+
+def test_an_old_run_file_has_no_host_tag():
+    data = _run()
+    del data["host"]
+    assert rs.timings_from_run(data)[0].tags == {"account": "mobius2"}
+
+
+def test_the_run_files_are_read_and_the_stats_files_beside_them_are_not(tmp_path):
+    (tmp_path / "run_20261115_210159_acct2.json").write_text(json.dumps(_run()), encoding="utf-8")
+    (tmp_path / "run_20261115_210159_acct2_stats.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "run_broken.json").write_text("{", encoding="utf-8")
+    assert [r["run_id"] for r in rs.read_runs([tmp_path])] == ["20261115_210159_acct2"]
+
+
+def test_the_run_timings_are_upserted_and_never_deleted():
+    rows = rs.timings_from_run(_run())
+    script = rs.load_script("r\n", "c\n", timings_text=rs.timings_csv(rows))
+    body = script[:script.index("COMMIT;")]
+    assert "ON CONFLICT (run_id, figure) DO UPDATE" in body
+    assert "DELETE FROM run_timings" not in script
+    first = next(csv.reader(io.StringIO(rs.timings_csv(rows))))
+    assert len(first) == len(rs.TIMING_COLUMNS)
+    assert first[1] == "incoming" and first[4:7] == ["1.9.4", "4731", "0.4296"]
+    assert json.loads(first[-1]) == {"account": "mobius2", "host": "veda"}
+
+
+def test_the_schema_has_every_timing_column():
+    schema = Path("grafana/schema.sql").read_text(encoding="utf-8")
+    table = schema[schema.index("CREATE TABLE IF NOT EXISTS run_timings"):]
+    for column in rs.TIMING_COLUMNS:
+        assert re.search(rf"^\s+{column}\s", table, re.M), column
+
+
+def _timing_panels(dashboard):
+    return [p for p in dashboard["panels"]
+            if any("run_timings" in t["rawSql"] for t in p["targets"])]
+
+
+def test_the_timing_panels_sit_under_the_resource_panels_and_follow_the_version_box():
+    dashboard = json.loads(Path("grafana/dashboards/score-per-round.json").read_text(encoding="utf-8"))
+    panels = _timing_panels(dashboard)
+    assert [p["title"] for p in panels] == ["OCR time per crop per session",
+                                            "Missile warning to flares per session",
+                                            "OCR and reaction time by version"]
+    others = [p for p in dashboard["panels"] if p not in panels]
+    assert min(p["gridPos"]["y"] for p in panels) == max(
+        p["gridPos"]["y"] + p["gridPos"]["h"] for p in others)
+    sqls = [t["rawSql"] for p in panels for t in p["targets"]]
+    assert all("wingman_version IN (${version:sqlstring})" in sql for sql in sqls)
+    assert not any("tags @>" in sql for sql in sqls)
+    version = next(v for v in dashboard["templating"]["list"] if v["name"] == "version")
+    assert version["multi"] and version["includeAll"] and "run_timings" in version["query"]
+
+
+def test_the_version_table_weights_each_mean_by_its_count_as_the_html_did():
+    sql = dict(_dashboard_sql())["OCR and reaction time by version"]
+    for figure in ("incoming", "respawn", "health", "ammo_flares", "ammo_missiles", "telemetry",
+                   "reaction"):
+        assert f"sum(mean * n) FILTER (WHERE figure = '{figure}')" in sql, figure
+        assert f"nullif(sum(n) FILTER (WHERE figure = '{figure}'), 0)" in sql, figure
 
 
 # -- the switch -------------------------------------------------------------------

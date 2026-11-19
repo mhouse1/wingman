@@ -268,7 +268,7 @@ Started by the flare handler on every alert edge, after the flares. Holds ROLL_R
 
 **Game-starting loop** (`_start_game_starting_loop`):
 
-Runs as a daemon thread, started by `on_enter_GAME_STARTING`. Polls for "Good Luck" and fires `good_luck_detected` when found. After 10s, arms the health-scan fallback: if `game_battle_alive` becomes True (health OCR detects the aircraft is alive) before Good Luck appears, fires `good_luck_detected` immediately. On 120s timeout, fires `starting_timeout` → `GAME_STARTING_STALLED`. See [ADR 032](adr/032-game-battle-alive-fallback-trigger.md).
+Runs as a daemon thread, started by `on_enter_GAME_STARTING`. Under the shipped `mission.starting_signal: hud` it presses nothing: every `starting_health_probe_interval_s` it hands a fresh frame to the analyzer's HUD probe, which reads health, speed and altitude, and it fires `good_luck_detected` and launches the mission once the probe confirms the HUD ([ADR 189](adr/189-the-match-start-is-read-off-the-hud-not-the-good-luck-emote.md)). Under `good_luck` it taps the Good Luck emote every 5 s, polls for the "Good Luck" reply, and after 10 s also arms the same probe as a fallback ([ADR 032](adr/032-game-battle-alive-fallback-trigger.md)). On the `starting_max_wait_s` timeout either mode fires `starting_timeout` → `GAME_STARTING_STALLED`.
 
 ```
 while state == GAME_STARTING:
@@ -715,6 +715,9 @@ stateDiagram-v2
     GAME_STARTING_STALLED --> GAME_UNKNOWN : starting stalled reclassify
     GAME_STARTING_STALLED --> GAME_STARTING : starting recovery
     GAME_STARTING_STALLED --> GAME_LOBBY : starting give up or manual reset
+    GAME_BATTLE --> GAME_UNKNOWN : battle hud lost
+    GAME_BATTLE_MANUAL --> GAME_UNKNOWN : battle hud lost
+    GAME_BATTLE_EJECT --> GAME_UNKNOWN : battle hud lost
     GAME_BATTLE --> GAME_END_B : click to detected
     GAME_BATTLE_MANUAL --> GAME_END_B : click to detected
     GAME_BATTLE_EJECT --> GAME_END_B : click to detected
@@ -942,12 +945,13 @@ enter main loop → startup classifier routes GAME_UNKNOWN → lobby or battle (
   → CANCEL visible → fire cancel_detected → GAME_STARTING
 
 [GAME_STARTING]
-  → _start_game_starting_loop() thread starts
-  → press J20 key every 5s
-  → scan good_luck crop
-  → Good Luck detected → wait 13s → launch the jet's mission
+  → _start_game_starting_loop() thread starts (starting_signal: hud, ADR 189)
+  → every 0.4s probe health, speed and altitude; no key pressed
+  → HUD confirmed → launch the jet's mission
     (_start_default_mission, jet_profile.profiles, else mission.default_mission)
   → fire good_luck_detected → GAME_BATTLE
+  (starting_signal: good_luck instead presses u every 5s, waits for the
+   Good Luck reply, then up to 13s or until health confirms)
 
 [GAME_BATTLE]
   → background OCR thread runs continuous parallel OCR
