@@ -168,3 +168,33 @@ def test_no_press_for_an_unknown_ability_when_turned_off():
                           special_weapon_cfg=_cfg(unknown_trigger="none"))
     h.tick_events()
     assert ctrl.keys == []
+
+
+# ADR 197 (operator, 2026-11-19, the KF-21): "in this case it should not press 'q'".
+
+
+def _kf21_special_weapon():
+    return _CFG["jet_profile"]["profiles"]["kf21"]["special_weapon"]
+
+
+def test_a_jet_with_trigger_none_gets_no_profile_whatever_its_glyph():
+    off = {"ability": "kf21_q", "trigger": "none"}
+    assert resolve_profile(off, "other", _SW) is None
+    assert resolve_profile(off, "pair_fire", _SW) is None
+
+
+def test_the_kf21_never_presses_q():
+    assert resolve_profile(_kf21_special_weapon(), "other", _SW) is None
+
+
+def test_the_battle_tick_leaves_the_kf21_unknown_glyph_unpressed():
+    from wingman.tick_handlers import AmmoEventsHandler
+
+    from tests.test_special_weapon import _Ctrl, _Stats
+
+    ctrl = _Ctrl(_kf21_special_weapon())
+    h = AmmoEventsHandler(_Glyph("other"), ctrl, {}, stats_tracker=_Stats(),
+                          special_weapon_cfg=_cfg(unknown_trigger="ready"))
+    for _ in range(3):
+        h.tick_events()
+    assert ctrl.keys == []

@@ -43,6 +43,44 @@ the red X squad leave), which is Accepted and is not edited.
   It is the CREATION_FAILED dialog with a one-line message, so its OK sits
   30 px higher. A new popup crop, `UNABLE_TO_JOIN`, covers that OK. It is
   scanned in GAME_LOBBY next to CREATION_FAILED.
+- **D6. A lobby blackout that shows the battle HUD becomes GAME_STARTING.**
+  Once a GAME_LOBBY blackout is 5 s old (one popup pass has had its chance),
+  the HEALTH and ALTITUDE_SPEED crops are read once a second. Two reads in a
+  row with ADR 189 HUD evidence (`battle_hud_evidence`: health at the spawn
+  floor plus speed or altitude, or speed and altitude together) fire
+  `cancel_detected`, GAME_LOBBY → GAME_STARTING. GAME_STARTING's own probe
+  confirms the HUD and starts the mission. Before this, nothing but the
+  operator's `u`/`o` led from GAME_LOBBY into a battle. A dialog blackout has
+  no speed or altitude, so it stays in GAME_LOBBY with its popup and ESC
+  handling unchanged.
+- **D7. The reward crate is opened from a lobby blackout, whatever it holds.**
+  `STALL_PARTS_CRATE` (Anomaly 005) now also reads `SILVER` on the reward card,
+  and it joins the GAME_LOBBY blackout gate next to STALL_PROFILE and
+  STALL_INVITE_PLAYERS. Its action is unchanged: one click on the crate's `?`,
+  which opens a reward already owned and commits nothing.
+- **D8. "Unable to join" is a refused READY, not matchmaking.** When the
+  `UNABLE_TO_JOIN` popup is read, GAME_WAITING goes back to GAME_LOBBY for
+  the next 15 s (`waiting_timeout`) instead of letting QUEUE_FALLBACK take the
+  dimmed lobby behind the dialog for a queue. The lobby quick-scan then holds
+  PLAY and READY for 30 s, and tries again after. A PLAY or READY click clears
+  the refusal it follows, so only a dialog that answers this click sends
+  GAME_WAITING back. The 15-min squad limit (D1, D4) still leaves a squad
+  that never plays.
+  - **Rev 1 (2026-11-20).** The first version held READY only, for 60 s, and
+    kept the refusal for 15 s whatever was clicked after it. Its first live
+    trigger was a **solo** PLAY (02:30): the dialog is not a squad-only one.
+    PLAY was re-clicked every few seconds, and the PLAY at 02:30:16 was sent
+    back 0.5 s after the click, on the 02:30:12 refusal of the click before.
+- **D9. The daily event reward is collected.** A new popup crop,
+  `EVENT_COLLECT`, reads `COLLECT` across the event window's whole button
+  row, since the orange button sits under whichever day is due. The click
+  goes to the orange button found in the row (`locate_collect_button`), not
+  to the row's centre. COLLECT takes a reward already owned, like REVEAL_ALL,
+  and the crate it opens is D7's.
+- **D10. REVEAL_ALL's second click runs wherever its first could.** The
+  second click, 3 s after the first (ADR 026), was gated on GAME_LOBBY, while
+  the first runs in every popup-dismiss state (ADR 074). It now uses the same
+  `POPUP_DISMISS_STATES`.
 
 ## Consequences
 
@@ -127,6 +165,111 @@ click landed at (1731, 300).
 | Unable to join, 19:17:10 anomaly frame | 565–631 | not found | OK |
 | PLAY lobby; red X lobby (10:30) | none | not found | not found |
 
+**D6: 2026-11-19 20:02 session (operator-run; `v` screenshot
+`screenshot_20261119_201120.png`, the in-match scoreboard at 2m 0s, KF-21
+0/2/0).**
+
+```
+20:08:40-45  READY visible in GAME_STARTING (1/6 … 5/6 reads)
+20:08:47     READY still visible after 6 reads — the match never started, returning to GAME_LOBBY (ADR 102)
+20:08:50 …   Click-to OCR re-enabled: GAME_LOBBY blackout           (match intro "TEAM ALPHA" on screen)
+20:09:33     ADR074 anomaly: GAME_LOBBY blackout stuck for 31s      (blackout_20261119_200933_stuck30s.png)
+20:10:36     BOUNDARY: dist=0.292                                    (the battle minimap, read in GAME_LOBBY)
+20:11:02     blackout 132s past the ESC ceiling — pressing ESC anyway (opened the scoreboard)
+20:11:24     'u' key pressed - starting the configured mission (acs, state=GAME_LOBBY)
+```
+
+The round ran 2 min 37 s unflown, with 2 deaths. Why the ADR 102 recheck read
+READY six times while the squad's match was loading is not known: no frame was
+saved during those reads. D6 is the backstop for that recheck firing too
+early. The recheck itself is unchanged.
+
+**D7: 2026-11-19 04:50 session (`logs/wingman_20261119_052926.log`).**
+
+```
+05:14:21     Lobby quick-scan: popup 'FINAL_CONTINUE' detected → clicked; GAME_LOBBY
+05:15:00     ADR074 anomaly: GAME_LOBBY blackout stuck for 31s   (blackout_20261119_051459_stuck31s.png: "+300 SILVER", crate '?')
+05:16:29 …   blackout 133s past the ESC ceiling — pressing ESC anyway   (every 45 s, 18 times, no effect)
+05:19:15     LIVENESS GUARD: no FSM state change and no OCR for 300s
+05:29:15     LIVENESS GUARD hard limit: no progress for 901s — ending the session
+```
+
+| Frame | STALL_PARTS_CRATE label, real OCR, text [PARTS, UNIVERSAL, SILVER] | `?` crop white fraction |
+|---|---|---|
+| 05:14:59 and 05:23:00 crate frames | `+300SILVER` | 0.41 |
+| STALL_PARTS_CRATE.png (Anomaly 005) | `+100UNIVERSALPARTS` | 0.41 |
+| SILVER popup, PLAY lobby, red-X lobby, match intro | not found | 0.00 |
+
+**D8: 2026-11-19 `make r` session started 20:41 (with D1 to D7).**
+
+```
+22:00:23     INVITED accepted — clicking READY
+22:00:30     popup 'UNABLE_TO_JOIN' detected → OK          (D5 working)
+22:00:34     READY detected — clicking; GAME_LOBBY → GAME_WAITING
+22:00:41/47  popup 'UNABLE_TO_JOIN' detected → OK          (each READY raised it again)
+22:00:47     GAME_WAITING confirmed via QUEUE_FALLBACK (12.0s) → GAME_STARTING
+22:03:18     game_starting timed out after 150s without the HUD → STALLED
+22:03:19     popup 'UNABLE_TO_JOIN' detected → OK; → GAME_UNKNOWN → GAME_LOBBY
+22:03:26     READY detected — clicking                        (the loop again)
+22:03:40     QUEUE_FALLBACK → GAME_STARTING
+```
+
+About 2.7 min a lap, and no lap could reach a battle.
+
+**D8 rev 1: 2026-11-20 02:30, solo lobby (`make r` session started 22:35, D8
+first version).**
+
+```
+02:30:05     PLAY detected — clicking; GAME_LOBBY → GAME_WAITING
+02:30:12     popup 'UNABLE_TO_JOIN' detected → OK
+02:30:14     GAME_WAITING: the READY was refused — back to GAME_LOBBY   (D8 working)
+02:30:16     PLAY detected — clicking                                    (2.5 s later: no hold for PLAY)
+02:30:17     GAME_WAITING: the READY was refused — back to GAME_LOBBY   (0.5 s after the click: stale refusal)
+02:30:23-44  popup 'UNABLE_TO_JOIN' detected                             (every 5 s)
+02:30:49     PLAY detected — clicking
+02:30:53     Lobby quick-scan: CANCEL detected → GAME_STARTING           (accepted, a real queue)
+```
+
+Refused for at least 33 s, accepted by 44 s. No 150 s GAME_STARTING timeout,
+unlike 22:00: the first version already broke the loop D8 is for.
+
+**D9: 2026-11-20 02:44 (`make r` session started 22:35).**
+
+```
+02:43:57     GAME_END_B → GAME_LOBBY
+02:44:45     ADR074 anomaly: GAME_LOBBY blackout stuck for 31s   (blackout_20261120_024445_stuck31s.png:
+             3RD YEAR ANNIVERSARY EVENT, Day 6 HUGE CRATE, COLLECT)
+02:46:12     blackout 133s past the ESC ceiling — pressing ESC anyway   (closed the window, crate not collected)
+02:46:18     PLAY detected — clicking
+03:00:23     ADR074 anomaly: GAME_LOBBY blackout stuck for 31s   (the same window, Day 6 COLLECT, after the next round)
+```
+
+ESC closes the window without collecting, so it comes back after every round:
+about 2 min 15 s a round until the reward is taken.
+
+| Frame | EVENT_COLLECT row, real OCR | Button found by colour |
+|---|---|---|
+| 02:44:45, Day 6 | `COLLECT` | x 1203–1332, y 836–864 |
+| the same, button moved one tile (Day 7) | `COLLECT` | 154 px right |
+| PLAY lobby, red-X lobby, silver crate, REVEAL_ALL | not found | — |
+
+**D9 and D10: 2026-11-20 03:20, the first minute of a `make r` session with D9.**
+
+```
+03:20:07     UNKNOWN → GAME_UNKNOWN                      (startup)
+03:20:23     popup 'EVENT_COLLECT' detected → Clicking EVENT_COLLECT at (1268, 850)   (D9 working)
+03:20:28     popup 'REVEAL_ALL' detected → clicked        (the HUGE CRATE)
+03:20:31     REVEAL_ALL second click suppressed — state is GameState.GAME_UNKNOWN
+03:20:36     STALL_CHOOSE_REWARDS → middle reward, SELECT ONE
+03:20:40 …   ADR074 anomaly: GAME_UNKNOWN stuck            (unknown_20261120_032040_stuck32s.png:
+             the crate's nine-card reward summary, no button)
+03:21:38 …   GAME_UNKNOWN startup classification timeout   (every second)
+```
+
+November logs: the second REVEAL_ALL click ran 114 times, all in GAME_LOBBY,
+and was suppressed in 8 sessions. Six of the 8 reached the next state in
+10–31 s, one took 2 min 17 s, and one logged none.
+
 ## Validation
 
 - [ ] D1: a session that accepts an invite after an earlier squad logs
@@ -138,11 +281,51 @@ click landed at (1731, 300).
       missed-click re-click. Seen once, 2026-11-19 19:24 (session started
       19:10): quick-scan READY at 19:24:25.548, then `READY already clicked by
       the lobby scan in the last 10 s, not clicking it again` at 19:24:26.043,
-      then GAME_WAITING. One accept; more needed before calling the rate.
+      then GAME_WAITING. 20:01 (session started 19:52), the other order: main's
+      `INVITED accepted — clicking READY` at 20:01:11.916, no quick-scan
+      click, GAME_WAITING at 20:01:17. Two accepts, one in each order; more
+      needed before calling the rate.
 - [ ] D4: a squad whose leader is slow stays past 160 s in GAME_WAITING, and
       is left only after `no battle for 15 min`.
-- [ ] D5: the dialog logs `popup 'UNABLE_TO_JOIN' detected` within one popup
-      pass, with no `blackout stuck` anomaly after it.
+- [x] D6: a GAME_LOBBY blackout over a live round logs `Lobby blackout … is
+      a battle`, then `HUD confirmed in GAME_STARTING` and the mission start,
+      with no ESC-ceiling press. 2026-11-20 03:15 (`make r` session started
+      22:35): the D9 event window sat over the lobby from 03:14:19, and a queue
+      started under it with no wingman click (the 03:15:04 frame shows the red
+      CANCEL behind the window where PLAY had been). HUD read at 03:15:41
+      (health 175, 893 kph, 1149 m) and 03:15:44 (962 kph), handoff at
+      03:15:44, `HUD confirmed in GAME_STARTING` and `mission 'acs' started`
+      at 03:15:45, about 4 s after the HUD first showed. (20:08, before D6: the
+      round ran 2 min 37 s unflown, until the operator's `u`.)
+- [ ] D8: after `UNABLE_TO_JOIN`, `the READY was refused … back to
+      GAME_LOBBY` and `holding READY`, with no QUEUE_FALLBACK confirm and no
+      150 s GAME_STARTING timeout in between.
+- [x] D9: the event window logs `popup 'EVENT_COLLECT' detected` and a click
+      on the button, with no ESC-ceiling press after it. 2026-11-20 03:20:23,
+      16 s into a session: detected and clicked at (1268, 850), the Day 6
+      button; the HUGE CRATE opened (REVEAL_ALL at 03:20:28).
+      **Open:** 06:33:33 (Day 7, operator session started 06:33:13): `COLLECT`
+      read but `its button not found`; the window was gone by 06:33:35 (PLAY
+      clicked, no blackout). No frame was kept, so why the orange search
+      missed is not known (inferred: the Day 7 button is another colour, or
+      the window was fading). A miss now saves its frame
+      (`collect_miss_*.png` in test_screenshots/unknown_anomalies).
+- [x] D10: the second REVEAL_ALL click runs outside GAME_LOBBY. 2026-11-20
+      03:44:38 (session started 03:44:14, with D10): `REVEAL_ALL second click
+      after 3s delay` in GAME_UNKNOWN, then GAME_UNKNOWN → GAME_LOBBY at
+      03:44:43 and PLAY. The session before it, without D10, sat on the
+      reward summary from 03:20:40 until the 600 s startup stall ended it at
+      03:30:02.
+- [ ] D7: a crate over the lobby logs `Stall recovery: 'STALL_PARTS_CRATE'
+      detected` about 15 s into the blackout, and the lobby comes back.
+- [x] D5: the dialog logs `popup 'UNABLE_TO_JOIN' detected` within one popup
+      pass, with no `blackout stuck` anomaly after it. 2026-11-19 22:00 (`make r`
+      session started 20:41): invite accepted 22:00:21, READY clicked 22:00:23,
+      `UNABLE_TO_JOIN` detected and OK clicked at (959, 598) at 22:00:30, again
+      at 22:00:41 and 22:00:47 after the next READY click; GAME_STARTING at
+      22:00:47, no blackout anomaly. (19:16, before D5: 2 min 6 s to the ESC
+      ceiling.) Each READY click into a squad that is already queueing raises
+      the dialog again; three in 17 s here, then the squad's queue took over.
 
 Tests: `tests/test_stall_recovery.py` (`TestInviteRestartsTheSquadClock`,
 `TestRedXLocator`, `TestOneReadyClickAfterAnInvite`,

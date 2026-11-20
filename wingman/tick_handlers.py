@@ -3267,6 +3267,17 @@ class WaitingFallbackHandler:
             note_matchmaking(frame)
 
         elapsed_waiting = time.time() - self._waiting_since
+        # ADR 196 D8: "Matchmaking in progress. Unable to join." refused the
+        # READY click, so nothing is queueing for us. Its dimmed lobby is what
+        # QUEUE_FALLBACK took for matchmaking on 2026-11-19 22:00:47, and
+        # GAME_STARTING then sat 150 s behind the dialog (no popup scan there).
+        if self._analyzer.join_refused_recently():
+            logger.info("GAME_WAITING: the READY was refused (Unable to join) — "
+                        "back to GAME_LOBBY, not matchmaking (ADR 196 D8)")
+            self._analyzer.trigger_event("waiting_timeout")
+            self._waiting_since = 0.0
+            self._reset_fallback()
+            return True
         if elapsed_waiting > self._timeout_s:
             logger.warning(
                 "GAME_WAITING timeout after %.0fs — CANCEL never detected; returning to GAME_LOBBY",

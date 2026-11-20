@@ -1312,6 +1312,15 @@ def main():
             # ESC dismisses it. Cooldown above still rate-limits the presses.
             ctrl.press_escape(hold_seconds=0.05, block=False)
             return
+        if popup == "EVENT_COLLECT":
+            # ADR 196 D9: the button moves with the day; click where it was drawn.
+            button = analyzer.collect_crop()
+            if button is None:
+                logger.warning("EVENT_COLLECT: COLLECT read but its button not found "
+                               "— leaving the window to the ESC ceiling")
+                return
+            ctrl.click_crop(button, block=False, count=1, region_name="EVENT_COLLECT")
+            return
         click_target = _POPUP_CLICK_TARGETS.get(popup, popup)
         if popup == "INVITED":
             click_target = _invite_click_target(accept_invite, analyzer.crops)
@@ -1325,7 +1334,11 @@ def main():
         if popup == "REVEAL_ALL":
             def _reveal_all_second_click():
                 time.sleep(3.0)
-                if analyzer.game_state != GameState.GAME_LOBBY:
+                # ADR 196 D10: the first click was made in any popup-dismiss
+                # state, so the second may be too. On 2026-11-20 03:20 a crate
+                # opened at startup in GAME_UNKNOWN; the second click was
+                # suppressed and its reward summary stranded the session.
+                if analyzer.game_state not in POPUP_DISMISS_STATES:
                     logger.debug("REVEAL_ALL second click suppressed — state is %s", analyzer.game_state)
                     return
                 logger.info("\033[93m📋 REVEAL_ALL second click after 3s delay\033[0m")

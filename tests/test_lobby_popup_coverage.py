@@ -94,3 +94,80 @@ def test_the_creation_failed_crop_misses_the_one_line_dialog():
     top, bottom = _ok_button_rows(_DIALOGS["UNABLE_TO_JOIN"])
     (_, y1), (_, y2) = crops["CREATION_FAILED"]["coords"]
     assert (y1 + y2) / 2 * 1200 > bottom - 15
+
+
+def _collect_frame(shift_px=0):
+    """A 1920x1200 frame holding the 2026-11-20 02:44 button row (y 820-880,
+    x 400-1520), optionally with the COLLECT button moved right by shift_px."""
+    import cv2
+    import numpy as np
+    row = cv2.imread(str(Path(__file__).parent / "fixtures" / "event_collect_row.png"))
+    frame = np.zeros((1200, 1920, 3), dtype=np.uint8)
+    frame[820:880, 400:1520] = row
+    if shift_px:
+        button = frame[836:865, 1203:1333].copy()
+        frame[836:865, 1203:1333] = 0
+        frame[836:865, 1203 + shift_px:1333 + shift_px] = button
+    return frame
+
+
+def _collect_band():
+    from wingman.crop_region import load_crops
+    return load_crops(yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))["crops"])["EVENT_COLLECT"]
+
+
+def test_the_collect_click_lands_on_the_button_under_any_day():
+    """ADR 196 D9: Day 6's COLLECT at x 1203-1332; Day 7's is one tile right."""
+    from wingman.analyzer import locate_collect_button
+    for shift in (0, 154):
+        found = locate_collect_button(_collect_frame(shift), _collect_band())
+        assert found is not None
+        cx = (found.x1 + found.x2) / 2 * 1920
+        cy = (found.y1 + found.y2) / 2 * 1200
+        assert abs(cx - (1267.5 + shift)) <= 4 and 836 <= cy <= 864, (shift, cx, cy)
+
+
+def test_no_button_no_click():
+    import numpy as np
+    from wingman.analyzer import locate_collect_button
+    assert locate_collect_button(np.zeros((1200, 1920, 3), np.uint8), _collect_band()) is None
+
+
+def test_main_clicks_the_located_collect_button():
+    src = Path("wingman/main.py").read_text(encoding="utf-8")
+    branch = src[src.index('if popup == "EVENT_COLLECT":'):]
+    branch = branch[:branch.index("click_target = _POPUP_CLICK_TARGETS")]
+    assert "analyzer.collect_crop()" in branch
+    assert "analyzer.crops[" not in branch
+
+
+def test_the_second_reveal_click_runs_wherever_the_first_could():
+    """ADR 196 D10: 2026-11-20 03:20:31, 'REVEAL_ALL second click suppressed —
+    state is GAME_UNKNOWN', and the crate's reward summary stranded a session
+    that had just started."""
+    src = Path("wingman/main.py").read_text(encoding="utf-8")
+    body = src[src.index("def _reveal_all_second_click"):]
+    body = body[:body.index("threading.Thread(target=_reveal_all_second_click")]
+    assert "not in POPUP_DISMISS_STATES" in body
+    assert "!= GameState.GAME_LOBBY" not in body
+
+
+def test_a_collect_miss_saves_its_frame_once(tmp_path, monkeypatch):
+    """ADR 196 D9: 2026-11-20 06:33:33, COLLECT read with no button found and
+    no frame to say why. The miss frame is now kept, once per 10 minutes."""
+    import copy
+    import numpy as np
+    import wingman.analyzer as analyzer_module
+    from wingman import capture_budget
+    a = analyzer_module.GameStateAnalyzer(copy.deepcopy(yaml.safe_load(
+        CONFIG_PATH.read_text(encoding="utf-8"))))
+    try:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(capture_budget, "admit", lambda *a, **k: True)
+        frame = np.zeros((1200, 1920, 3), np.uint8)
+        a._save_collect_miss(frame)
+        a._save_collect_miss(frame)
+        saved = list((tmp_path / "test_screenshots" / "unknown_anomalies").glob("collect_miss_*.png"))
+        assert len(saved) == 1
+    finally:
+        a.cleanup()

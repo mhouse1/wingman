@@ -60,6 +60,10 @@ def resolve_profile(jet_section: "dict | None", glyph: "str | None",
     the battle tick (tick_handlers) and the pursuit (aimed abilities), so the two
     cannot disagree about the jet."""
     if jet_section:
+        # ADR 197: `trigger: none` on a jet keeps `q` unpressed on that jet, ahead
+        # of its glyph's row and of `unknown_trigger` (the KF-21).
+        if jet_section.get("trigger") == "none":
+            return None
         return dict(jet_section)
     return ability_profile(glyph, cfg)
 

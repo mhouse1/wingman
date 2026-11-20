@@ -126,7 +126,8 @@ _JET_PROFILE = Section(children={
     # operator, 2026-11-02). Absent: no special-weapon press on this jet.
     "special_weapon": Section(children={
         "ability": STR,
-        "trigger": Leaf(types=(str,), choices=SPECIAL_WEAPON_TRIGGERS),
+        # "none" (ADR 197): this jet never presses `q`, whatever its glyph.
+        "trigger": Leaf(types=(str,), choices=SPECIAL_WEAPON_TRIGGERS + ("none",)),
         "flares_at": _int(0),
         # low_fuel: the afterburner fuel percentage at or under which it fires.
         "fuel_at": _num(0, 100),

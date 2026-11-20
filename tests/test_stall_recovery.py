@@ -87,6 +87,11 @@ class TestStallGate:
         screen is identified by its title and the action is one ESC, the same
         ESC that already closed it once the ADR 093 ceiling passed.
 
+        STALL_PARTS_CRATE (Anomaly 005, ADR 196 D7) meets it too: the screen
+        is identified by its reward-card text, and the action is one click on
+        the crate's '?' that opens a reward already owned and commits nothing.
+        On 2026-11-19 05:14 a '+300 SILVER' crate stranded a lobby for 15 min.
+
         STALL_PARTS_SELECT (Anomaly 004) is not on this gate: it waits for
         the liveness guard's stall (TestPartsToSecondJet).
         """
@@ -94,7 +99,8 @@ class TestStallGate:
         analyzer._lobby_blackout_since = time.time() - (analyzer._stall_action_after_s + 1.0)
         targets = analyzer._stall_recovery_targets(GameState.GAME_LOBBY)
         assert set(targets) == {"STALL_PROFILE", "STALL_EXIT_TO_DESKTOP",
-                                "STALL_CHOOSE_REWARDS", "STALL_INVITE_PLAYERS"}, \
+                                "STALL_CHOOSE_REWARDS", "STALL_INVITE_PLAYERS",
+                                "STALL_PARTS_CRATE"}, \
             f"lobby blackout must open exactly these crops, got {targets}"
         for invasive in ("STALL_RETRY", "STALL_AIRCRAFT"):
             assert invasive not in targets, \
@@ -790,3 +796,129 @@ class TestLobbyEntryKeepsARecentClick:
         play = body.index('elif ready == "PLAY":')
         assert play < body.index("analyzer.claim_lobby_click()")
         assert "click_crop" not in body[play:body.index("elif ready and not", play)]
+
+
+class TestLobbyBlackoutThatIsABattle:
+    """2026-11-19 20:08:47: GAME_STARTING went back to GAME_LOBBY 3 s before the
+    match loaded, and the jet sat unflown under a 'lobby blackout' until the
+    ESC ceiling opened the scoreboard over the round at 20:11:02."""
+
+    @pytest.fixture
+    def lobby(self, analyzer, monkeypatch):
+        analyzer.state = "GAME_LOBBY"
+        analyzer._lobby_blackout_since = time.time() - 10.0
+        monkeypatch.setattr(analyzer, "_ocr_executor", _InlineExecutor(), raising=False)
+        fired = []
+        monkeypatch.setattr(analyzer, "_trigger", lambda t: fired.append(t))
+        analyzer._fired = fired
+        return analyzer
+
+    def _reads(self, monkeypatch, health, speed, altitude):
+        monkeypatch.setattr(analyzer_module, "_process_health_region",
+                            lambda crop: (health, 0.0))
+        monkeypatch.setattr(analyzer_module, "_process_telemetry_region",
+                            lambda crop: (speed, altitude, 0.0))
+
+    def _probe(self, a):
+        a._lobby_hud_last_ts = 0.0
+        a._schedule_lobby_hud_probe(np.zeros((1200, 1920, 3), dtype=np.uint8))
+
+    def test_two_hud_frames_hand_the_lobby_to_game_starting(self, lobby, monkeypatch):
+        self._reads(monkeypatch, 100, 650, 1200)
+        self._probe(lobby)
+        assert lobby._fired == []
+        self._probe(lobby)
+        assert lobby._fired == ["cancel_detected"]
+
+    def test_a_dialog_blackout_stays_in_the_lobby(self, lobby, monkeypatch):
+        """A lone health digit is the loading-screen '7' (ADR 189 D6)."""
+        self._reads(monkeypatch, 7, None, None)
+        for _ in range(5):
+            self._probe(lobby)
+        assert lobby._fired == []
+
+    def test_a_gap_restarts_the_count(self, lobby, monkeypatch):
+        self._reads(monkeypatch, 100, 650, 1200)
+        self._probe(lobby)
+        self._reads(monkeypatch, None, None, None)
+        self._probe(lobby)
+        self._reads(monkeypatch, 100, 650, 1200)
+        self._probe(lobby)
+        assert lobby._fired == []
+
+    def test_cancel_detected_takes_the_lobby_to_game_starting(self):
+        from wingman.state import FSM_TRANSITIONS as TRANSITIONS
+        assert any(t["trigger"] == "cancel_detected" and t["source"] == "GAME_LOBBY"
+                   and t["dest"] == "GAME_STARTING" for t in TRANSITIONS)
+
+    def test_analyze_frame_runs_the_probe_only_after_the_popup_pass(self):
+        assert analyzer_module.LOBBY_HUD_CHECK_AFTER_S >= 5.0
+        src = Path("wingman/analyzer.py").read_text(encoding="utf-8")
+        # analyze_frame reaches _detect_respawn_ocr on every GAME_LOBBY tick;
+        # its early return for the lobby states comes after the probe.
+        body = src[src.index("    def _detect_respawn_ocr(self, frame):"):]
+        body = body[:body.index("    def ", 10)]
+        probe = body.index("self._schedule_lobby_hud_probe(frame)")
+        assert probe < body.index("GameState.GAME_WAITING):")
+
+
+class TestRewardCrateInALobbyBlackout:
+    """ADR 196 D7: 2026-11-19 05:14, a '+300 SILVER' crate stranded GAME_LOBBY
+    for 15 min; ESC every 45 s did nothing, the 900 s limit ended the session."""
+
+    def test_a_lobby_blackout_scans_the_crate(self, analyzer):
+        analyzer._lobby_blackout_since = time.time() - (analyzer._stall_action_after_s + 1.0)
+        assert "STALL_PARTS_CRATE" in analyzer._stall_recovery_targets(GameState.GAME_LOBBY)
+
+    def test_a_fresh_blackout_does_not(self, analyzer):
+        analyzer._lobby_blackout_since = time.time()
+        assert "STALL_PARTS_CRATE" not in analyzer._stall_recovery_targets(GameState.GAME_LOBBY)
+
+    def test_the_label_reads_silver_crates(self):
+        assert "SILVER" in load_config()["crops"]["STALL_PARTS_CRATE"]["text"]
+
+    def test_the_silver_label_sits_in_the_crate_label_crop(self):
+        """The fixture is rows 380-420, x 160-520 of the 05:14:59 frame; the
+        card's text must fall inside the crop's rows and columns."""
+        import cv2
+        strip = cv2.imread(str(Path(__file__).parent / "fixtures"
+                               / "parts_crate_silver_label.png"))
+        ys, xs = np.nonzero(strip.min(axis=2) > 200)      # the white letters
+        (x1, y1), (x2, y2) = load_config()["crops"]["STALL_PARTS_CRATE"]["coords"]
+        assert y1 * 1200 <= 380 + ys.min() and 380 + ys.max() <= y2 * 1200
+        assert x1 * 1920 <= 160 + xs.min() and 160 + xs.max() <= x2 * 1920
+
+
+class TestJoinRefusedHoldsReady:
+    """ADR 196 D8: each READY into a squad that is already queueing raised
+    "Unable to join" again (2026-11-19 22:00, three in 17 s)."""
+
+    def test_the_refusal_window_and_the_hold(self, analyzer):
+        assert analyzer.join_refused_recently() is False
+        analyzer._join_refused_ts = time.time() - 5.0
+        assert analyzer.join_refused_recently() is True
+        analyzer._join_refused_ts = time.time() - (analyzer_module.JOIN_REFUSED_WAITING_S + 1)
+        assert analyzer.join_refused_recently() is False
+        assert analyzer.join_refused_recently(analyzer_module.JOIN_REFUSED_HOLD_S) is True
+
+    def test_the_hold_sits_before_the_click_and_covers_play(self):
+        """2026-11-20 02:30: the solo PLAY was refused too, and re-clicked
+        every few seconds."""
+        src = Path("wingman/analyzer.py").read_text(encoding="utf-8")
+        hold = src.index("elif self.join_refused_recently(JOIN_REFUSED_HOLD_S):")
+        branch = src[hold:src.index("\n                        elif ", hold + 10)]
+        assert "handled = True" in branch
+        assert "emit(GameEvent.LOBBY_PLAY_CLICK" not in branch
+        assert hold < src.index("self.emit(GameEvent.LOBBY_PLAY_CLICK, crop, frame)")
+        assert src.index("if crop == \"UNABLE_TO_JOIN\":") > 0
+
+    def test_a_click_clears_the_refusal_it_follows(self, analyzer):
+        """2026-11-20 02:30:16: a PLAY was bounced 0.5 s after it was
+        clicked, on the refusal of the click before."""
+        analyzer._join_refused_ts = time.time() - 4.0
+        analyzer._last_lobby_play_click_ts = 0.0
+        assert analyzer.claim_lobby_click() is True
+        assert analyzer.join_refused_recently() is False
+        src = Path("wingman/analyzer.py").read_text(encoding="utf-8")
+        click = src.index("self.emit(GameEvent.LOBBY_PLAY_CLICK, crop, frame)")
+        assert "self._join_refused_ts = 0.0" in src[click - 200:click]

@@ -16,8 +16,10 @@ from wingman.tick_handlers import WaitingFallbackHandler
 
 
 class _AnalyzerStub:
-    def __init__(self, *, cancel=False, play_crop=None, diff=None, leave_pending=False):
+    def __init__(self, *, cancel=False, play_crop=None, diff=None, leave_pending=False,
+                 join_refused=False):
         self.crops = {"CANCEL": object(), "PLAY": object(), "READY": object()}
+        self._join_refused = join_refused
         self._cancel = cancel
         self._play_crop = play_crop
         self._diff = diff
@@ -26,6 +28,9 @@ class _AnalyzerStub:
 
     def squad_leave_pending(self):
         return self._leave_pending
+
+    def join_refused_recently(self):
+        return self._join_refused
 
     def scan_region_for_cancel(self, _frame):
         return self._cancel
@@ -3537,3 +3542,23 @@ def test_the_special_weapon_presses_through_a_cancelled_mission(monkeypatch):
     c.activate_special_weapon()
     assert seen.get("ignore_cancel") is True
     assert seen.get("key") == "q"
+
+
+class TestJoinRefused:
+    """ADR 196 D8: 2026-11-19 22:00:47, QUEUE_FALLBACK took the dimmed lobby
+    behind "Unable to join" for matchmaking, and GAME_STARTING sat 150 s."""
+
+    def test_a_refusal_sends_waiting_back_to_the_lobby(self):
+        analyzer = _AnalyzerStub(join_refused=True)
+        handler = _handler(analyzer)
+        handler.on_state_change(GameState.GAME_WAITING)
+        assert handler.tick(object(), GameState.GAME_WAITING) is True
+        assert analyzer.triggers == ["waiting_timeout"]
+        assert "cancel_detected" not in analyzer.triggers
+
+    def test_no_refusal_leaves_waiting_alone(self):
+        analyzer = _AnalyzerStub(join_refused=False)
+        handler = _handler(analyzer)
+        handler.on_state_change(GameState.GAME_WAITING)
+        handler.tick(object(), GameState.GAME_WAITING)
+        assert "waiting_timeout" not in analyzer.triggers

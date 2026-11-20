@@ -39,6 +39,10 @@ STALL_CASES = [
     ("STALL_PARTS_SELECT",    "STALL_PARTS_SELECT.png",    "RECEIVEPARTS"),
     # Anomaly 005: reward-crate screen at session start, same parts flow.
     ("STALL_PARTS_CRATE",     "STALL_PARTS_CRATE.png",     "PARTS"),
+    # ADR 196 D7: the same crate with a "+300 SILVER" card (2026-11-19 05:14).
+    ("STALL_PARTS_CRATE",     "STALL_PARTS_CRATE_SILVER.png", "SILVER"),
+    # ADR 196 D9: the daily-reward window's COLLECT row (2026-11-20 02:44).
+    ("EVENT_COLLECT",         "EVENT_COLLECT.png",         "COLLECT"),
     # Anomaly 006: the CHOOSE REWARDS overlay. The reference frame is a
     # half-resolution capture (2026-10-02) scaled back up to 1920x1200.
     ("STALL_CHOOSE_REWARDS",  "STALL_CHOOSE_REWARDS.png",  "CHOOSEREWARDS"),

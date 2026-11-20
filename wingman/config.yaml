@@ -90,6 +90,11 @@ jet_profile:
     kf21:
       match: KF-21
       auxiliary_feature: {trigger: low_missiles, missiles_at: 3, on_incoming: true}
+      # Operator, 2026-11-19 (`v` screenshot 19:58:45): the KF-21's `q` ability (a
+      # jet with four arrows) "should not press 'q'". Its glyph matches no row, so
+      # unknown_trigger (ADR 190) pressed it on every recharge; trigger none wins
+      # over that (ADR 196 D7).
+      special_weapon: {ability: kf21_q, trigger: none}
 
 unattended_mode: true
 # Party invites: false clicks REJECT, true clicks ACCEPT then readies up.
@@ -255,6 +260,15 @@ crops:
   # CREATION_FAILED with a one-line message, so OK sits 30 px higher (button
   # rows 565-631 against 595-660) and that crop never read it: the lobby sat
   # blacked out (screenshot_20261119_191726, ADR 196 D5).
+  # ADR 196 D9 (2026-11-20 02:44): the 3RD YEAR ANNIVERSARY daily-reward
+  # window, with an orange COLLECT under the day that is due. The crop is the
+  # whole button row, so it reads COLLECT under any day; the click goes to
+  # the orange button found in it (analyzer.locate_collect_button).
+  EVENT_COLLECT:
+    coords:
+    - [0.2188, 0.6917]
+    - [0.7813, 0.725]
+    text: [COLLECT]
   UNABLE_TO_JOIN:
     coords:
     - [0.4826, 0.484]
@@ -436,11 +450,13 @@ crops:
   # Detection text measured from the "+100 UNIVERSAL PARTS" banner;
   # STALL_PARTS_CRATE_DISMISS is the '?' mark itself (both pixel-color-
   # thresholded from the archived reference frame).
+  # SILVER (ADR 196 D7): the same crate with a "+300 SILVER" card in the same
+  # place stranded GAME_LOBBY for 15 min on 2026-11-19 05:14.
   STALL_PARTS_CRATE:
     coords:
     - [0.0901, 0.325]
     - [0.2641, 0.3425]
-    text: [PARTS, UNIVERSAL]
+    text: [PARTS, UNIVERSAL, SILVER]
   STALL_PARTS_CRATE_DISMISS:
     coords:
     - [0.6365, 0.5608]
