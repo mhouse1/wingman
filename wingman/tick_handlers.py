@@ -1085,8 +1085,20 @@ class AmmoEventsHandler:
             self._last_incoming_alert_ts = incoming_ts
             return False
 
-        logger.info("\033[95m🚀 INCOMING MISSILE DETECTED - Deploying flares\033[0m")
         self._last_incoming_alert_ts = incoming_ts
+        if self._flares_held_by_special():
+            # ADR 198: the special is lit, so no flares. The roll, the evade and
+            # the jet's own presses still answer the alert.
+            logger.info("\033[95m🚀 INCOMING MISSILE DETECTED - flares held: "
+                        "the special weapon is lit (ADR 198)\033[0m")
+            flares_done = threading.Event()
+            flares_done.set()
+            self._flare_roll(flares_done)
+            self._pursuit_evade(time.time())
+            self.tick_special_weapon(incoming_edge=True)
+            self.tick_auxiliary_feature(incoming_edge=True)
+            return True
+        logger.info("\033[95m🚀 INCOMING MISSILE DETECTED - Deploying flares\033[0m")
         if self._perf is not None:
             now = time.time()
             try:
@@ -1139,6 +1151,18 @@ class AmmoEventsHandler:
         # incoming missile of a life, if the missile count has not already sent it.
         self.tick_auxiliary_feature(incoming_edge=True)
         return True
+
+    def _flares_held_by_special(self) -> bool:
+        """ADR 198: on a jet with `flares_only_when_special_grey` (the KF-21), the
+        flares wait while the special weapon's icon reads READY. Greyed out, or no
+        fresh read of the icon, and the flares go out as on any jet."""
+        try:
+            if not self._ctrl.flares_wait_for_special_grey():
+                return False
+        except Exception as exc:
+            log_suppressed(logger, "flares_wait_for_special_grey", exc)
+            return False
+        return self._special_weapon_ready() is True
 
     def _flare_roll(self, flares_done: threading.Event) -> None:
         """FR-011 / ADR 164: roll right through the burst and a little past it, on

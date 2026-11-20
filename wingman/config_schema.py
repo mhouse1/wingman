@@ -143,6 +143,10 @@ _JET_PROFILE = Section(children={
         "missiles_at": _int(0),
         "on_incoming": BOOL,
     }, required=frozenset({"trigger", "missiles_at"})),
+    # ADR 198 (operator, 2026-11-20, the KF-21): flares go out on an incoming
+    # alert only while the special weapon's icon is greyed out (not READY).
+    # Absent or false: flares on every alert, as before.
+    "flares_only_when_special_grey": BOOL,
     # Design 021 hit counter rev 7: the largest rise of the damage text that
     # is the gun's on this jet. Absent: gun_damage.GUN_STEP_MAX.
     "gun_step_max": _num(1),

@@ -95,6 +95,9 @@ jet_profile:
       # unknown_trigger (ADR 190) pressed it on every recharge; trigger none wins
       # over that (ADR 196 D7).
       special_weapon: {ability: kf21_q, trigger: none}
+      # Operator, 2026-11-20: "flares only deploy when the kf21 special is greyed
+      # out". While its icon reads READY an incoming alert drops no flares (ADR 198).
+      flares_only_when_special_grey: true
 
 unattended_mode: true
 # Party invites: false clicks REJECT, true clicks ACCEPT then readies up.

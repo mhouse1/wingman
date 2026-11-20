@@ -3697,6 +3697,13 @@ class Controller:
         section = profile.get("auxiliary_feature")
         return dict(section) if section else None
 
+    def flares_wait_for_special_grey(self) -> bool:
+        """ADR 198: True when the jet on record drops flares only while its special
+        weapon's icon is greyed out (the KF-21); False for any other jet, or a
+        round whose jet was not read."""
+        profile = profile_for_jet(self._jet_on_record(), self._jet_profiles) or {}
+        return bool(profile.get("flares_only_when_special_grey"))
+
     def press_escape(self, hold_seconds: float = 0.05, block: bool = False):
         """Press Escape once, used by safety-recovery handlers."""
         self._execute_key_press(

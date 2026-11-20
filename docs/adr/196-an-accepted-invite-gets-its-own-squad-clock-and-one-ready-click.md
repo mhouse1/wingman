@@ -283,8 +283,10 @@ and was suppressed in 8 sessions. Six of the 8 reached the next state in
       the lobby scan in the last 10 s, not clicking it again` at 19:24:26.043,
       then GAME_WAITING. 20:01 (session started 19:52), the other order: main's
       `INVITED accepted — clicking READY` at 20:01:11.916, no quick-scan
-      click, GAME_WAITING at 20:01:17. Two accepts, one in each order; more
-      needed before calling the rate.
+      click, GAME_WAITING at 20:01:17. 2026-11-20 07:13 (operator session
+      started 06:33): main's READY at 07:13:16, `READY crop reads UNREADY` at
+      07:13:21, GAME_WAITING, no second click. Three accepts, three single
+      clicks; more needed before calling the rate.
 - [ ] D4: a squad whose leader is slow stays past 160 s in GAME_WAITING, and
       is left only after `no battle for 15 min`.
 - [x] D6: a GAME_LOBBY blackout over a live round logs `Lobby blackout … is
