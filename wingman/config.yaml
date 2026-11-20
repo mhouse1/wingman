@@ -250,6 +250,16 @@ crops:
     - [0.4826, 0.5089]
     - [0.5167, 0.5378]
     text: [OK]
+  # 2026-11-19 19:16: "Matchmaking in progress. Unable to join." after accepting
+  # an invite into a squad that was already queueing. Same dialog as
+  # CREATION_FAILED with a one-line message, so OK sits 30 px higher (button
+  # rows 565-631 against 595-660) and that crop never read it: the lobby sat
+  # blacked out (screenshot_20261119_191726, ADR 196 D5).
+  UNABLE_TO_JOIN:
+    coords:
+    - [0.4826, 0.484]
+    - [0.5167, 0.5129]
+    text: [OK]
   INSPECT:
     coords:
     - [0.0285, 0.0289]

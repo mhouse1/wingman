@@ -1351,6 +1351,16 @@ def main():
                 if ready and ctrl.finish_round_requested():
                     logger.info("🏁 FINISH ROUND: INVITED accepted but exit is "
                                 "pending — not clicking %s", ready)
+                elif ready == "PLAY":
+                    # The frame still shows the solo lobby (2026-11-19 18:33:41,
+                    # 1.5 s after ACCEPT); PLAY there could queue alone. The
+                    # quick-scan clicks READY once the squad lobby is drawn.
+                    logger.info("📋 INVITED accepted — PLAY still on screen, leaving "
+                                "READY to the lobby scan")
+                elif ready and not analyzer.claim_lobby_click():
+                    # A second click would toggle the first one off.
+                    logger.info("📋 INVITED accepted — %s already clicked by the lobby "
+                                "scan in the last 10 s, not clicking it again", ready)
                 elif ready:
                     logger.info("\033[92m📋 INVITED accepted — clicking %s\033[0m", ready)
                     ctrl.click_crop(analyzer.crops[ready], block=False, count=1, region_name=ready)

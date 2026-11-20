@@ -960,7 +960,7 @@ _STATE_CROPS: "dict[GameState, set[str]]" = {
     },
     GameState.GAME_LOBBY: {
         "PLAY", "READY", "UNREADY", "CANCEL",
-        "CREATION_FAILED", "INSPECT", "INVITED",
+        "CREATION_FAILED", "UNABLE_TO_JOIN", "INSPECT", "INVITED",
         "REVEAL_ALL", "TAP_HERE_TO_CONTINUE", "UNLOCK_CLOSE", "FINAL_CONTINUE", "SILVER",
         "PARTY_ENDED",
     },
@@ -1866,6 +1866,22 @@ class GameStateAnalyzer:
         """
         self._last_lobby_play_click_ts = time.time()
 
+    def claim_lobby_click(self) -> bool:
+        """Take the next PLAY/READY click, unless one was made in the last 10 s.
+
+        PLAY/READY toggles, so two clicks a second or two apart undo each
+        other. After an accepted invite, main's READY click and the lobby
+        quick-scan's both fired in 7 of 13 accepts from 2026-11-11 to
+        2026-11-19 (one to three seconds apart, in either order), and 6 of
+        the 7 sat un-readied until the GAME_WAITING missed-click re-click
+        about 13 s later. A True return stamps the quick-scan's cooldown, so
+        the quick-scan does not click on top of the caller.
+        """
+        if time.time() - self._last_lobby_play_click_ts < LOBBY_PLAY_RETRY_S:
+            return False
+        self._last_lobby_play_click_ts = time.time()
+        return True
+
     def note_battle_event(self) -> None:
         """A mission started, so the aircraft is in battle now.
 
@@ -2339,7 +2355,11 @@ class GameStateAnalyzer:
     # ------------------------------------------------------------------
 
     def on_enter_GAME_LOBBY(self):
-        self._last_lobby_play_click_ts = 0.0
+        # A click from the last 10 s still owns the button: on 2026-11-19 18:33
+        # GAME_UNKNOWN → GAME_LOBBY, 0.8 s after the invite's click, wiped its
+        # stamp and the quick-scan clicked again 1.6 s later (ADR 196 D3).
+        if time.time() - self._last_lobby_play_click_ts >= LOBBY_PLAY_RETRY_S:
+            self._last_lobby_play_click_ts = 0.0
         # The next matchmaking reads its own mode and map.
         self.match_mode = self.match_map = None
         self._match_map_reads = 0
@@ -4077,7 +4097,12 @@ class GameStateAnalyzer:
             targets.insert(0, STALL_PARTS_CROP)
         # Independent gate: a stuck UNREADY blocks classification outright, so it
         # is timed from the UNREADY read itself rather than from the state.
+        # Only in the unclassified states that reason is about: on 2026-11-19
+        # 18:36 it left a 3-min-old squad from GAME_WAITING while the leader's
+        # queue cycled every 25 s. A classified squad lobby waits for the
+        # squad_no_battle_s gate below (ADR 196 D4).
         if (self._unready_since
+                and state in STALL_ACTION_STATES
                 and now - self._unready_since >= self._stall_unready_dwell_s
                 and STALL_UNREADY_CROP in self.crops):
             targets.append(STALL_UNREADY_CROP)
@@ -4126,6 +4151,10 @@ class GameStateAnalyzer:
         squad wingman refused READY ("no battle for 64 min") and tried to
         leave it. The UNREADY dwell belonged to the old squad too.
         """
+        if self._squad_lobby_since:
+            logger.info("INVITED accepted — squad clock restarted (the previous squad "
+                        "had gone %.0f min without a battle)",
+                        (time.time() - self._squad_lobby_since) / 60.0)
         self._squad_lobby_since = 0.0
         self._unready_since = 0.0
 
@@ -4180,7 +4209,8 @@ class GameStateAnalyzer:
         # stranded the lobby for 40 minutes on 2026-08-22 08:40 while the crop
         # that dismisses it sat unused. test_lobby_popup_coverage guards the
         # two lists against drifting apart again.
-        popup_crop_names = ["INVITED", "CREATION_FAILED", "REVEAL_ALL", "SILVER",
+        popup_crop_names = ["INVITED", "CREATION_FAILED", "UNABLE_TO_JOIN",
+                            "REVEAL_ALL", "SILVER",
                             "UNLOCK_CLOSE", "INSPECT", "event_refresh",
                             "NEW_FLIGHT_PASS", "TAP_HERE_TO_CONTINUE",
                             "FINAL_CONTINUE", "PARTY_ENDED"]

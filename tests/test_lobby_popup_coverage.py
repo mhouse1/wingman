@@ -54,3 +54,43 @@ def test_scanned_popups_are_all_calibrated():
     cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
     uncalibrated = _scanned_popups() - set(cfg["crops"])
     assert not uncalibrated, f"scanned but not calibrated: {sorted(uncalibrated)}"
+
+
+# The one-line and two-line versions of the same OK dialog. Strips are
+# x 780-1140 of 1920x1200 frames: 2026-11-19 19:17 "Matchmaking in progress.
+# Unable to join." and the CREATION_FAILED calibration frame.
+_DIALOGS = {
+    "UNABLE_TO_JOIN": "unable_to_join_dialog_strip.png",
+    "CREATION_FAILED": "creation_failed_dialog_strip.png",
+}
+
+
+def _ok_button_rows(strip_name):
+    """The rows where the white OK button spans the strip's middle."""
+    import cv2
+    import numpy as np
+    strip = cv2.imread(str(Path(__file__).parent / "fixtures" / strip_name))
+    middle = strip[:, 160:200].mean(axis=(1, 2))   # x 940-980: inside the button
+    rows = np.flatnonzero(middle > 200)
+    rows = rows[(rows > 400) & (rows < 800)]
+    return rows.min(), rows.max()
+
+
+def test_each_ok_crop_sits_on_its_own_dialogs_button():
+    """2026-11-19 19:16: the one-line dialog's OK sat above CREATION_FAILED's
+    crop, so nothing read it and the lobby stayed blacked out."""
+    crops = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))["crops"]
+    for name, strip in _DIALOGS.items():
+        top, bottom = _ok_button_rows(strip)
+        (_, y1), (_, y2) = crops[name]["coords"]
+        centre = (y1 + y2) / 2 * 1200
+        assert top + 15 <= centre <= bottom - 15, (name, top, bottom, centre)
+        assert crops[name]["text"] == ["OK"]
+
+
+def test_the_creation_failed_crop_misses_the_one_line_dialog():
+    """Why UNABLE_TO_JOIN exists: the older crop's centre is below the button."""
+    crops = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))["crops"]
+    top, bottom = _ok_button_rows(_DIALOGS["UNABLE_TO_JOIN"])
+    (_, y1), (_, y2) = crops["CREATION_FAILED"]["coords"]
+    assert (y1 + y2) / 2 * 1200 > bottom - 15
