@@ -21,7 +21,8 @@ from .full_map import FullMapReader
 from .crop_region import CropCoords, get_crop, load_crops, draw_crops
 from .gun_heat import GunHeatReader
 from .special_weapon import SpecialWeaponReader
-from .weapon_name import SelectedWeapon, WeaponNameReader
+from .panel_read_watch import PanelReadWatch
+from .weapon_name import SelectedWeapon, WeaponNameReader, classify
 from .telemetry import TelemetryProcessor, pitch_band_from_angle_deg
 # CR-018-15: the FSM vocabulary lives in the leaf module .state, so code that
 # needs only these names does not import EasyOCR through this module. Every
@@ -64,6 +65,17 @@ LOBBY_RECHECK_STATES = (GameState.GAME_STARTING,)
 # (2026-10-18 08:09:13, 09:42:39, 12:55:09). A real failed start keeps the
 # button up until it is clicked, so the longer streak costs it ~3 s.
 STARTING_PLAY_CONFIRM_READS = 6
+# ADR 195: a battle state with no plausible speed or altitude for this long, and
+# PLAY on STARTING_PLAY_CONFIRM_READS reads in a row, is the lobby. A real battle
+# reads its telemetry every tick, so a PLAY misread there cannot reset the FSM
+# (the ADR 102 concern this check is built around).
+BATTLE_LOBBY_NO_TELEMETRY_S = 10.0
+# ADR 195 backstop: all three weapon-panel crops silent (FR-012) within this
+# window, with no plausible telemetry for BATTLE_HUD_LOST_NO_TELEMETRY_S, means
+# the battle HUD is gone; GAME_UNKNOWN works out where the game is.
+BATTLE_HUD_LOST_PANEL_WINDOW_S = 30.0
+BATTLE_HUD_LOST_NO_TELEMETRY_S = 60.0
+_PANEL_LABELS = ("WEAPON_NAME", "AMMO_FLARES", "AMMO_MISSILE")
 # ADR 102 rev 2: the lowest health a GAME_STARTING probe may launch a mission
 # on. The probe reads the HEALTH crop before the match has drawn a HUD, so on
 # the lobby and on loading screens it reads digit fragments off other UI (0, 3,
@@ -73,6 +85,61 @@ STARTING_PLAY_CONFIRM_READS = 6
 # 1,724 confirmations in the September logs (archive duplicates included),
 # 1,718 read 160 to 312 and the other 6 read 7.
 STARTING_MIN_CONFIRMED_HEALTH = 20
+# ADR 189: the speed a GAME_STARTING probe may count as HUD evidence. Speed and
+# altitude are drawn with health, in the same frame, on the first battle tick
+# (2026-11-17 21:52:50: health 175, speed 738, altitude 940). The bounds only
+# reject a digit fragment off a lobby or loading screen; a spawn flies hundreds
+# of kph.
+STARTING_SPEED_KPH_RANGE = (100, 4000)
+# ADR 189: the altitude a probe may count. The HUD shows the mesh height, which
+# is negative over low water (Design 020); the token parser already drops bare
+# one- and two-digit fragments.
+STARTING_ALTITUDE_M_RANGE = (-500, 15000)
+# ADR 189: probes in a row that must read both speed and altitude, when health
+# reads nothing, before the HUD counts as up. Health washes out against sky
+# (ADR 080); the green telemetry rows are the HUD's other evidence.
+STARTING_TELEMETRY_ONLY_PROBES = 2
+
+
+# ADR 196 D6: a GAME_LOBBY blackout this old has its HUD crops read every
+# LOBBY_HUD_INTERVAL_S; LOBBY_HUD_FRAMES reads in a row with battle-HUD evidence
+# hand the FSM to GAME_STARTING. A known popup is dismissed within one popup
+# pass (about 5 s), so the probe only runs once that has had its chance.
+# ADR 196 D8: after "Matchmaking in progress. Unable to join." GAME_WAITING
+# goes back to the lobby for this long, and the lobby holds PLAY and READY for
+# JOIN_REFUSED_HOLD_S. On 2026-11-20 02:30 the solo PLAY was refused for at
+# least 33 s and accepted by 44 s; a click clears the refusal it follows.
+JOIN_REFUSED_WAITING_S = 15.0
+JOIN_REFUSED_HOLD_S = 30.0
+
+LOBBY_HUD_CHECK_AFTER_S = 5.0
+LOBBY_HUD_INTERVAL_S = 1.0
+LOBBY_HUD_FRAMES = 2
+
+
+def starting_telemetry_plausible(speed: "int | None", altitude: "int | None") -> "tuple[bool, bool]":
+    """(speed counts, altitude counts) as GAME_STARTING HUD evidence (ADR 189)."""
+    speed_ok = (speed is not None
+                and STARTING_SPEED_KPH_RANGE[0] <= speed <= STARTING_SPEED_KPH_RANGE[1])
+    alt_ok = (altitude is not None
+              and STARTING_ALTITUDE_M_RANGE[0] <= altitude <= STARTING_ALTITUDE_M_RANGE[1])
+    return speed_ok, alt_ok
+
+
+def battle_hud_evidence(health: "int | None", speed: "int | None",
+                        altitude: "int | None") -> "str | None":
+    """What in ONE frame shows the battle HUD, or None (ADR 189).
+
+    Health at the spawn floor plus a speed or an altitude, or speed and altitude
+    together. A lone health read never counts: the intro and loading screens put a
+    '7' in the HEALTH crop for minutes on end (2026-11-18 10:02-10:05, 201 probes).
+    """
+    speed_ok, alt_ok = starting_telemetry_plausible(speed, altitude)
+    if health is not None and health >= STARTING_MIN_CONFIRMED_HEALTH and (speed_ok or alt_ok):
+        return "health+telemetry"
+    if speed_ok and alt_ok:
+        return "telemetry"
+    return None
 # If PLAY/READY remains visible after a click, retry instead of leaving the
 # lobby stalled indefinitely. A successful click leaves GAME_LOBBY promptly.
 LOBBY_PLAY_RETRY_S = 10.0
@@ -400,6 +467,31 @@ def _process_incoming_region(
     return result
 
 
+# ADR 201: the fallback text that names an incoming missile. The incoming crop's
+# tokens also take LOCK WARNING (`ARNING`, ADR 184 D0), which holds the flare roll
+# but drops no flares (operator, 2026-11-20: "flares should not deploy on lock
+# warning, it should only deploy on INCOMING detected").
+INCOMING_TEXT_TOKENS = ("MING",)
+
+
+def is_lock_warning_only(detection_source: "str | None", text: "str | None") -> bool:
+    """True when this detection is LOCK WARNING and not INCOMING (ADR 201): an OCR
+    fallback read without an incoming token. A template hit is INCOMING's own."""
+    if detection_source != "ocr_fallback":
+        return False
+    normalized = (text or "").upper()
+    return not any(token in normalized for token in INCOMING_TEXT_TOKENS)
+
+
+def incoming_debounced(now: float, last_positive_ts: float, window_s: float,
+                       last_was_lock_warning: bool, lock_warning: bool) -> bool:
+    """Whether a detection inside the debounce window is suppressed. INCOMING
+    right after a LOCK WARNING is not (ADR 201): it is the one that drops flares."""
+    if now - last_positive_ts >= window_s:
+        return False
+    return not (last_was_lock_warning and not lock_warning)
+
+
 def _process_text_region(frame, text_tokens: "list[str]"):
     """Generic OCR worker: detect any of the given text tokens in a crop region.
 
@@ -464,7 +556,10 @@ def _hsv_green_digit_mask(frame_bgr):
 def _process_weapon_name_region(frame) -> str:
     """The selected weapon's name on the weapon panel (ADR 180 D1), read at twice
     the size: at 1x "AIM-9M Sidewinder" read as "AIM-9M Sidewindel" (2026-11-15).
-    Empty when nothing is read."""
+    Empty when nothing is read.
+
+    @relation(FR-012, scope=function)
+    """
     reader = _get_thread_ocr_reader()
     if reader is None or frame is None or frame.size == 0:
         return ""
@@ -486,6 +581,8 @@ def _process_health_region(health_frame, label: str = "health") -> "tuple[int | 
     Returns:
         tuple: (health_value: int or None, ocr_time: float)
                health_value is None when no digits are found.
+
+    @relation(FR-012, scope=function)
     """
     reader = _get_thread_ocr_reader()
     if reader is None:
@@ -766,6 +863,61 @@ def _crop_for_ocr(frame, crop_coords):
     return np.ascontiguousarray(get_crop(frame, *crop_coords))
 
 
+def locate_red_x(frame, crop: CropCoords, search_y) -> "CropCoords | None":
+    """The red X crop moved to where the X is drawn in the PARTY panel.
+
+    The X sits in the grey bar under INVITE TO PARTY, and that bar moves: each
+    party member pushes it one row down, and on 2026-11-19 an event banner
+    above the panel pushed it 66 px down (y 375 against the crop's 300), so
+    the fixed crop never read it and the 10:16 squad leave never happened.
+
+    Searches the crop's own column between `search_y` (top, bottom fractions)
+    for the X's saturated red, takes the tallest run of red rows, and returns
+    the crop, same size, centred on it. OCR of the lone X is size-sensitive
+    (config.yaml), so the crop keeps its calibrated size. None when no red is
+    in the column; the caller still OCRs the result, so stray red in the
+    column cannot be clicked on colour alone.
+    """
+    h = frame.shape[0]
+    top = max(0, int(h * search_y[0]))
+    col = get_crop(frame, crop.x1, search_y[0], crop.x2, search_y[1]).astype(np.int16)
+    b, g, r = col[..., 0], col[..., 1], col[..., 2]
+    red = (r > 150) & (r - g > 80) & (r - b > 80)
+    rows = np.flatnonzero(red.sum(axis=1) >= 2)
+    if rows.size == 0:
+        return None
+    # Tallest run of consecutive red rows (gaps of one row allowed).
+    runs, start = [], rows[0]
+    for prev, cur in zip(rows, rows[1:], strict=False):
+        if cur - prev > 2:
+            runs.append((start, prev))
+            start = cur
+    runs.append((start, rows[-1]))
+    lo, hi = max(runs, key=lambda run: run[1] - run[0])
+    centre = (top + (lo + hi) / 2.0) / h
+    half = (crop.y2 - crop.y1) / 2.0
+    return crop._replace(y1=centre - half, y2=centre + half)
+
+
+def locate_collect_button(frame, band: CropCoords) -> "CropCoords | None":
+    """The COLLECT button inside the event window's button row (ADR 196 D9).
+
+    The daily reward window draws one orange COLLECT button under whichever
+    day is due (Day 6 at x 1203-1332 on 2026-11-20 02:44; Day 7 is the next
+    tile), so the band's own centre is not the button. Returns a crop on the
+    orange pixels in the band, or None when there are none.
+    """
+    h, w = frame.shape[:2]
+    reg = get_crop(frame, *band[:4]).astype(np.int16)
+    b, g, r = reg[..., 0], reg[..., 1], reg[..., 2]
+    ys, xs = np.nonzero((r > 200) & (g > 140) & (b < 90))
+    if xs.size < 50:
+        return None
+    x0, y0 = int(w * band.x1), int(h * band.y1)
+    return band._replace(x1=(x0 + xs.min()) / w, y1=(y0 + ys.min()) / h,
+                         x2=(x0 + xs.max() + 1) / w, y2=(y0 + ys.max() + 1) / h)
+
+
 def _process_crop_region(frame, crop_coords, text_tokens):
     """Extract crop and run text detection entirely inside a worker thread.
 
@@ -868,7 +1020,7 @@ _STATE_CROPS: "dict[GameState, set[str]]" = {
     },
     GameState.GAME_LOBBY: {
         "PLAY", "READY", "UNREADY", "CANCEL",
-        "CREATION_FAILED", "INSPECT", "INVITED",
+        "CREATION_FAILED", "UNABLE_TO_JOIN", "EVENT_COLLECT", "INSPECT", "INVITED",
         "REVEAL_ALL", "TAP_HERE_TO_CONTINUE", "UNLOCK_CLOSE", "FINAL_CONTINUE", "SILVER",
         "PARTY_ENDED",
     },
@@ -1100,6 +1252,10 @@ class GameStateAnalyzer:
             float(w_cfg.get("stale_after_s", schema_default("weapon.stale_after_s"))))
             if w_cfg.get("enabled", schema_default("weapon.enabled")) else None)
         self._weapon_name_future = None
+        self._weapon_classes = w_cfg.get("classes") or {}
+        # FR-012: a warning when the weapon panel's crops stop reading.
+        self._panel_watch = PanelReadWatch(float(w_cfg.get(
+            "panel_silent_warn_s", schema_default("weapon.panel_silent_warn_s"))))
         # ADR 173 D2b: the gun heat bar, for the gun cool-down ability.
         self._gun_heat = GunHeatReader(
             None if sw_cfg.get("enabled") is False else self.crops.get("GUN_HEAT"),
@@ -1256,7 +1412,10 @@ class GameStateAnalyzer:
             # `timestamp` and the tick handler's clock.
             'frame_ts': 0.0,
             'detect_done_ts': 0.0,
+            # ADR 201: the cached detection is LOCK WARNING, not INCOMING.
+            'lock_warning': False,
         }
+        self._incoming_last_positive_lock = False
         self._incoming_cache_lock = threading.Lock()
         incoming_cfg = config.get("incoming_detection", {})
         self._incoming_template_matching_enabled = bool(incoming_cfg.get("incoming_template_matching_enabled", True))
@@ -1288,6 +1447,9 @@ class GameStateAnalyzer:
             template_scales,
         )
         self._incoming_last_positive_ts = 0.0
+        # Operator, 2026-11-16: the flare roll holds until the warning has been
+        # gone 2 s, so it needs the last pass that saw it, debounce or not.
+        self._incoming_last_seen_ts = 0.0
         self._incoming_near_threshold_pending = False
         self._incoming_near_threshold_pending_ts = 0.0
 
@@ -1334,6 +1496,13 @@ class GameStateAnalyzer:
             "squad_no_battle_s", schema_default("stall_recovery.squad_no_battle_s")))
         self._squad_lobby_since = 0.0      # squad lobby first seen, no battle since
         self._squad_hold_log_ts = 0.0      # throttles the "not readying up" line
+        self._red_x_search_y = tuple(_stall_cfg.get(
+            "red_x_search_y", schema_default("stall_recovery.red_x_search_y")))
+        self._red_x_crop = None            # where the last stall scan read the red X
+        self._join_refused_ts = 0.0        # ADR 196 D8: last "Unable to join" dialog
+        self._join_hold_log_ts = 0.0
+        self._collect_crop = None          # ADR 196 D9: where COLLECT was drawn
+        self._collect_miss_saved_ts = 0.0
         self._stall_state_since = 0.0
         # ADR 094: predicate that suppresses automatic round-starting clicks.
         # Set by main() to the controller's pending finish-round exit. It must be
@@ -1353,6 +1522,11 @@ class GameStateAnalyzer:
         # starting. Reset on leaving GAME_STARTING so a streak cannot span two
         # separate stalls.
         self._starting_play_streak = 0
+        # ADR 195: PLAY reads in a row in a battle state, the last plausible
+        # speed or altitude, and when each weapon-panel crop last went silent.
+        self._battle_play_streak = 0
+        self._hud_telemetry_ts = time.time()
+        self._panel_silent_ts: "dict[str, float]" = {}
         self._lobby_quick_scan_thread_started = False
         self._lobby_quick_scan_stop = threading.Event()
         self._lobby_quick_scan_thread: "threading.Thread | None" = None
@@ -1473,6 +1647,19 @@ class GameStateAnalyzer:
             config.get("mission", {}).get("starting_health_probe_interval_s", 0.75))
         self._starting_scan_first_ts = 0.0
         self._starting_scan_first_raw_ts = 0.0
+        # ADR 189: the probe's check-and-set of _starting_probe_running is shared by
+        # the main loop's analyze_frame and the starting loop's own frames.
+        self._starting_probe_gate = threading.Lock()
+        # ADR 189: probes in a row that read speed and altitude but no health.
+        self._starting_telemetry_streak = 0
+        # ADR 196 D6: the HUD read during a GAME_LOBBY blackout.
+        self._lobby_hud_gate = threading.Lock()
+        self._lobby_hud_last_ts = 0.0
+        self._lobby_hud_streak = 0
+        # ADR 189: set when a probe since the last arm confirmed the HUD. Fresh
+        # per arm, unlike _game_battle_alive, which can carry the last round's
+        # value into GAME_STARTING (the reason ADR 032 gated its poll at 10 s).
+        self._starting_battle_confirmed = threading.Event()
         # Set by _start_game_starting_loop after the 10-second gate to enable the
         # GAME_STARTING health-only OCR scan (ADR 032 battle-alive fallback).
         self._game_starting_health_scan_enabled = threading.Event()
@@ -1750,6 +1937,23 @@ class GameStateAnalyzer:
         """
         self._last_lobby_play_click_ts = time.time()
 
+    def claim_lobby_click(self) -> bool:
+        """Take the next PLAY/READY click, unless one was made in the last 10 s.
+
+        PLAY/READY toggles, so two clicks a second or two apart undo each
+        other. After an accepted invite, main's READY click and the lobby
+        quick-scan's both fired in 7 of 13 accepts from 2026-11-11 to
+        2026-11-19 (one to three seconds apart, in either order), and 6 of
+        the 7 sat un-readied until the GAME_WAITING missed-click re-click
+        about 13 s later. A True return stamps the quick-scan's cooldown, so
+        the quick-scan does not click on top of the caller.
+        """
+        if time.time() - self._last_lobby_play_click_ts < LOBBY_PLAY_RETRY_S:
+            return False
+        self._last_lobby_play_click_ts = time.time()
+        self._join_refused_ts = 0.0   # ADR 196 D8: a new click, not yet refused
+        return True
+
     def note_battle_event(self) -> None:
         """A mission started, so the aircraft is in battle now.
 
@@ -1835,6 +2039,11 @@ class GameStateAnalyzer:
         not, None with no fresh read (outside battle, or no SPECIAL_WEAPON crop)."""
         return self._special_weapon.ready()
 
+    def special_weapon_charge(self) -> "int | None":
+        """ADR 199: the special weapon ring's lit sectors (its charge level), None
+        with no fresh read."""
+        return self._special_weapon.charge()
+
     def note_special_weapon_press(self) -> None:
         """The special weapon was pressed (ADR 173), for the reader's capture."""
         self._special_weapon.note_press()
@@ -1860,7 +2069,11 @@ class GameStateAnalyzer:
         self._weapon_name_future = None
         try:
             if not fut.cancelled():
-                self._weapon_name.note_text(fut.result())
+                text = fut.result()
+                self._weapon_name.note_text(text)
+                if self._panel_watch.note_weapon_name(
+                        text, classify(text or "", self._weapon_classes)[0]):
+                    self._note_panel_silent("WEAPON_NAME")
         except Exception as exc:
             logger.debug("Analyzer: weapon name read failed: %s", exc)
 
@@ -2014,6 +2227,8 @@ class GameStateAnalyzer:
             # real Δaltitude/Δframe-time; signal age then honestly includes the
             # OCR latency.
             _frame_ts = self._telemetry_frame_ts or time.time()
+            if any(starting_telemetry_plausible(speed_value, altitude_value)):
+                self._hud_telemetry_ts = time.time()      # ADR 195
             rejected_before = self._telemetry.rejected_total
             self._telemetry.update(speed_value, altitude_value, _frame_ts)
             rejected_after = self._telemetry.rejected_total
@@ -2107,6 +2322,20 @@ class GameStateAnalyzer:
         """Return timestamp for the latest incoming cache update."""
         with self._incoming_cache_lock:
             return self._incoming_cache['timestamp']
+
+    def incoming_is_lock_warning(self) -> bool:
+        """ADR 201: True when the cached detection is LOCK WARNING, not INCOMING.
+        It raises the alert (the flare roll, ADR 184) but drops no flares."""
+        with self._incoming_cache_lock:
+            return bool(self._incoming_cache.get('lock_warning', False))
+
+    def incoming_last_seen_ts(self) -> float:
+        """When a detection pass last saw the incoming warning (LOCK WARNING and
+        the rest), including passes the debounce reports as no alert; 0.0 if never.
+        The flare roll holds until this is flare_roll_after_s old (operator,
+        2026-11-16)."""
+        with self._incoming_cache_lock:
+            return self._incoming_last_seen_ts
 
     def get_incoming_latency_marks(self) -> "tuple[float, float, float]":
         """(frame_ts, pass_start_ts, detect_done_ts) for the cached result (ADR 096).
@@ -2209,7 +2438,11 @@ class GameStateAnalyzer:
     # ------------------------------------------------------------------
 
     def on_enter_GAME_LOBBY(self):
-        self._last_lobby_play_click_ts = 0.0
+        # A click from the last 10 s still owns the button: on 2026-11-19 18:33
+        # GAME_UNKNOWN → GAME_LOBBY, 0.8 s after the invite's click, wiped its
+        # stamp and the quick-scan clicked again 1.6 s later (ADR 196 D3).
+        if time.time() - self._last_lobby_play_click_ts >= LOBBY_PLAY_RETRY_S:
+            self._last_lobby_play_click_ts = 0.0
         # The next matchmaking reads its own mode and map.
         self.match_mode = self.match_map = None
         self._match_map_reads = 0
@@ -2234,6 +2467,11 @@ class GameStateAnalyzer:
         pass
 
     def on_enter_GAME_BATTLE(self):
+        # ADR 195: each battle gets the full no-telemetry span before its HUD
+        # can be called lost.
+        self._hud_telemetry_ts = time.time()
+        self._battle_play_streak = 0
+        self._panel_silent_ts.clear()
         with self._health_lock:
             self._health_no_digits_since = 0.0
             self._health_window.clear()
@@ -2355,48 +2593,65 @@ class GameStateAnalyzer:
         """
         if self._shutting_down or "HEALTH" not in self.crops:
             return
-        now = time.time()
-        if now - self._starting_probe_last_ts < self._starting_probe_interval_s:
+        # Two callers (analyze_frame on the main loop, probe_starting_frame on the
+        # starting loop): the throttle and single-flight check must be one step.
+        # Non-blocking, so the main loop never waits: a caller that loses the race
+        # has nothing to do, since the winner is scheduling a probe right now.
+        if not self._starting_probe_gate.acquire(blocking=False):
             return
-        if self._starting_probe_running:
-            return
-        executor = self.ocr_executor
-        if executor is None:
-            return
-        self._starting_probe_last_ts = now
-        self._starting_probe_running = True
+        try:
+            now = time.time()
+            if now - self._starting_probe_last_ts < self._starting_probe_interval_s:
+                return
+            if self._starting_probe_running:
+                return
+            executor = self.ocr_executor
+            if executor is None:
+                return
+            self._starting_probe_last_ts = now
+            self._starting_probe_running = True
+        finally:
+            if self._starting_probe_gate.locked():
+                self._starting_probe_gate.release()
 
         def _probe():
             try:
                 health_frame = get_crop(frame, *self.crops["HEALTH"][:4])
                 raw, _ = _process_health_region(health_frame)
+                # ADR 189: speed and altitude from the same frame. The HUD draws all
+                # three at once, so they cross-check a health read without waiting
+                # for a second frame, and stand in for health when sky washes it out.
+                speed = altitude = None
+                if "ALTITUDE_SPEED" in self.crops:
+                    telemetry_frame = get_crop(frame, *self.crops["ALTITUDE_SPEED"][:4])
+                    speed, altitude, _ = _process_telemetry_region(telemetry_frame)
                 self._starting_scan_attempts += 1
                 since_arm = now - (self._starting_scan_armed_ts or now)
-                if raw is None:
-                    logger.info(
-                        "GAME_STARTING health probe #%d (+%.1fs since armed): no digits",
-                        self._starting_scan_attempts, since_arm)
-                    return
-                if self._starting_scan_first_raw_ts == 0.0:
-                    self._starting_scan_first_raw_ts = time.time()
                 logger.info(
-                    "GAME_STARTING health probe #%d (+%.1fs since armed): raw=%s",
-                    self._starting_scan_attempts, since_arm, raw)
-                confirmed = self._starting_health_verdict(
-                    raw, self._starting_scan_attempts)
-                if confirmed is None:
+                    "GAME_STARTING health probe #%d (+%.1fs since armed): %s spd=%s alt=%s",
+                    self._starting_scan_attempts, since_arm,
+                    "no digits" if raw is None else f"raw={raw}", speed, altitude)
+                if raw is not None and self._starting_scan_first_raw_ts == 0.0:
+                    self._starting_scan_first_raw_ts = time.time()
+                verdict = self._starting_hud_verdict(
+                    raw, speed, altitude, self._starting_scan_attempts)
+                if verdict is None:
                     return
+                confirmed, evidence = verdict
                 with self._health_lock:
                     prev_alive = self._game_battle_alive
-                    self._health = confirmed
+                    if confirmed is not None:
+                        self._health = confirmed
                     self._game_battle_alive = True
                     if not prev_alive:
                         self._alive_after_observed_death = self._death_observed
                         self._death_observed = False
+                self._starting_battle_confirmed.set()
                 logger.info(
-                    "\033[92mAnalyzer: health %d confirmed in GAME_STARTING "
-                    "(+%.1fs since armed) → game_battle_alive=True\033[0m",
-                    confirmed, since_arm)
+                    "\033[92mAnalyzer: HUD confirmed in GAME_STARTING by %s "
+                    "(health=%s spd=%s alt=%s, +%.1fs since armed) "
+                    "→ game_battle_alive=True\033[0m",
+                    evidence, confirmed, speed, altitude, since_arm)
                 if not prev_alive:
                     self.alive_event.set()
             except Exception:
@@ -2417,6 +2672,108 @@ class GameStateAnalyzer:
             # Pool shutting down: drop the probe rather than resurrect a thread.
             self._starting_probe_running = False
             logger.debug("Analyzer: health probe not submitted (%s)", e)
+
+    def _schedule_lobby_hud_probe(self, frame) -> None:
+        """Read the battle HUD while GAME_LOBBY is blacked out (ADR 196 D6).
+
+        On 2026-11-19 20:08:47 the ADR 102 recheck sent a squad's GAME_STARTING
+        back to GAME_LOBBY about 3 s before the match loaded. The FSM had no way
+        from GAME_LOBBY into a battle: the jet sat unflown under a "lobby
+        blackout" until the ADR 093 ceiling pressed ESC into the round at
+        20:11:02. A dialog blackout never shows a speed or an altitude, so the
+        ADR 189 one-frame rule tells the two apart.
+
+        LOBBY_HUD_FRAMES frames in a row with HUD evidence fire cancel_detected
+        (GAME_LOBBY → GAME_STARTING); GAME_STARTING's own probe then confirms the
+        HUD and starts the mission as on any other start.
+        """
+        if (self._shutting_down or "HEALTH" not in self.crops
+                or "ALTITUDE_SPEED" not in self.crops):
+            return
+        executor = self.ocr_executor
+        if executor is None or not self._lobby_hud_gate.acquire(blocking=False):
+            return
+        now = time.time()
+        if now - self._lobby_hud_last_ts < LOBBY_HUD_INTERVAL_S:
+            self._lobby_hud_gate.release()
+            return
+        self._lobby_hud_last_ts = now
+
+        def _probe():
+            try:
+                health, _ = _process_health_region(
+                    get_crop(frame, *self.crops["HEALTH"][:4]))
+                speed, altitude, _ = _process_telemetry_region(
+                    get_crop(frame, *self.crops["ALTITUDE_SPEED"][:4]))
+                evidence = battle_hud_evidence(health, speed, altitude)
+                if evidence is None or self.game_state != GameState.GAME_LOBBY:
+                    self._lobby_hud_streak = 0
+                    return
+                self._lobby_hud_streak += 1
+                logger.info("Lobby blackout: battle HUD read by %s (health=%s spd=%s "
+                            "alt=%s, %d/%d)", evidence, health, speed, altitude,
+                            self._lobby_hud_streak, LOBBY_HUD_FRAMES)
+                if self._lobby_hud_streak >= LOBBY_HUD_FRAMES:
+                    self._lobby_hud_streak = 0
+                    logger.warning(
+                        "\033[93m📋 Lobby blackout %.0fs is a battle — GAME_LOBBY → "
+                        "GAME_STARTING so the HUD probe starts the mission "
+                        "(ADR 196 D6)\033[0m", self.lobby_blackout_age_s())
+                    self._trigger("cancel_detected")
+            except Exception:
+                logger.exception("Analyzer: lobby HUD probe failed")
+            finally:
+                if self._lobby_hud_gate.locked():
+                    self._lobby_hud_gate.release()
+
+        try:
+            executor.submit(_probe)
+        except RuntimeError as e:
+            if self._lobby_hud_gate.locked():
+                self._lobby_hud_gate.release()
+            logger.debug("Analyzer: lobby HUD probe not submitted (%s)", e)
+
+    def _starting_hud_verdict(self, raw: "int | None", speed: "int | None",
+                              altitude: "int | None",
+                              attempt: int = 0) -> "tuple[int | None, str] | None":
+        """Whether one probe's reads show the battle HUD: (health, evidence) or None.
+
+        ADR 189. Three ways in, in order:
+
+        1. health+telemetry: health at or above the spawn floor, and a plausible
+           speed or altitude in the same frame. One frame suffices: lobby and
+           loading screens give the HEALTH crop a digit fragment at most (the
+           ADR 102 '7'), never that alongside a speed or an altitude.
+        2. (removed, ADR 189 D6) health x2, the ADR 063 recurrence rule alone.
+           On 2026-11-18/19 it confirmed 6 starts and 4 of them had no HUD; on
+           11-19 07:04:11 it read '95' twice off the lobby after the match
+           bounced and launched the mission there.
+        3. telemetry xN: speed and altitude both read on
+           STARTING_TELEMETRY_ONLY_PROBES probes in a row, with no usable health.
+           The health it reports is None: nothing confirmed one.
+
+        Every health read still enters the ADR 063 window, so the battle path's
+        confirmation carries on from what the probe saw.
+        """
+        speed_ok, alt_ok = starting_telemetry_plausible(speed, altitude)
+        if speed_ok and alt_ok:
+            self._starting_telemetry_streak += 1
+        else:
+            self._starting_telemetry_streak = 0
+        if raw is not None:
+            if raw >= STARTING_MIN_CONFIRMED_HEALTH and (speed_ok or alt_ok):
+                if raw <= self._health_max_plausible:
+                    self._confirm_health_value(raw)
+                    return (raw, "health+telemetry")
+            # ADR 189 D6: a health read without speed or altitude is not the HUD,
+            # whatever recurs; it only feeds the ADR 063 window.
+            if raw <= self._health_max_plausible:
+                self._confirm_health_value(raw)
+            logger.info("GAME_STARTING health probe #%d: raw=%s with no speed or "
+                        "altitude — not the HUD (ADR 189 D6)", attempt, raw)
+        if self._starting_telemetry_streak >= STARTING_TELEMETRY_ONLY_PROBES:
+            return (None, f"telemetry x{self._starting_telemetry_streak}")
+        return None
 
     def _starting_health_verdict(self, raw: int, attempt: int = 0) -> "int | None":
         """The health a GAME_STARTING probe read may launch a mission on, or None.
@@ -2456,7 +2813,27 @@ class GameStateAnalyzer:
         self._starting_probe_last_ts = 0.0
         self._starting_scan_first_ts = 0.0
         self._starting_scan_first_raw_ts = 0.0
+        self._starting_telemetry_streak = 0
+        self._starting_battle_confirmed.clear()
         self._game_starting_health_scan_enabled.set()
+
+    @property
+    def starting_battle_confirmed(self) -> bool:
+        """True once a probe since the last arm confirmed the battle HUD (ADR 189)."""
+        return self._starting_battle_confirmed.is_set()
+
+    def probe_starting_frame(self, frame) -> None:
+        """Offer a frame the starting loop grabbed to the armed HUD probe (ADR 189).
+
+        The main loop feeds the probe once a tick (1.5 s); the starting loop calls
+        this at mission.starting_health_probe_interval_s so the HUD is seen within
+        one interval of drawing. Does nothing unless armed, in GAME_STARTING.
+        """
+        if frame is None or not self._game_starting_health_scan_enabled.is_set():
+            return
+        if self.game_state != GameState.GAME_STARTING:
+            return
+        self._schedule_starting_health_probe(frame)
 
     def disarm_starting_health_scan(self):
         """Disable the probe and report what it saw (2026-08-05 instrumentation).
@@ -3129,6 +3506,9 @@ class GameStateAnalyzer:
         # probe still scans HEALTH only; the respawn/incoming work stays skipped
         # because _run_ocr_in_background branches on state, and this call returns
         # the same negative respawn result either way.
+        if (self.game_state == GameState.GAME_LOBBY
+                and self.lobby_blackout_age_s() >= LOBBY_HUD_CHECK_AFTER_S):
+            self._schedule_lobby_hud_probe(frame)
         if self.game_state in (GameState.GAME_END_B, GameState.GAME_LOBBY,
                                GameState.GAME_WAITING):
             return (False, 0.0, None)
@@ -3309,14 +3689,24 @@ class GameStateAnalyzer:
                         detection_source = "ocr_fallback"
                         detected_label = fallback_text
 
+                    if incoming_detected:
+                        with self._incoming_cache_lock:
+                            self._incoming_last_seen_ts = now_t
+                    lock_warning = incoming_detected and is_lock_warning_only(
+                        detection_source, detected_label)
                     debounce_suppressed = False
                     if incoming_detected and self._incoming_debounce_window_s > 0.0:
-                        if (now_t - self._incoming_last_positive_ts) < self._incoming_debounce_window_s:
+                        # ADR 201: INCOMING right after a LOCK WARNING is not
+                        # debounced; the flares wait for it.
+                        if incoming_debounced(now_t, self._incoming_last_positive_ts,
+                                              self._incoming_debounce_window_s,
+                                              self._incoming_last_positive_lock, lock_warning):
                             debounce_suppressed = True
                             incoming_detected = False
                             detection_source = "none"
                         else:
                             self._incoming_last_positive_ts = now_t
+                            self._incoming_last_positive_lock = lock_warning
 
                     if incoming_detected:
                         logger.info(
@@ -3355,6 +3745,8 @@ class GameStateAnalyzer:
                         # `reaction` series stays comparable, and add the split.
                         self._incoming_cache['frame_ts'] = self._background_ocr_frame_ts
                         self._incoming_cache['detect_done_ts'] = time.time()
+                        self._incoming_cache['lock_warning'] = bool(
+                            incoming_detected and lock_warning)
                     if incoming_detected:
                         self.incoming_event.set()
 
@@ -3397,6 +3789,13 @@ class GameStateAnalyzer:
                         self._last_logged_missiles = None
                         logger.debug("Analyzer: skipping ammo updates while respawn is detected")
                     else:
+                        # FR-012: only frames that show the HUD count.
+                        if (ammo_flares_future is not None
+                                and self._panel_watch.note_count("AMMO_FLARES", flares_value)):
+                            self._note_panel_silent("AMMO_FLARES")
+                        if (ammo_missile_future is not None
+                                and self._panel_watch.note_count("AMMO_MISSILE", missile_value)):
+                            self._note_panel_silent("AMMO_MISSILE")
                         if flares_value is not None:
                             with self._ammo_lock:
                                 self._ammo_flares = flares_value
@@ -3643,6 +4042,77 @@ class GameStateAnalyzer:
             return False
         return time.time() - self._exit_dialog_seen_ts <= stale_after_s
 
+    def _battle_lobby_check(self, state, lobby_futures) -> None:
+        """ADR 195: PLAY or READY on STARTING_PLAY_CONFIRM_READS reads in a row in a
+        battle state, with no plausible speed or altitude for
+        BATTLE_LOBBY_NO_TELEMETRY_S, walks the FSM back to GAME_LOBBY.
+
+        2026-11-19 07:04:12: a false start (lobby digits read as health) left the
+        FSM in GAME_BATTLE_EJECT over the PLAY button for minutes; nothing in a
+        battle state looked for the lobby. The telemetry condition keeps ADR 102's
+        rule that a PLAY misread mid-battle cannot reset the FSM.
+        """
+        seen = None
+        for crop in self._lobby_recheck_crops():
+            fut = lobby_futures.get(crop)
+            if fut is None:
+                continue
+            try:
+                detected, _, _ = fut.result(timeout=20)
+            except Exception as e:
+                logger.warning("Lobby quick-scan: %s result failed in %s: %s",
+                               crop, state.name, e)
+                continue
+            if detected:
+                seen = crop
+                break
+        if seen is None:
+            self._battle_play_streak = 0
+            return
+        self._battle_play_streak += 1
+        age = self.hud_telemetry_age_s()
+        if (self._battle_play_streak < STARTING_PLAY_CONFIRM_READS
+                or age < BATTLE_LOBBY_NO_TELEMETRY_S):
+            logger.info("Lobby quick-scan: %s visible in %s (%d/%d reads, speed or "
+                        "altitude %.0f s ago)", seen, state.name, self._battle_play_streak,
+                        STARTING_PLAY_CONFIRM_READS, age)
+            return
+        logger.warning("\033[93m📋 Lobby quick-scan: %s on %d reads in %s with no speed "
+                       "or altitude for %.0f s — there is no battle, returning to "
+                       "GAME_LOBBY (ADR 195)\033[0m",
+                       seen, self._battle_play_streak, state.name, age)
+        self._battle_play_streak = 0
+        self._trigger("manual_reset")
+
+    def hud_telemetry_age_s(self) -> float:
+        """Seconds since a plausible speed or altitude was read (ADR 195)."""
+        return time.time() - self._hud_telemetry_ts
+
+    def _note_panel_silent(self, label: str) -> None:
+        """ADR 195 backstop: a weapon-panel crop has just gone silent (FR-012).
+
+        All three within BATTLE_HUD_LOST_PANEL_WINDOW_S, and no plausible speed or
+        altitude for BATTLE_HUD_LOST_NO_TELEMETRY_S, is a battle with no HUD:
+        the FSM goes to GAME_UNKNOWN. Silent crops with live telemetry are a moved
+        panel (the FR-012 case, 2026-11-18), and only the warning is logged.
+        """
+        now = time.time()
+        self._panel_silent_ts[label] = now
+        recent = [lb for lb in _PANEL_LABELS
+                  if now - self._panel_silent_ts.get(lb, 0.0) <= BATTLE_HUD_LOST_PANEL_WINDOW_S]
+        if len(recent) < len(_PANEL_LABELS) or self.game_state not in BATTLE_STATES:
+            return
+        age = self.hud_telemetry_age_s()
+        if age < BATTLE_HUD_LOST_NO_TELEMETRY_S:
+            logger.info("Analyzer: every weapon-panel crop is silent but speed or altitude "
+                        "read %.0f s ago — the panel moved, the battle stays (ADR 195)", age)
+            return
+        logger.warning("\033[93m📋 Analyzer: no weapon panel and no speed or altitude for "
+                       "%.0f s in %s — the battle HUD is gone, reclassifying via GAME_UNKNOWN "
+                       "(ADR 195)\033[0m", age, self.game_state.name)
+        self._panel_silent_ts.clear()
+        self._trigger("battle_hud_lost")
+
     def _lobby_recheck_crops(self):
         """Return the crop names a stale lobby re-check may legitimately use.
 
@@ -3768,6 +4238,16 @@ class GameStateAnalyzer:
                 and "STALL_INVITE_PLAYERS" in self.crops
                 and "STALL_INVITE_PLAYERS" not in targets):
             targets.append("STALL_INVITE_PLAYERS")
+        # Anomaly 005's reward crate also opens over a lobby the FSM calls
+        # GAME_LOBBY: on 2026-11-19 05:14 a "+300 SILVER" crate sat there until
+        # the 900 s liveness limit ended the session, ESC every 45 s doing
+        # nothing. The action opens a reward already owned and commits
+        # nothing, so it is de-escalating like the dismisses above (ADR 196 D7).
+        if (self._lobby_blackout_since
+                and now - self._lobby_blackout_since >= self._stall_action_after_s
+                and "STALL_PARTS_CRATE" in self.crops
+                and "STALL_PARTS_CRATE" not in targets):
+            targets.append("STALL_PARTS_CRATE")
         # Anomaly 004: the "SELECT AN AIRCRAFT TO RECEIVE PARTS" overlay opens
         # over a lobby that still classifies as GAME_LOBBY (2026-11-04, 9 min by
         # hand; 2026-11-09, the 900 s liveness limit ended the session) and at a
@@ -3782,7 +4262,12 @@ class GameStateAnalyzer:
             targets.insert(0, STALL_PARTS_CROP)
         # Independent gate: a stuck UNREADY blocks classification outright, so it
         # is timed from the UNREADY read itself rather than from the state.
+        # Only in the unclassified states that reason is about: on 2026-11-19
+        # 18:36 it left a 3-min-old squad from GAME_WAITING while the leader's
+        # queue cycled every 25 s. A classified squad lobby waits for the
+        # squad_no_battle_s gate below (ADR 196 D4).
         if (self._unready_since
+                and state in STALL_ACTION_STATES
                 and now - self._unready_since >= self._stall_unready_dwell_s
                 and STALL_UNREADY_CROP in self.crops):
             targets.append(STALL_UNREADY_CROP)
@@ -3822,6 +4307,57 @@ class GameStateAnalyzer:
         """
         since = self._squad_lobby_since
         return bool(since) and time.time() - since >= self._stall_squad_no_battle_s
+
+    def note_invite_accepted(self) -> None:
+        """A newly joined squad gets its own `squad_no_battle_s`.
+
+        On 2026-11-19 the clock from a 09:12 squad that never launched was
+        still running when a 10:14 invite was accepted, so 2 min into the new
+        squad wingman refused READY ("no battle for 64 min") and tried to
+        leave it. The UNREADY dwell belonged to the old squad too.
+        """
+        if self._squad_lobby_since:
+            logger.info("INVITED accepted — squad clock restarted (the previous squad "
+                        "had gone %.0f min without a battle)",
+                        (time.time() - self._squad_lobby_since) / 60.0)
+        self._squad_lobby_since = 0.0
+        self._unready_since = 0.0
+
+    def join_refused_recently(self, window_s: float = JOIN_REFUSED_WAITING_S) -> bool:
+        """True if "Unable to join" refused a READY in the last `window_s` (ADR 196 D8)."""
+        return bool(self._join_refused_ts) and time.time() - self._join_refused_ts < window_s
+
+    def _save_collect_miss(self, frame) -> None:
+        """Save the frame where COLLECT was read but no orange button found.
+
+        ADR 196 D9: on 2026-11-20 06:33:33 (Day 7) the text read and the
+        button search came up empty, with no frame to say why. At most one
+        frame every 10 minutes, under the capture budget.
+        """
+        now = time.time()
+        if now - self._collect_miss_saved_ts < 600.0:
+            return
+        self._collect_miss_saved_ts = now
+        try:
+            from . import capture_budget
+            out = Path("test_screenshots/unknown_anomalies")
+            if not capture_budget.admit(out, "EVENT_COLLECT miss"):
+                return
+            out.mkdir(parents=True, exist_ok=True)
+            path = out / time.strftime("collect_miss_%Y%m%d_%H%M%S.png")
+            cv2.imwrite(str(path), frame)
+            logger.warning("EVENT_COLLECT: no orange button in the COLLECT row — "
+                           "frame saved to %s", path)
+        except Exception:
+            logger.exception("EVENT_COLLECT: could not save the miss frame")
+
+    def collect_crop(self) -> "CropCoords | None":
+        """The COLLECT button the last popup scan found, or None (ADR 196 D9)."""
+        return self._collect_crop
+
+    def red_x_crop(self) -> CropCoords:
+        """The red X where the last stall scan read it, else the calibrated crop."""
+        return self._red_x_crop or self.crops[STALL_UNREADY_CROP]
 
     def _note_unready(self, text) -> None:
         """Start or continue the UNREADY dwell behind the squad-leave gate.
@@ -3870,7 +4406,8 @@ class GameStateAnalyzer:
         # stranded the lobby for 40 minutes on 2026-08-22 08:40 while the crop
         # that dismisses it sat unused. test_lobby_popup_coverage guards the
         # two lists against drifting apart again.
-        popup_crop_names = ["INVITED", "CREATION_FAILED", "REVEAL_ALL", "SILVER",
+        popup_crop_names = ["INVITED", "CREATION_FAILED", "UNABLE_TO_JOIN", "EVENT_COLLECT",
+                            "REVEAL_ALL", "SILVER",
                             "UNLOCK_CLOSE", "INSPECT", "event_refresh",
                             "NEW_FLIGHT_PASS", "TAP_HERE_TO_CONTINUE",
                             "FINAL_CONTINUE", "PARTY_ENDED"]
@@ -3907,7 +4444,8 @@ class GameStateAnalyzer:
             # lobby crops stay excluded there: classification owns marker
             # detection in GAME_UNKNOWN, and clicking PLAY/CANCEL from an
             # unclassified state would be wrong.
-            if state not in POPUP_DISMISS_STATES and state not in LOBBY_RECHECK_STATES:
+            if (state not in POPUP_DISMISS_STATES and state not in LOBBY_RECHECK_STATES
+                    and state not in BATTLE_STATES):
                 continue
             if state == GameState.GAME_LOBBY and self.lobby_errand_active():
                 # ADR 166: wingman is on a menu page of its own. Nothing here
@@ -3933,6 +4471,8 @@ class GameStateAnalyzer:
                 # miss a brief CANCEL window (e.g. squad-READY → match-found flow).
                 if state not in LOBBY_RECHECK_STATES and self._starting_play_streak:
                     self._starting_play_streak = 0
+                if state not in BATTLE_STATES and self._battle_play_streak:
+                    self._battle_play_streak = 0
                 lobby_futures = {}
                 lobby_scan_start = None
                 handled = False
@@ -3942,6 +4482,9 @@ class GameStateAnalyzer:
                     crops_to_scan = [] if event_refresh_holds_lobby else lobby_crops
                 elif state == GameState.GAME_WAITING:
                     crops_to_scan = [c for c in ("CANCEL",) if c in self.crops]
+                elif state in BATTLE_STATES:
+                    # ADR 195: read PLAY/READY only, never click from a battle state.
+                    crops_to_scan = self._lobby_recheck_crops()
                 elif state in LOBBY_RECHECK_STATES:
                     # ADR 102: a stale lobby prompt can still be visible while the FSM
                     # has already entered GAME_STARTING. Scan the same lobby crops the
@@ -4062,6 +4605,10 @@ class GameStateAnalyzer:
                         self._starting_play_streak = 0
                     handled = True
 
+                if not handled and state in BATTLE_STATES:
+                    self._battle_lobby_check(state, lobby_futures)
+                    handled = True
+
                 if not handled and state == GameState.GAME_LOBBY:
                     for crop in ("PLAY", "READY"):
                         if crop not in lobby_futures:
@@ -4121,6 +4668,20 @@ class GameStateAnalyzer:
                                 logger.info("Lobby quick-scan: PLAY visible — the squadron "
                                             "ranking is read first (ADR 166)")
                             handled = True
+                        elif self.join_refused_recently(JOIN_REFUSED_HOLD_S):
+                            # ADR 196 D8: each PLAY or READY raises "Unable to
+                            # join" again while the server still has a queue
+                            # for us (2026-11-19 22:00: three in 17 s; 2026-11-20
+                            # 02:30, the solo PLAY, every 5 s). Wait it out.
+                            if time.time() - self._join_hold_log_ts >= 30.0:
+                                self._join_hold_log_ts = time.time()
+                                logger.info(
+                                    "\033[93m📋 Lobby quick-scan: %s visible but Unable to "
+                                    "join refused it %.0fs ago — holding %s for %.0fs "
+                                    "(ADR 196 D8)\033[0m", crop,
+                                    time.time() - self._join_refused_ts, crop,
+                                    JOIN_REFUSED_HOLD_S)
+                            handled = True
                         elif crop == "READY" and self.squad_leave_pending():
                             # Staying in GAME_LOBBY with the lobby undimmed is
                             # what lets the stall batch below find the red X.
@@ -4139,6 +4700,8 @@ class GameStateAnalyzer:
                                 crop, text,
                             )
                             self._last_lobby_play_click_ts = time.time()
+                            # ADR 196 D8: only a dialog after this click refuses it.
+                            self._join_refused_ts = 0.0
                             self.emit(GameEvent.LOBBY_PLAY_CLICK, crop, frame)
                             self._trigger("play_clicked")
                             handled = True
@@ -4252,6 +4815,13 @@ class GameStateAnalyzer:
                                 )
                                 if crop == "event_refresh":
                                     event_refresh_detected = True
+                                if crop == "UNABLE_TO_JOIN":
+                                    self._join_refused_ts = time.time()
+                                if crop == "EVENT_COLLECT":
+                                    self._collect_crop = locate_collect_button(
+                                        popup_frame, self.crops[crop])
+                                    if self._collect_crop is None:
+                                        self._save_collect_miss(popup_frame)
                                 self.emit(GameEvent.LOBBY_POPUP_CLICK, crop)
                                 if crop == "event_refresh":
                                     self._event_refresh_recheck_after = (
@@ -4297,11 +4867,20 @@ class GameStateAnalyzer:
                     if stall_frame is not None and time.time() - stall_frame_ts <= 3.0:
                         last_stall_scan_ts = time.time()
                         for crop in stall_targets:
+                            scan_crop = self.crops[crop]
+                            if crop == STALL_UNREADY_CROP:
+                                scan_crop = locate_red_x(stall_frame, scan_crop,
+                                                         self._red_x_search_y)
+                                self._red_x_crop = scan_crop
+                                if scan_crop is None:
+                                    logger.debug("Stall recovery: '%s' not found "
+                                                 "(no red in the party column)", crop)
+                                    continue
                             try:
                                 detected, _, text = executor.submit(   # ADR 103
                                     _process_text_region,
-                                    _crop_for_ocr(stall_frame, self.crops[crop][:4]),
-                                    self.crops[crop].text or [],
+                                    _crop_for_ocr(stall_frame, scan_crop[:4]),
+                                    scan_crop.text or [],
                                 ).result(timeout=20)
                             except Exception as e:
                                 logger.warning(
@@ -4378,11 +4957,37 @@ class GameStateAnalyzer:
         if self.scan_region_for_play_button(frame) is not None:
             return GameState.GAME_LOBBY
 
+        # ADR 189: the battle HUD, not any digit in the HEALTH crop. A lone health
+        # read called battle on the spawn intro's '7' (2026-11-18 10:05:13, 28 s
+        # before the HUD) and launched the mission there: 34 of 45 November
+        # classifications came over 20 s before a health of 20 or more.
         health_value = self._scan_region_for_health_value(frame)
-        if health_value is not None:
+        speed, altitude = self._scan_region_for_telemetry(frame)
+        evidence = battle_hud_evidence(health_value, speed, altitude)
+        if evidence is not None:
+            logger.debug("Analyzer: GAME_UNKNOWN battle candidate by %s "
+                         "(health=%s spd=%s alt=%s)", evidence, health_value, speed, altitude)
             return GameState.GAME_BATTLE
+        if health_value is not None:
+            logger.debug("Analyzer: GAME_UNKNOWN health=%s spd=%s alt=%s is no battle HUD",
+                         health_value, speed, altitude)
 
         return None
+
+    def _scan_region_for_telemetry(self, frame) -> "tuple[int | None, int | None]":
+        """(speed, altitude) from the ALTITUDE_SPEED crop, or Nones (ADR 189)."""
+        if "ALTITUDE_SPEED" not in self.crops:
+            return (None, None)
+        executor = self.ocr_executor
+        if executor is None:
+            return (None, None)
+        try:
+            crop = get_crop(frame, *self.crops["ALTITUDE_SPEED"][:4])
+            speed, altitude, _ = executor.submit(_process_telemetry_region, crop).result(timeout=30)
+            return (speed, altitude)
+        except Exception as e:
+            logger.debug("Analyzer: telemetry OCR failed in unknown classification: %s", e)
+            return (None, None)
 
     def scan_region_for_click_to(self, frame) -> bool:
         """Synchronously scan the click_to crop for the end-of-round prompt."""
@@ -4435,6 +5040,9 @@ class GameStateAnalyzer:
             self._click_to_cache['timestamp'] = 0.0
             self._click_to_cache['result'] = (False, 0.0, None)
         self._incoming_last_positive_ts = 0.0
+        # Operator, 2026-11-16: the flare roll holds until the warning has been
+        # gone 2 s, so it needs the last pass that saw it, debounce or not.
+        self._incoming_last_seen_ts = 0.0
         self._incoming_near_threshold_pending = False
         self._incoming_near_threshold_pending_ts = 0.0
         logger.debug("OCR caches reset")

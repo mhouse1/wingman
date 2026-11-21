@@ -33,6 +33,15 @@ _STROKE = 3
 _TICK = 9
 # HUD green, as the gun lead ring's dots (lead_ring.py).
 _GREEN_LO, _GREEN_HI = (38, 40, 150), (75, 255, 255)
+# ADR 186: a special ability's lead diamond (the F-106's nuke) is the same shape in
+# yellow, fading to near white at its lower right. Measured on the operator's `v`
+# screenshots of 2026-11-17 02:39-02:41: hue 20-40, the pale end down to
+# saturation 40. On those four diamonds this range scores 0.79-0.83; the best
+# other match in 153 full-size screenshots was 0.43 (the afterburner flame).
+LEAD_COLOURS = {
+    "green": (_GREEN_LO, _GREEN_HI),
+    "yellow": ((18, 40, 200), (45, 255, 255)),
+}
 # The bottom of the picture is the weapon panel, whose own small diamond is not a lead.
 _SEARCH_MAX_Y = 0.88
 # Two pictures within this distance confirm a diamond; it moves with the target.
@@ -46,9 +55,10 @@ class Diamond:
     score: float
 
 
-def _green(bgr: np.ndarray) -> np.ndarray:
+def _coloured(bgr: np.ndarray, colour: str = "green") -> np.ndarray:
+    lo, hi = LEAD_COLOURS[colour]
     hsv = cv2.cvtColor(np.ascontiguousarray(bgr), cv2.COLOR_BGR2HSV)
-    return cv2.inRange(hsv, _GREEN_LO, _GREEN_HI)
+    return cv2.inRange(hsv, lo, hi)
 
 
 def diamond_template(scale: float = 1.0) -> np.ndarray:
@@ -69,8 +79,9 @@ def diamond_template(scale: float = 1.0) -> np.ndarray:
 
 def find_diamonds(frame: np.ndarray, around: "tuple[float, float]", search_px: float,
                   min_score: float, scale: "float | None" = None,
-                  most: int = 3) -> "list[Diamond]":
-    """Lead diamonds within `search_px` (at 1200 high) of `around`, best first."""
+                  most: int = 3, colour: str = "green") -> "list[Diamond]":
+    """Lead diamonds of `colour` (a LEAD_COLOURS name) within `search_px` (at 1200
+    high) of `around`, best first."""
     h, w = frame.shape[:2]
     s = h / _REF_H if scale is None else scale
     tmpl = diamond_template(s)
@@ -80,7 +91,7 @@ def find_diamonds(frame: np.ndarray, around: "tuple[float, float]", search_px: f
     ya, yb = max(0, int(around[1] - r)), min(int(h * _SEARCH_MAX_Y), int(around[1] + r))
     if xb - xa <= tmpl.shape[1] or yb - ya <= tmpl.shape[0]:
         return []
-    mask = (_green(frame[ya:yb, xa:xb]) > 0).astype(np.float32)
+    mask = (_coloured(frame[ya:yb, xa:xb], colour) > 0).astype(np.float32)
     if not mask.any():
         return []
     res = cv2.matchTemplate(mask, tmpl, cv2.TM_CCOEFF_NORMED)
@@ -96,12 +107,23 @@ def find_diamonds(frame: np.ndarray, around: "tuple[float, float]", search_px: f
 
 class RocketLead:
     """Where a confirmed lead diamond is, asked by the pursuit on each picture.
-    Used on one steering thread at a time."""
+    Used on one steering thread at a time.
 
-    def __init__(self, min_score: float, search_px: float, memory_s: float):
+    `colour` and `most` serve a special ability's diamonds (ADR 186): yellow, and
+    one on every enemy in reach, so more candidates are kept for the caller's
+    nearest-to-`around` pick. `scale` fixes the template's size for a cropped
+    picture; None takes it from the picture's height."""
+
+    def __init__(self, min_score: float, search_px: float, memory_s: float, *,
+                 colour: str = "green", most: int = 3, scale: "float | None" = None):
+        if colour not in LEAD_COLOURS:
+            raise ValueError(f"lead colour {colour!r} not one of {sorted(LEAD_COLOURS)}")
         self._min_score = float(min_score)
         self._search_px = float(search_px)
         self._memory_s = float(memory_s)
+        self._colour = colour
+        self._most = int(most)
+        self._scale = scale
         self._last: "tuple[float, Diamond] | None" = None     # the last picture's best
         self._confirmed: "tuple[float, Diamond] | None" = None
         self._seen_ts: "float | None" = None
@@ -114,12 +136,14 @@ class RocketLead:
         if picture_ts == self._seen_ts:
             return self.aim(picture_ts)
         self._seen_ts = picture_ts
-        found = find_diamonds(frame, around, self._search_px, self._min_score)
+        found = find_diamonds(frame, around, self._search_px, self._min_score,
+                              scale=self._scale, most=self._most, colour=self._colour)
         best = min(found, key=lambda d: math.hypot(d.x - around[0], d.y - around[1]),
                    default=None)
         if best is not None and self._last is not None:
             prev = self._last[1]
-            if math.hypot(best.x - prev.x, best.y - prev.y) <= _CONFIRM_PX * frame.shape[0] / _REF_H:
+            px_scale = frame.shape[0] / _REF_H if self._scale is None else self._scale
+            if math.hypot(best.x - prev.x, best.y - prev.y) <= _CONFIRM_PX * px_scale:
                 self._confirmed = (picture_ts, best)
         self._last = (picture_ts, best) if best is not None else None
         return self.aim(picture_ts)

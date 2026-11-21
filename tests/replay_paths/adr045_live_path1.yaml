@@ -1,6 +1,12 @@
 # ADR045 PATH1 live-screen realism lane.
 # injection_time_s is used by the presenter utility for on-screen scheduling.
 
+# ADR 189: this lane models the Good-Luck entry and the validator requires its
+# log lines; the shipped starting_signal is hud (see adr044_runtime_path1.yaml).
+config_overrides:
+  mission:
+    starting_signal: good_luck
+
 PATH1_LIVE:
   - screenshot_name: P1_000_LOBBY_PLAY.png
     injection_time_s: 0.0

@@ -2,7 +2,7 @@
 
 Wingman types into whatever window has focus. On 2026-08-28 the operator's
 message reached them as "tryi auganw" — the stray `i` and `w` were NOSE_UP_KEY
-and WINGSWEEP_KEY, injected into their editor while they typed. These tests pin
+and WINGSWEEP_KEY (now AUXILIARY_FEATURE_KEY), injected into their editor while they typed. These tests pin
 the guard that closes that, and the three traps the focus probe caught before
 the design was settled.
 """

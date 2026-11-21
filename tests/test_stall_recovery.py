@@ -87,6 +87,11 @@ class TestStallGate:
         screen is identified by its title and the action is one ESC, the same
         ESC that already closed it once the ADR 093 ceiling passed.
 
+        STALL_PARTS_CRATE (Anomaly 005, ADR 196 D7) meets it too: the screen
+        is identified by its reward-card text, and the action is one click on
+        the crate's '?' that opens a reward already owned and commits nothing.
+        On 2026-11-19 05:14 a '+300 SILVER' crate stranded a lobby for 15 min.
+
         STALL_PARTS_SELECT (Anomaly 004) is not on this gate: it waits for
         the liveness guard's stall (TestPartsToSecondJet).
         """
@@ -94,7 +99,8 @@ class TestStallGate:
         analyzer._lobby_blackout_since = time.time() - (analyzer._stall_action_after_s + 1.0)
         targets = analyzer._stall_recovery_targets(GameState.GAME_LOBBY)
         assert set(targets) == {"STALL_PROFILE", "STALL_EXIT_TO_DESKTOP",
-                                "STALL_CHOOSE_REWARDS", "STALL_INVITE_PLAYERS"}, \
+                                "STALL_CHOOSE_REWARDS", "STALL_INVITE_PLAYERS",
+                                "STALL_PARTS_CRATE"}, \
             f"lobby blackout must open exactly these crops, got {targets}"
         for invasive in ("STALL_RETRY", "STALL_AIRCRAFT"):
             assert invasive not in targets, \
@@ -203,11 +209,20 @@ class TestUnreadyGate:
         analyzer._stall_state_since = 0.0
         assert analyzer._stall_recovery_targets(GameState.GAME_LOBBY) == []
 
-    def test_unready_past_dwell_fires_in_classified_lobby(self, analyzer):
-        """The 2026-08-19 22:07 stall: UNREADY blocks PLAY in a lobby that classifies."""
+    def test_unready_in_a_classified_lobby_leaves_at_the_squad_limit(self, analyzer):
+        """The 2026-08-19 22:07 stall: UNREADY blocks PLAY in a lobby that
+        classifies. ADR 196 D4: left by the squad_no_battle_s gate (the UNREADY
+        read starts that clock), not by the 160 s dwell, which left a squad
+        whose leader was still queueing on 2026-11-19."""
         analyzer._unready_since = time.time() - (analyzer._stall_unready_dwell_s + 1.0)
         analyzer._stall_state_since = 0.0
+        assert analyzer._stall_recovery_targets(GameState.GAME_LOBBY) == []
+        analyzer._squad_lobby_since = time.time() - (analyzer._stall_squad_no_battle_s + 1.0)
         assert analyzer._stall_recovery_targets(GameState.GAME_LOBBY) == [STALL_UNREADY_CROP]
+
+    def test_an_unready_read_starts_the_squad_clock(self, analyzer):
+        analyzer._note_unready("WAITINGCLICKTOUNREADY")
+        assert analyzer._squad_lobby_since > 0.0
 
     def test_unready_past_dwell_also_fires_while_unclassified(self, analyzer):
         """UNREADY makes _classify_unknown_state fail, so it strands GAME_UNKNOWN too."""
@@ -633,3 +648,277 @@ class TestPartsToSecondJet:
         src = Path("wingman/main.py").read_text(encoding="utf-8")
         branch = src[src.index('if crop == "STALL_PARTS_SELECT":'):]
         assert "_give_parts_to_second_jet(" in branch[:branch.index("return")]
+
+
+class TestInviteRestartsTheSquadClock:
+    """2026-11-19 10:14: an accepted invite inherited the 09:12 squad's clock
+    and refused READY two minutes later ("no battle for 64 min")."""
+
+    def test_accepting_an_invite_clears_the_clock(self, analyzer):
+        analyzer._squad_lobby_since = time.time() - 3800.0
+        analyzer._unready_since = time.time() - 3800.0
+        assert analyzer.squad_leave_pending() is True
+        analyzer.note_invite_accepted()
+        assert analyzer.squad_leave_pending() is False
+        assert analyzer._unready_since == 0.0
+
+    def test_main_restarts_the_clock_on_accept(self):
+        src = Path("wingman/main.py").read_text(encoding="utf-8")
+        branch = src[src.index('elif popup == "INVITED":'):]
+        branch = branch[:branch.index("def _click_ready_after_invite")]
+        reject = branch.index("if not accept_invite:")
+        reset = branch.index("analyzer.note_invite_accepted()")
+        # After the REJECT return, before the replay-mode return.
+        assert reject < reset < branch.index("if replay_mode:")
+
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _party_frame(strip_name):
+    """A 1920x1200 frame holding the saved PARTY-panel column at x 1690."""
+    import cv2
+    strip = cv2.imread(str(FIXTURES / strip_name))
+    frame = np.zeros((1200, 1920, 3), dtype=np.uint8)
+    frame[:, 1690:1690 + strip.shape[1]] = strip
+    return frame
+
+
+class TestRedXLocator:
+    """The red X moves down the PARTY panel; the crop must follow it."""
+
+    @pytest.mark.parametrize("strip, x_centre_px", [
+        ("party_red_x_strip_20261102.png", 300.5),          # the calibration frame
+        ("party_red_x_strip_banner_20261119.png", 374.5),   # event banner above the panel
+        ("party_red_x_strip_three_20261119.png", 426.5),    # a third member
+    ])
+    def test_crop_is_centred_on_the_x(self, strip, x_centre_px):
+        crop = analyzer_module.load_crops(load_config()["crops"])[STALL_UNREADY_CROP]
+        found = analyzer_module.locate_red_x(
+            _party_frame(strip), crop, schema_default("stall_recovery.red_x_search_y"))
+        assert found is not None
+        assert abs((found.y1 + found.y2) / 2 * 1200 - x_centre_px) <= 2.0
+        # Same size and column as the calibrated crop: OCR of the X is size-sensitive.
+        assert found.y2 - found.y1 == pytest.approx(crop.y2 - crop.y1)
+        assert (found.x1, found.x2, found.text) == (crop.x1, crop.x2, crop.text)
+
+    def test_no_red_means_no_crop(self):
+        crop = analyzer_module.load_crops(load_config()["crops"])[STALL_UNREADY_CROP]
+        frame = np.full((1200, 1920, 3), 60, dtype=np.uint8)
+        assert analyzer_module.locate_red_x(frame, crop, (0.12, 0.75)) is None
+
+    def test_click_uses_the_located_crop(self, analyzer):
+        calibrated = analyzer.crops[STALL_UNREADY_CROP]
+        assert analyzer.red_x_crop() == calibrated
+        moved = calibrated._replace(y1=calibrated.y1 + 0.06, y2=calibrated.y2 + 0.06)
+        analyzer._red_x_crop = moved
+        assert analyzer.red_x_crop() == moved
+
+    def test_main_clicks_the_located_crop(self):
+        src = Path("wingman/main.py").read_text(encoding="utf-8")
+        assert 'crops["STALL_MULTI_PLAYER"]' not in src
+        assert "click_crop(analyzer.red_x_crop()" in src
+
+
+class TestOneReadyClickAfterAnInvite:
+    """READY toggles: two clicks a second apart un-ready the player. 7 of 13
+    accepts (2026-11-11 to 11-19) had main's and the quick-scan's READY clicks
+    1-3 s apart, in either order."""
+
+    def test_first_claim_wins_and_stamps_the_quick_scan_cooldown(self, analyzer):
+        assert analyzer.claim_lobby_click() is True
+        assert time.time() - analyzer._last_lobby_play_click_ts < 1.0
+        assert analyzer.claim_lobby_click() is False
+
+    def test_a_quick_scan_click_blocks_the_invite_click(self, analyzer):
+        """The 11-11 order: the quick-scan clicked first."""
+        analyzer._last_lobby_play_click_ts = time.time() - 2.0
+        assert analyzer.claim_lobby_click() is False
+
+    def test_a_missed_click_can_be_retried(self, analyzer):
+        analyzer._last_lobby_play_click_ts = (
+            time.time() - analyzer_module.LOBBY_PLAY_RETRY_S - 0.1)
+        assert analyzer.claim_lobby_click() is True
+
+    def test_main_claims_before_the_invite_ready_click(self):
+        src = Path("wingman/main.py").read_text(encoding="utf-8")
+        body = src[src.index("def _click_ready_after_invite"):]
+        body = body[:body.index("threading.Thread(target=_click_ready_after_invite")]
+        claim = body.index("analyzer.claim_lobby_click()")
+        click = body.index("ctrl.click_crop(")
+        assert claim < click
+        assert body.count("ctrl.click_crop(") == 1
+
+
+class TestUnreadyDwellOnlyWhenUnclassified:
+    """2026-11-19 18:36: the 160 s UNREADY dwell left a 3-min-old squad from
+    GAME_WAITING while the leader's queue cycled every 25 s."""
+
+    @pytest.mark.parametrize("state", [GameState.GAME_LOBBY, GameState.GAME_WAITING,
+                                       GameState.GAME_STARTING])
+    def test_a_classified_squad_lobby_waits(self, analyzer, state):
+        analyzer._unready_since = time.time() - (analyzer._stall_unready_dwell_s + 30.0)
+        analyzer._squad_lobby_since = time.time() - 200.0
+        assert STALL_UNREADY_CROP not in analyzer._stall_recovery_targets(state)
+
+    @pytest.mark.parametrize("state", STALL_ACTION_STATES)
+    def test_an_unclassified_stall_still_leaves(self, analyzer, state):
+        """ADR 084's case: UNREADY keeps the FSM in GAME_UNKNOWN."""
+        analyzer._stall_state_since = time.time() - (analyzer._stall_action_after_s + 1.0)
+        analyzer._unready_since = time.time() - (analyzer._stall_unready_dwell_s + 1.0)
+        assert STALL_UNREADY_CROP in analyzer._stall_recovery_targets(state)
+
+    def test_the_squad_limit_still_leaves_from_game_waiting(self, analyzer):
+        analyzer._unready_since = time.time() - 1000.0
+        analyzer._squad_lobby_since = time.time() - (analyzer._stall_squad_no_battle_s + 1.0)
+        assert STALL_UNREADY_CROP in analyzer._stall_recovery_targets(GameState.GAME_WAITING)
+
+
+class TestLobbyEntryKeepsARecentClick:
+    def test_a_click_under_10s_old_survives_lobby_entry(self, analyzer):
+        """2026-11-19 18:33: GAME_UNKNOWN → GAME_LOBBY 0.8 s after the
+        invite's click wiped its stamp."""
+        assert analyzer.claim_lobby_click() is True
+        analyzer.on_enter_GAME_LOBBY()
+        assert analyzer.claim_lobby_click() is False
+
+    def test_an_old_click_is_cleared(self, analyzer):
+        analyzer._last_lobby_play_click_ts = (
+            time.time() - analyzer_module.LOBBY_PLAY_RETRY_S - 1.0)
+        analyzer.on_enter_GAME_LOBBY()
+        assert analyzer._last_lobby_play_click_ts == 0.0
+
+    def test_the_invite_never_clicks_play(self):
+        """The frame 1.5 s after ACCEPT still showed the solo lobby's PLAY."""
+        src = Path("wingman/main.py").read_text(encoding="utf-8")
+        body = src[src.index("def _click_ready_after_invite"):]
+        body = body[:body.index("threading.Thread(target=_click_ready_after_invite")]
+        play = body.index('elif ready == "PLAY":')
+        assert play < body.index("analyzer.claim_lobby_click()")
+        assert "click_crop" not in body[play:body.index("elif ready and not", play)]
+
+
+class TestLobbyBlackoutThatIsABattle:
+    """2026-11-19 20:08:47: GAME_STARTING went back to GAME_LOBBY 3 s before the
+    match loaded, and the jet sat unflown under a 'lobby blackout' until the
+    ESC ceiling opened the scoreboard over the round at 20:11:02."""
+
+    @pytest.fixture
+    def lobby(self, analyzer, monkeypatch):
+        analyzer.state = "GAME_LOBBY"
+        analyzer._lobby_blackout_since = time.time() - 10.0
+        monkeypatch.setattr(analyzer, "_ocr_executor", _InlineExecutor(), raising=False)
+        fired = []
+        monkeypatch.setattr(analyzer, "_trigger", lambda t: fired.append(t))
+        analyzer._fired = fired
+        return analyzer
+
+    def _reads(self, monkeypatch, health, speed, altitude):
+        monkeypatch.setattr(analyzer_module, "_process_health_region",
+                            lambda crop: (health, 0.0))
+        monkeypatch.setattr(analyzer_module, "_process_telemetry_region",
+                            lambda crop: (speed, altitude, 0.0))
+
+    def _probe(self, a):
+        a._lobby_hud_last_ts = 0.0
+        a._schedule_lobby_hud_probe(np.zeros((1200, 1920, 3), dtype=np.uint8))
+
+    def test_two_hud_frames_hand_the_lobby_to_game_starting(self, lobby, monkeypatch):
+        self._reads(monkeypatch, 100, 650, 1200)
+        self._probe(lobby)
+        assert lobby._fired == []
+        self._probe(lobby)
+        assert lobby._fired == ["cancel_detected"]
+
+    def test_a_dialog_blackout_stays_in_the_lobby(self, lobby, monkeypatch):
+        """A lone health digit is the loading-screen '7' (ADR 189 D6)."""
+        self._reads(monkeypatch, 7, None, None)
+        for _ in range(5):
+            self._probe(lobby)
+        assert lobby._fired == []
+
+    def test_a_gap_restarts_the_count(self, lobby, monkeypatch):
+        self._reads(monkeypatch, 100, 650, 1200)
+        self._probe(lobby)
+        self._reads(monkeypatch, None, None, None)
+        self._probe(lobby)
+        self._reads(monkeypatch, 100, 650, 1200)
+        self._probe(lobby)
+        assert lobby._fired == []
+
+    def test_cancel_detected_takes_the_lobby_to_game_starting(self):
+        from wingman.state import FSM_TRANSITIONS as TRANSITIONS
+        assert any(t["trigger"] == "cancel_detected" and t["source"] == "GAME_LOBBY"
+                   and t["dest"] == "GAME_STARTING" for t in TRANSITIONS)
+
+    def test_analyze_frame_runs_the_probe_only_after_the_popup_pass(self):
+        assert analyzer_module.LOBBY_HUD_CHECK_AFTER_S >= 5.0
+        src = Path("wingman/analyzer.py").read_text(encoding="utf-8")
+        # analyze_frame reaches _detect_respawn_ocr on every GAME_LOBBY tick;
+        # its early return for the lobby states comes after the probe.
+        body = src[src.index("    def _detect_respawn_ocr(self, frame):"):]
+        body = body[:body.index("    def ", 10)]
+        probe = body.index("self._schedule_lobby_hud_probe(frame)")
+        assert probe < body.index("GameState.GAME_WAITING):")
+
+
+class TestRewardCrateInALobbyBlackout:
+    """ADR 196 D7: 2026-11-19 05:14, a '+300 SILVER' crate stranded GAME_LOBBY
+    for 15 min; ESC every 45 s did nothing, the 900 s limit ended the session."""
+
+    def test_a_lobby_blackout_scans_the_crate(self, analyzer):
+        analyzer._lobby_blackout_since = time.time() - (analyzer._stall_action_after_s + 1.0)
+        assert "STALL_PARTS_CRATE" in analyzer._stall_recovery_targets(GameState.GAME_LOBBY)
+
+    def test_a_fresh_blackout_does_not(self, analyzer):
+        analyzer._lobby_blackout_since = time.time()
+        assert "STALL_PARTS_CRATE" not in analyzer._stall_recovery_targets(GameState.GAME_LOBBY)
+
+    def test_the_label_reads_silver_crates(self):
+        assert "SILVER" in load_config()["crops"]["STALL_PARTS_CRATE"]["text"]
+
+    def test_the_silver_label_sits_in_the_crate_label_crop(self):
+        """The fixture is rows 380-420, x 160-520 of the 05:14:59 frame; the
+        card's text must fall inside the crop's rows and columns."""
+        import cv2
+        strip = cv2.imread(str(Path(__file__).parent / "fixtures"
+                               / "parts_crate_silver_label.png"))
+        ys, xs = np.nonzero(strip.min(axis=2) > 200)      # the white letters
+        (x1, y1), (x2, y2) = load_config()["crops"]["STALL_PARTS_CRATE"]["coords"]
+        assert y1 * 1200 <= 380 + ys.min() and 380 + ys.max() <= y2 * 1200
+        assert x1 * 1920 <= 160 + xs.min() and 160 + xs.max() <= x2 * 1920
+
+
+class TestJoinRefusedHoldsReady:
+    """ADR 196 D8: each READY into a squad that is already queueing raised
+    "Unable to join" again (2026-11-19 22:00, three in 17 s)."""
+
+    def test_the_refusal_window_and_the_hold(self, analyzer):
+        assert analyzer.join_refused_recently() is False
+        analyzer._join_refused_ts = time.time() - 5.0
+        assert analyzer.join_refused_recently() is True
+        analyzer._join_refused_ts = time.time() - (analyzer_module.JOIN_REFUSED_WAITING_S + 1)
+        assert analyzer.join_refused_recently() is False
+        assert analyzer.join_refused_recently(analyzer_module.JOIN_REFUSED_HOLD_S) is True
+
+    def test_the_hold_sits_before_the_click_and_covers_play(self):
+        """2026-11-20 02:30: the solo PLAY was refused too, and re-clicked
+        every few seconds."""
+        src = Path("wingman/analyzer.py").read_text(encoding="utf-8")
+        hold = src.index("elif self.join_refused_recently(JOIN_REFUSED_HOLD_S):")
+        branch = src[hold:src.index("\n                        elif ", hold + 10)]
+        assert "handled = True" in branch
+        assert "emit(GameEvent.LOBBY_PLAY_CLICK" not in branch
+        assert hold < src.index("self.emit(GameEvent.LOBBY_PLAY_CLICK, crop, frame)")
+        assert src.index("if crop == \"UNABLE_TO_JOIN\":") > 0
+
+    def test_a_click_clears_the_refusal_it_follows(self, analyzer):
+        """2026-11-20 02:30:16: a PLAY was bounced 0.5 s after it was
+        clicked, on the refusal of the click before."""
+        analyzer._join_refused_ts = time.time() - 4.0
+        analyzer._last_lobby_play_click_ts = 0.0
+        assert analyzer.claim_lobby_click() is True
+        assert analyzer.join_refused_recently() is False
+        src = Path("wingman/analyzer.py").read_text(encoding="utf-8")
+        click = src.index("self.emit(GameEvent.LOBBY_PLAY_CLICK, crop, frame)")
+        assert "self._join_refused_ts = 0.0" in src[click - 200:click]

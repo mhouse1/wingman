@@ -93,7 +93,9 @@ class _Tracker:
 
 _FAST = {"tick_s": 0.005, "angle_pulse_s": 0.01, "angle_max_s": 2.0,
          "angle_confirm_reads": 2, "angle_tolerance_deg": 4.0,
-         "climb_alt_m": 3000, "nose_angle_deg": -10, "lock_timeout_s": 1.0}
+         "climb_alt_m": 3000, "nose_angle_deg": -10, "lock_timeout_s": 1.0,
+         # One look at the start, as before ADR 191; its window has its own tests.
+         "target_watch_s": 0.0}
 
 
 def _make_ctrl(monkeypatch, analyzer=None, tracker=None, acs=None, **cfg):

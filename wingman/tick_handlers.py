@@ -29,7 +29,7 @@ from . import capture_budget
 from .compass import fmt_heading
 from .crop_region import get_crop
 from .config_schema import schema_default
-from .special_weapon import SpecialWeaponPresser
+from .special_weapon import AIMED_TRIGGERS, SpecialWeaponPresser, resolve_profile
 from .state import GameState, BATTLE_STATES
 from .suppressed import log_suppressed
 from .terrain_loom import fmt_tau, fmt_taus
@@ -968,6 +968,10 @@ class AmmoEventsHandler:
         self._special_pressers = {}
         self._fuel_low_streak = 0
         self._fuel_last_ts = 0.0
+        # Operator, 2026-11-16: the jet's auxiliary feature, once a life.
+        self._aux_pressed = False
+        self._aux_low_streak = 0
+        self._aux_last_seq = None
         self._zero_streak = 0
         self._battle_started_ts = 0.0
         self._ignore_until = 0.0
@@ -990,6 +994,7 @@ class AmmoEventsHandler:
         # once a round. Moves between battle states (an eject, a takeover) do not.
         in_battle = new_state in _BATTLE_STATES
         if in_battle and not self._in_battle:
+            self._reset_auxiliary_feature()
             try:
                 self._ctrl.pursuit_evade_new_round()
             except Exception as exc:
@@ -1020,6 +1025,13 @@ class AmmoEventsHandler:
         """Ignore missile/incoming events for `seconds` — called by the respawn flow."""
         self._ignore_until = time.time() + seconds
         self._missiles_empty_confirmed = False
+        self._reset_auxiliary_feature()
+
+    def _reset_auxiliary_feature(self) -> None:
+        """A new life: the auxiliary feature may go out once more."""
+        self._aux_pressed = False
+        self._aux_low_streak = 0
+        self._aux_last_seq = None
 
     @property
     def battle_started_ts(self) -> float:
@@ -1073,8 +1085,23 @@ class AmmoEventsHandler:
             self._last_incoming_alert_ts = incoming_ts
             return False
 
-        logger.info("\033[95m🚀 INCOMING MISSILE DETECTED - Deploying flares\033[0m")
         self._last_incoming_alert_ts = incoming_ts
+        held_why = ("LOCK WARNING, not INCOMING (ADR 201)" if self._lock_warning_only()
+                    else "the special weapon is lit (ADR 198)"
+                    if self._flares_held_by_special() else None)
+        if held_why:
+            # ADR 198/200: no flares. The roll, the evade and the jet's own
+            # presses still answer the alert.
+            logger.info("\033[95m🚀 INCOMING MISSILE DETECTED - flares held: "
+                        "%s\033[0m", held_why)
+            flares_done = threading.Event()
+            flares_done.set()
+            self._flare_roll(flares_done)
+            self._pursuit_evade(time.time())
+            self.tick_special_weapon(incoming_edge=True)
+            self.tick_auxiliary_feature(incoming_edge=True)
+            return True
+        logger.info("\033[95m🚀 INCOMING MISSILE DETECTED - Deploying flares\033[0m")
         if self._perf is not None:
             now = time.time()
             try:
@@ -1123,7 +1150,30 @@ class AmmoEventsHandler:
         # ADR 173 D4: a jet whose special weapon answers an incoming missile (the
         # MiG-23's flare burst) spends it here, after the flares are under way.
         self.tick_special_weapon(incoming_edge=True)
+        # Operator, 2026-11-16: the KF-21's drone into defense mode on the first
+        # incoming missile of a life, if the missile count has not already sent it.
+        self.tick_auxiliary_feature(incoming_edge=True)
         return True
+
+    def _lock_warning_only(self) -> bool:
+        """ADR 201: the alert is LOCK WARNING, not INCOMING: no flares."""
+        try:
+            return self._analyzer.incoming_is_lock_warning() is True
+        except Exception as exc:
+            log_suppressed(logger, "incoming_is_lock_warning", exc)
+            return False
+
+    def _flares_held_by_special(self) -> bool:
+        """ADR 198: on a jet with `flares_only_when_special_grey` (the KF-21), the
+        flares wait while the special weapon's icon reads READY. Greyed out, or no
+        fresh read of the icon, and the flares go out as on any jet."""
+        try:
+            if not self._ctrl.flares_wait_for_special_grey():
+                return False
+        except Exception as exc:
+            log_suppressed(logger, "flares_wait_for_special_grey", exc)
+            return False
+        return self._special_weapon_ready() is True
 
     def _flare_roll(self, flares_done: threading.Event) -> None:
         """FR-011 / ADR 164: roll right through the burst and a little past it, on
@@ -1254,31 +1304,22 @@ class AmmoEventsHandler:
             self._ctrl.eject_and_dive(on_complete=_on_complete)
 
     def _special_weapon_profile(self) -> "dict | None":
-        """The jet's own `special_weapon` profile; failing that, the ability its glyph
-        names, on any jet (operator, 2026-11-15): refuel at `refuel_fuel_at` fuel or
-        lower (ADR 173 D2a), gun cool-down when the gun heat bar reaches 80% or overheats (D2b)."""
+        """The jet's own `special_weapon` profile; failing that, the row of the
+        ability its glyph names in `special_weapon.abilities`, on any jet (ADR 186;
+        refuel and gun cool-down were ADR 173 D2a/D2b)."""
         try:
-            profile = self._ctrl.special_weapon_profile()
+            jet = self._ctrl.special_weapon_profile()
         except Exception as exc:
             log_suppressed(logger, "special_weapon_profile", exc)
-            profile = None
-        if profile:
-            return profile
-        try:
-            glyph = self._analyzer.special_weapon_glyph()
-        except Exception as exc:
-            log_suppressed(logger, "special_weapon_glyph", exc)
-            return None
-        if glyph == "refuel":
-            return {"ability": "refuel", "trigger": "low_fuel",
-                    "fuel_at": self._special_weapon_cfg.get(
-                        "refuel_fuel_at", schema_default("special_weapon.refuel_fuel_at"))}
-        if glyph == "gun_cooldown":
-            # Operator, 2026-11-15: "for jets with machine gun cool down special it
-            # should auto activate when machine gun overheats", then "we should
-            # activate when the overheat indicator reaches 80%" (ADR 173 D2b).
-            return {"ability": "gun_cooldown", "trigger": "gun_heat"}
-        return None
+            jet = None
+        glyph = None
+        if not jet:
+            try:
+                glyph = self._analyzer.special_weapon_glyph()
+            except Exception as exc:
+                log_suppressed(logger, "special_weapon_glyph", exc)
+                return None
+        return resolve_profile(jet, glyph, self._special_weapon_cfg)
 
     def _low_fuel(self, at: float) -> bool:
         """True once two fuel readings in a row are at or under `at`. Counted per
@@ -1296,6 +1337,18 @@ class AmmoEventsHandler:
             self._fuel_last_ts = ts
             self._fuel_low_streak = self._fuel_low_streak + 1 if pct <= at else 0
         return self._fuel_low_streak >= 2
+
+    def _special_weapon_charged(self, at) -> "bool | None":
+        """ADR 199: True while the ring has `at` (default 1) or more lit sectors,
+        False with fewer, None with no fresh read."""
+        try:
+            lit = self._analyzer.special_weapon_charge()
+        except Exception as exc:
+            log_suppressed(logger, "special_weapon_charge", exc)
+            return None
+        if lit is None:
+            return None
+        return lit >= (1 if at is None else int(at))
 
     def _special_weapon_ready(self) -> "bool | None":
         try:
@@ -1322,6 +1375,9 @@ class AmmoEventsHandler:
         if time.time() < self._ignore_until:
             return False
         trigger = sw.get("trigger")
+        if trigger in AIMED_TRIGGERS:
+            # ADR 186: aimed on the pursuit's own pictures (Controller), not here.
+            return False
         ability = sw.get("ability") or "special_weapon"
         key = (ability, trigger)
         presser = self._special_pressers.get(key)
@@ -1347,11 +1403,17 @@ class AmmoEventsHandler:
                 fired = False
         elif trigger == "low_fuel":
             at = sw.get("fuel_at")
-            at = schema_default("special_weapon.refuel_fuel_at") if at is None else at
+            if at is None:
+                at = self._special_weapon_cfg.get(
+                    "refuel_fuel_at", schema_default("special_weapon.refuel_fuel_at"))
             fired = self._low_fuel(float(at))
         else:
             fired = True
-        ready = self._special_weapon_ready()
+        if trigger == "charged":
+            # ADR 199: pressed at any charge level, not only a full ring.
+            ready = self._special_weapon_charged(sw.get("charge_at"))
+        else:
+            ready = self._special_weapon_ready()
         skipped = presser.skipped_not_ready
         press = presser.tick(time.time(), ready, fired)
         if presser.skipped_not_ready != skipped:
@@ -1361,8 +1423,9 @@ class AmmoEventsHandler:
                 self._stats.on_event("special_weapon_skipped", time.time())
         if not press:
             return False
-        logger.info("\033[93m✨ Special weapon %s: trigger %s, icon READY\033[0m",
-                    ability, trigger)
+        logger.info("\033[93m✨ Special weapon %s: trigger %s, icon %s\033[0m",
+                    ability, trigger,
+                    "charged" if trigger == "charged" else "READY")
         self._ctrl.activate_special_weapon()
         try:
             self._analyzer.note_special_weapon_press()
@@ -1377,9 +1440,58 @@ class AmmoEventsHandler:
             self._last_flare_reload_ts = now
         return True
 
+    def tick_auxiliary_feature(self, incoming_edge: bool = False) -> bool:
+        """Press the jet's auxiliary feature (`w`) once a life (operator, 2026-11-16:
+        the KF-21's drone into defense mode), on whichever comes first:
+
+        - two missile counts in a row read the profile's `missiles_at` or fewer. Two
+          reads, not one, because a single misread must not spend it; a read
+          counts once, by its sequence number;
+        - a new incoming missile alert (`incoming_edge`), when the profile sets
+          `on_incoming`.
+
+        In battle or in a pursuit, after the post-respawn grace. Once a life, not on
+        every trigger: a resupply brings the count back up, and a second press
+        could switch the feature off again. Returns True when the key went out."""
+        if self._aux_pressed:
+            return False
+        try:
+            profile = self._ctrl.auxiliary_feature_profile()
+        except Exception as exc:
+            log_suppressed(logger, "auxiliary_feature_profile", exc)
+            return False
+        if not profile or profile.get("trigger") != "low_missiles":
+            return False
+        if self._analyzer.game_state not in (GameState.GAME_BATTLE,
+                                             GameState.GAME_BATTLE_EJECT):
+            return False
+        if time.time() < self._ignore_until:
+            self._aux_low_streak = 0
+            return False
+        at = int(profile.get("missiles_at", 0))
+        if incoming_edge:
+            if not profile.get("on_incoming"):
+                return False
+            why = "incoming missile"
+        else:
+            missiles = self._analyzer.get_ammo_missiles()
+            seq = self._analyzer.get_ammo_missiles_read_seq()
+            if missiles is None or seq is None or seq == self._aux_last_seq:
+                return False
+            self._aux_last_seq = seq
+            self._aux_low_streak = self._aux_low_streak + 1 if missiles <= at else 0
+            if self._aux_low_streak < 2:
+                return False
+            why = "missiles=%d at or under %d" % (missiles, at)
+        self._aux_pressed = True
+        logger.info("\033[93m✨ Auxiliary feature: %s, pressing it once this life\033[0m", why)
+        self._ctrl.activate_auxiliary_feature()
+        return True
+
     def tick_events(self) -> None:
         """Fire the ammo event handlers whose analyzer events are set."""
         self.tick_special_weapon()
+        self.tick_auxiliary_feature()
         if self._analyzer.low_flares_event.is_set():
             self.handle_low_flares()
         if self._analyzer.no_missiles_event.is_set():
@@ -3207,6 +3319,17 @@ class WaitingFallbackHandler:
             note_matchmaking(frame)
 
         elapsed_waiting = time.time() - self._waiting_since
+        # ADR 196 D8: "Matchmaking in progress. Unable to join." refused the
+        # READY click, so nothing is queueing for us. Its dimmed lobby is what
+        # QUEUE_FALLBACK took for matchmaking on 2026-11-19 22:00:47, and
+        # GAME_STARTING then sat 150 s behind the dialog (no popup scan there).
+        if self._analyzer.join_refused_recently():
+            logger.info("GAME_WAITING: the READY was refused (Unable to join) — "
+                        "back to GAME_LOBBY, not matchmaking (ADR 196 D8)")
+            self._analyzer.trigger_event("waiting_timeout")
+            self._waiting_since = 0.0
+            self._reset_fallback()
+            return True
         if elapsed_waiting > self._timeout_s:
             logger.warning(
                 "GAME_WAITING timeout after %.0fs — CANCEL never detected; returning to GAME_LOBBY",

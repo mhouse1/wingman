@@ -122,6 +122,81 @@
         "description": "A JSON object of tags to match; {} matches every round."
       },
       {
+        "name": "account",
+        "label": "Account",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "wingman-pg"
+        },
+        "query": "SELECT coalesce(tags->>'account', 'no account') FROM rounds\nGROUP BY 1\nORDER BY 1",
+        "definition": "SELECT coalesce(tags->>'account', 'no account') FROM rounds\nGROUP BY 1\nORDER BY 1",
+        "refresh": 1,
+        "sort": 0,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "options": [],
+        "description": "The accounts the Account and jet chart shows. Only that chart reads it."
+      },
+      {
+        "name": "jet",
+        "label": "Jet",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "wingman-pg"
+        },
+        "query": "SELECT coalesce(jet, 'not recorded')\nFROM rounds LEFT JOIN jet_names ON spelling = tags->>'jet'\nWHERE coalesce(tags->>'account', 'no account') IN (${account:sqlstring})\nGROUP BY 1\nORDER BY count(*) DESC, 1",
+        "definition": "SELECT coalesce(jet, 'not recorded')\nFROM rounds LEFT JOIN jet_names ON spelling = tags->>'jet'\nWHERE coalesce(tags->>'account', 'no account') IN (${account:sqlstring})\nGROUP BY 1\nORDER BY count(*) DESC, 1",
+        "refresh": 1,
+        "sort": 0,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "options": [],
+        "description": "The jets the Account and jet chart shows, most-flown first, from the accounts picked. Only that chart reads it."
+      },
+      {
+        "name": "version",
+        "label": "Version",
+        "type": "query",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "wingman-pg"
+        },
+        "query": "SELECT wingman_version FROM run_timings\nWHERE wingman_version IS NOT NULL\nGROUP BY wingman_version\nORDER BY CASE WHEN wingman_version ~ '^[0-9]+(\\.[0-9]+)*$'\n     THEN string_to_array(wingman_version, '.')::int[] END DESC NULLS LAST",
+        "definition": "SELECT wingman_version FROM run_timings\nWHERE wingman_version IS NOT NULL\nGROUP BY wingman_version\nORDER BY CASE WHEN wingman_version ~ '^[0-9]+(\\.[0-9]+)*$'\n     THEN string_to_array(wingman_version, '.')::int[] END DESC NULLS LAST",
+        "refresh": 1,
+        "sort": 0,
+        "multi": true,
+        "includeAll": true,
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        },
+        "options": [],
+        "description": "The wingman versions the OCR and reaction timing panels show."
+      },
+      {
         "name": "tz",
         "type": "constant",
         "query": "America/New_York",
@@ -641,7 +716,7 @@
         "type": "grafana-postgresql-datasource",
         "uid": "wingman-pg"
       },
-      "description": "Mobius Squadron's place on the game's squadron leaderboard at each reading. Wingman reads it in the lobby between rounds (ADR 166). A lower number is a better place. It is the squadron's own figure, so it does not depend on the account that read it, and the tags box does not apply.",
+      "description": "Mobius Squadron's place on the game's squadron leaderboard at each reading. Wingman reads it in the lobby between rounds (ADR 166). A lower number is a better place. It is the squadron's own figure, so it does not depend on the account that read it, and the tags box does not apply. The axis runs from the worst place at the foot to the best at the top, so the line climbs as the squadron climbs and lines up with the trophies beside it. Grafana has no reversed axis, so the chart plots the rank negated: the axis labels carry a minus sign, and the tooltip shows the real place.",
       "gridPos": {
         "x": 0,
         "y": 22,
@@ -668,7 +743,8 @@
             "lineWidth": 2,
             "pointSize": 5,
             "showPoints": "always",
-            "spanNulls": true
+            "spanNulls": true,
+            "transform": "negative-Y"
           },
           "color": {
             "mode": "fixed",
@@ -730,6 +806,191 @@
       "options": {}
     },
     {
+      "id": 19,
+      "title": "Account and jet score per round",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "wingman-pg"
+      },
+      "description": "Wingman's own read rounds for the accounts and jets picked in the Account and Jet boxes at the top, to follow one jet on one account over time. A dot is a round at the time it ended, in its account's colour; hover it for the account and jet. The legend lists only the line: with many accounts and jets it would crowd out the chart. The blue line is the mean of the last $window rounds of the whole selection, so pick one account and one jet to see that jet's own trend. Rounds with a manual takeover are left out. The tags box applies too. A jet with a few dozen rounds moves a lot on each new one: score per round has a standard deviation near 200.",
+      "gridPos": {
+        "x": 0,
+        "y": 31,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wingman-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT ended_at AS time,\n       coalesce(tags->>'account', 'no account') || ', ' || coalesce(jet, 'jet not recorded') AS metric,\n       score AS value\nFROM rounds LEFT JOIN jet_names ON spelling = tags->>'jet'\nWHERE score IS NOT NULL AND manual_takeovers = 0 AND $__timeFilter(ended_at)\n  AND coalesce(tags->>'account', 'no account') IN (${account:sqlstring})\n  AND coalesce(jet, 'not recorded') IN (${jet:sqlstring})\n  AND tags @> ${tags:sqlstring}::jsonb\nORDER BY 1"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wingman-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT ended_at AS time,\n       avg(score) OVER (ORDER BY ended_at ROWS BETWEEN ${window:raw} - 1 PRECEDING AND CURRENT ROW) AS \"selection, moving average\"\nFROM rounds LEFT JOIN jet_names ON spelling = tags->>'jet'\nWHERE score IS NOT NULL AND manual_takeovers = 0 AND $__timeFilter(ended_at)\n  AND coalesce(tags->>'account', 'no account') IN (${account:sqlstring})\n  AND coalesce(jet, 'not recorded') IN (${jet:sqlstring})\n  AND tags @> ${tags:sqlstring}::jsonb\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "points",
+            "pointSize": 5,
+            "showPoints": "always"
+          },
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "A"
+            },
+            "properties": [
+              {
+                "id": "custom.hideFrom",
+                "value": {
+                  "legend": true,
+                  "tooltip": false,
+                  "viz": false
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/^mobius1(, |$)/"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/^mobius0(, |$)/"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/^mobius2(, |$)/"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/^mobius3(, |$)/"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/^no account(, |$)/"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8e8e8e"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "selection, moving average"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "line"
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 2
+              },
+              {
+                "id": "custom.showPoints",
+                "value": "never"
+              },
+              {
+                "id": "custom.spanNulls",
+                "value": true
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    },
+    {
       "id": 10,
       "title": "Wingman by jet",
       "type": "table",
@@ -740,7 +1001,7 @@
       "description": "Wingman's own rounds by the jet on the lobby as PLAY was clicked (ADR 167), the best mean score first. Kills, deaths and assists are per round. \u00b1 95% is the margin on the mean: trust a gap between two jets only when their ranges do not overlap. A jet with under 10 read rounds comes after the rest, because so few prove little. A jet can fly on several accounts; narrow to one with the tags box. Rounds flown before 2026-10-31 have no jet recorded. OCR's spellings of one jet, such as F-106 and F106 DELTA DART, count as one jet under its most common spelling (jet_names in grafana/schema.sql).",
       "gridPos": {
         "x": 0,
-        "y": 31,
+        "y": 40,
         "w": 24,
         "h": 8
       },
@@ -804,7 +1065,7 @@
       "description": "The chosen aggregate over every read round that ended in each period (America/New_York). An unread round adds nothing; Rounds per period counts it.",
       "gridPos": {
         "x": 0,
-        "y": 39,
+        "y": 48,
         "w": 12,
         "h": 9
       },
@@ -845,7 +1106,7 @@
       "description": "Rounds read and not read in each period; together, the rounds flown.",
       "gridPos": {
         "x": 12,
-        "y": 39,
+        "y": 48,
         "w": 12,
         "h": 9
       },
@@ -890,7 +1151,7 @@
       "description": "One row per $granularity: rounds flown and read, and the sum, mean, median, minimum and maximum of $metric over the read rounds.",
       "gridPos": {
         "x": 0,
-        "y": 48,
+        "y": 57,
         "w": 16,
         "h": 10
       },
@@ -924,7 +1185,7 @@
       "description": "Each tag key and value among the rounds in range, with its count of rounds. Filter with the tags box, for example {\"account\": \"mobius0\"}.",
       "gridPos": {
         "x": 16,
-        "y": 48,
+        "y": 57,
         "w": 8,
         "h": 10
       },
@@ -958,7 +1219,7 @@
       "description": "Wingman's resident memory, the game's (summed over its processes, so read it as a trend, not a footprint), and glibc's split of wingman's heap: malloc live is memory wingman is using, malloc retained is memory it freed that the allocator kept. Live climbing means something holds objects; retained climbing means fragmentation. From the RESOURCE line wingman logs every 5 minutes (wingman/resource_monitor.py, Performance 008), read from the session logs by the ingest. The figures are the machine's, not an account's, so the tags box does not apply.",
       "gridPos": {
         "x": 0,
-        "y": 58,
+        "y": 67,
         "w": 24,
         "h": 9
       },
@@ -1084,7 +1345,7 @@
       "description": "Wingman's live Python threads and open file descriptors. Threads climbing means daemon threads are not reaped; open files climbing means leaked X Display connections. From the RESOURCE line wingman logs every 5 minutes (wingman/resource_monitor.py, Performance 008), read from the session logs by the ingest. The figures are the machine's, not an account's, so the tags box does not apply.",
       "gridPos": {
         "x": 0,
-        "y": 67,
+        "y": 76,
         "w": 12,
         "h": 8
       },
@@ -1171,7 +1432,7 @@
       "description": "The median and 95th percentile of wingman's OCR reads in the 5 minutes before each sample. Rising with memory is how the leak degraded perception (Performance 008); the tick budget is 1.5 s. From the RESOURCE line wingman logs every 5 minutes (wingman/resource_monitor.py, Performance 008), read from the session logs by the ingest. The figures are the machine's, not an account's, so the tags box does not apply.",
       "gridPos": {
         "x": 12,
-        "y": 67,
+        "y": 76,
         "w": 12,
         "h": 8
       },
@@ -1257,7 +1518,7 @@
       "description": "One row per session with at least two samples (the summary needs two; a session wingman restarted within 5 minutes has one), any of them in the time range, newest first, figures in MB. Wingman and Game are each process's memory at the last sample; both start near 680 and 500 MB. The rates match the RESOURCE SUMMARY wingman logs at the end of a session: from the first sample after the 10-minute warm-up (the OCR readers load in the first 5 minutes) to the last, so they are blank for a session under 10 minutes. Orange is above the 50 MB/h the summary calls growth, red above its 1,000 MB/h severity bar. Trim released is what malloc_trim gave back when the session went to STANDBY. The verdict is the summary's own; a session that was killed has none. From the RESOURCE line wingman logs every 5 minutes (wingman/resource_monitor.py, Performance 008), read from the session logs by the ingest. The figures are the machine's, not an account's, so the tags box does not apply.",
       "gridPos": {
         "x": 0,
-        "y": 75,
+        "y": 84,
         "w": 24,
         "h": 10
       },
@@ -1334,6 +1595,200 @@
               {
                 "id": "decimals",
                 "value": 1
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 16,
+      "title": "OCR time per crop per session",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "wingman-pg"
+      },
+      "description": "Each session's mean OCR read time for each crop, one point per session at its start. The 1.5 s tick bounds them all; incoming is the one a missile warning waits on. From PerformanceTracker's run file of each session (docs/performance/current and release, run_*.json), loaded by the ingest; the figures the runtime trend HTML charted (tests/runtime_performance_tracking.py). The Version box narrows them to the versions picked. The figures are the machine's, not an account's, so the tags box does not apply.",
+      "gridPos": {
+        "x": 0,
+        "y": 94,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wingman-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT started_at AS time, figure AS metric, mean AS value\nFROM run_timings\nWHERE $__timeFilter(started_at)\n  AND wingman_version IN (${version:sqlstring})\n  AND figure <> 'reaction'\nORDER BY 1, 2"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "pointSize": 4,
+            "showPoints": "always",
+            "spanNulls": true
+          },
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 17,
+      "title": "Missile warning to flares per session",
+      "type": "timeseries",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "wingman-pg"
+      },
+      "description": "Each session's time from the incoming-missile warning on screen to the flare press: its mean and 95th percentile, one point per session at its start. From PerformanceTracker's run file of each session (docs/performance/current and release, run_*.json), loaded by the ingest; the figures the runtime trend HTML charted (tests/runtime_performance_tracking.py). The Version box narrows them to the versions picked. The figures are the machine's, not an account's, so the tags box does not apply.",
+      "gridPos": {
+        "x": 12,
+        "y": 94,
+        "w": 12,
+        "h": 9
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wingman-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT started_at AS time, mean AS \"mean\", p95 AS \"p95\"\nFROM run_timings\nWHERE $__timeFilter(started_at)\n  AND wingman_version IN (${version:sqlstring})\n  AND figure = 'reaction'\nORDER BY 1"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "pointSize": 4,
+            "showPoints": "always",
+            "spanNulls": true
+          },
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "mean"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "p95"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 18,
+      "title": "OCR and reaction time by version",
+      "type": "table",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "wingman-pg"
+      },
+      "description": "One row per wingman version with a session in the time range, newest first: the runtime trend HTML's figures. Each crop's time and warning to flares are means over every read or warning of the version's sessions, weighted by count, as the HTML weighted them. Warning to flares p95 is the median of the sessions' own 95th percentiles, since percentiles do not add up. Widen the time range to bring older versions in. From PerformanceTracker's run file of each session (docs/performance/current and release, run_*.json), loaded by the ingest; the figures the runtime trend HTML charted (tests/runtime_performance_tracking.py). The Version box narrows them to the versions picked. The figures are the machine's, not an account's, so the tags box does not apply.",
+      "gridPos": {
+        "x": 0,
+        "y": 103,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "wingman-pg"
+          },
+          "editorMode": "code",
+          "rawQuery": true,
+          "format": "table",
+          "rawSql": "SELECT wingman_version AS \"Version\",\n       count(DISTINCT run_id) AS \"Sessions\",\n       sum(n) FILTER (WHERE figure = 'incoming') AS \"Incoming reads\",\n       round((sum(mean * n) FILTER (WHERE figure = 'incoming')\n              / nullif(sum(n) FILTER (WHERE figure = 'incoming'), 0))::numeric, 3) AS \"incoming\",\n       round((sum(mean * n) FILTER (WHERE figure = 'respawn')\n              / nullif(sum(n) FILTER (WHERE figure = 'respawn'), 0))::numeric, 3) AS \"respawn\",\n       round((sum(mean * n) FILTER (WHERE figure = 'health')\n              / nullif(sum(n) FILTER (WHERE figure = 'health'), 0))::numeric, 3) AS \"health\",\n       round((sum(mean * n) FILTER (WHERE figure = 'ammo_flares')\n              / nullif(sum(n) FILTER (WHERE figure = 'ammo_flares'), 0))::numeric, 3) AS \"ammo_flares\",\n       round((sum(mean * n) FILTER (WHERE figure = 'ammo_missiles')\n              / nullif(sum(n) FILTER (WHERE figure = 'ammo_missiles'), 0))::numeric, 3) AS \"ammo_missiles\",\n       round((sum(mean * n) FILTER (WHERE figure = 'telemetry')\n              / nullif(sum(n) FILTER (WHERE figure = 'telemetry'), 0))::numeric, 3) AS \"telemetry\",\n       sum(n) FILTER (WHERE figure = 'reaction') AS \"Warnings\",\n       round((sum(mean * n) FILTER (WHERE figure = 'reaction')\n              / nullif(sum(n) FILTER (WHERE figure = 'reaction'), 0))::numeric, 3) AS \"warning to flares\",\n       round((percentile_cont(0.5) WITHIN GROUP (ORDER BY p95)\n              FILTER (WHERE figure = 'reaction'))::numeric, 3) AS \"warning to flares p95\"\nFROM run_timings\nWHERE $__timeFilter(started_at)\n  AND wingman_version IN (${version:sqlstring})\nGROUP BY wingman_version\nORDER BY CASE WHEN wingman_version ~ '^[0-9]+(\\.[0-9]+)*$'\n     THEN string_to_array(wingman_version, '.')::int[] END DESC NULLS LAST"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "/^(incoming|respawn|health|ammo_flares|ammo_missiles|telemetry|warning to flares.*)$/"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 3
               }
             ]
           }

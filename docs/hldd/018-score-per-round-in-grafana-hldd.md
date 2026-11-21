@@ -386,7 +386,9 @@ Wingman flies in Mobius Squadron, tag `[ISAF]` ([Job Aid 013](../job-aids/013-jo
   has no stats file. Their tags are `squadron` (`ISAF`), `account` and `source`, as for rounds.
 - **On the dashboard.** Squadron rank per reading and Squadron trophies per reading plot each
   reading under Score per round, and Squadron now shows the latest; a lower number is a better
-  rank. A rank does not add up, so the SUM rule for the score does not apply. The ranking's figure
+  rank. The rank chart's axis runs from worst at the foot to best at the top, so it climbs with
+  the trophies; its labels carry a minus sign ([ADR 187](../adr/187-the-rank-chart-flips-with-negative-y-and-no-plugin.md)).
+  A rank does not add up, so the SUM rule for the score does not apply. The ranking's figure
   for a period is its last reading, the rank at the end of the period, with the best and worst
   readings beside it (open question 7).
 
@@ -519,6 +521,8 @@ operator's, which wingman's logs also use. Its default range is the last 30 days
 | `metric` | score, kills, deaths, assists | score |
 | `window` | 10, 20, 50 read rounds, for the moving average | 20 |
 | `tags` | A JSON object of tags to match, in a text box (see Tags) | `{}`, which matches every round |
+| `account` | The accounts on record, several or All; read only by Account and jet score per round | All |
+| `jet` | The jets the picked accounts have flown, most-flown first, several or All; read only by Account and jet score per round | All |
 | `tz` | America/New_York (constant, hidden) | |
 
 `aggregate` is a custom variable that pairs each name with its SQL over a column `x`. For example,
@@ -541,6 +545,7 @@ reading in each period instead (see Squadron ranking).
 | Periods | Table | One row per period: rounds flown, rounds read, sum, mean, median, minimum and maximum |
 | Tags | Table | Each tag key and value among the rounds in range, with its count of rounds |
 | Squadron rank per reading and Squadron trophies per reading (Phase 3, operator 2026-10-31) | Time series | One line with a dot at each reading, under Score per round. The figures are the squadron's, so the account does not matter and the tags box does not apply |
+| Account and jet score per round (operator 2026-11-17) | Time series | Wingman's own read rounds for the picked accounts and jets, one dot per round in its account's colour, and the mean of the last `window` rounds of the selection (blue line). Pick one account and one jet to follow that jet's trend. Under the squadron charts; the dots stay out of the legend |
 | Wingman by jet (operator 2026-10-31, [ADR 167](../adr/167-read-each-rounds-jet-from-the-lobby.md)) | Table | Wingman's own rounds per jet, the best mean score first, with the margin on each mean. A jet with under 10 read rounds ranks after the rest, and rounds with no jet come last as `not recorded` |
 | Squadron now (Phase 3, operator 2026-10-31) | Stat | The latest reading in the time range: the squadron's rank and trophies, and how long ago it was read |
 

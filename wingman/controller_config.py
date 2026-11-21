@@ -21,6 +21,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
+from .config_schema import schema_default
+
 
 @dataclass(frozen=True)
 class ControllerConfig:
@@ -38,6 +40,9 @@ class ControllerConfig:
 
     # --- Match-entry timing (mission: block) ---
     starting_max_wait_s: float = 90.0
+    # ADR 189: "hud" or "good_luck" (mission.starting_signal).
+    starting_signal: str = "hud"
+    starting_health_probe_interval_s: float = 0.4
     good_luck_wait_s: float = 13.0
     good_luck_bypass_on_alive: bool = True
     capture_stale_inject_s: float = 10.0
@@ -83,6 +88,9 @@ class ControllerConfig:
     # it is a sibling strategy at the same trigger, not a variation of the
     # dive itself.
     pursuit_mode: dict = field(default_factory=dict)
+    # ADR 186: the special_weapon block, for the abilities aimed on the pursuit's
+    # pictures (the nuke's lead diamond). The battle tick reads its own copy.
+    special_weapon: dict = field(default_factory=dict)
     # HLDD 005 Sustained-Hold Actuation (2026-09-23): Controller only reads
     # tracking.sustained_hold_enabled from this — every other tracking.* tuning
     # value (deadband, kp, ...) still flows in per-call from whichever caller
@@ -110,6 +118,10 @@ class ControllerConfig:
         base = cls(
             weapon_loop_interval=float(mission.get("weapon_loop_interval", 0.5)),
             starting_max_wait_s=float(mission.get("starting_max_wait_s", 90.0)),
+            starting_signal=str(mission.get(
+                "starting_signal", schema_default("mission.starting_signal"))),
+            starting_health_probe_interval_s=float(
+                mission.get("starting_health_probe_interval_s", 0.4)),
             good_luck_wait_s=float(mission.get("good_luck_wait_s", 13.0)),
             good_luck_bypass_on_alive=bool(mission.get("good_luck_bypass_on_alive", True)),
             capture_stale_inject_s=float(mission.get("capture_stale_inject_s", 10.0)),
@@ -128,6 +140,7 @@ class ControllerConfig:
             jet_profiles=(cfg.get("jet_profile", {}) or {}).get("profiles", {}) or {},
             padlock_center_indicator=cfg.get("padlock_center_indicator", {}) or {},
             pursuit_mode=cfg.get("pursuit_mode", {}) or {},
+            special_weapon=cfg.get("special_weapon", {}) or {},
             tracking=cfg.get("tracking", {}) or {},
             clear_path=cfg.get("clear_path", {}) or {},
             approach_brake=cfg.get("approach_brake", {}) or {},

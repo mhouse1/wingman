@@ -18,10 +18,17 @@ NOSE_UP_KEY = 'i'          # FLIGHT_CONTROL_KEY
 NOSE_DOWN_KEY = 'k'        # FLIGHT_CONTROL_KEY
 ROLL_LEFT_KEY = 'j'        # FLIGHT_CONTROL_KEY barrel roll
 ROLL_RIGHT_KEY = 'l'       # FLIGHT_CONTROL_KEY barrel roll
-YAW_LEFT = ';'             # yaw axis - left rudder (ADR 070)
+# The game's roll. Its binding is named Flight/yaw, and ADR 070 took it for the
+# left rudder, but in the Cursor control scheme `;` rolls the aircraft about its
+# own axis while j/l bank it into a turn (operator, 2026-11-16; ADR 185).
+BARREL_ROLL_KEY = ';'
+YAW_LEFT = BARREL_ROLL_KEY  # ADR 070's name for the same key
 AFTERBURNER_KEY = 'e'
 AIRBRAKE_KEY = 'd'
-WINGSWEEP_KEY = 'w'
+# The jet's auxiliary feature (was the wing sweep): on the KF-21 it sends the
+# drone into defense mode (operator, 2026-11-16). Pressed per jet profile,
+# `auxiliary_feature` in config.yaml's jet_profile.
+AUXILIARY_FEATURE_KEY = 'w'
 
 # --- Weapons and countermeasures -------------------------------------------
 DEPLOY_FLARES_KEY = 'space'
