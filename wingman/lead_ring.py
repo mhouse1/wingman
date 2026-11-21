@@ -243,6 +243,11 @@ class LeadRingWatch:
         """The ring found on the picture of time `ts`, confirmed or not."""
         return self._last_ring if ts == self._last_ts else None
 
+    @property
+    def seen_dots(self) -> int:
+        """The dots on the line to the marker of the newest picture's ring."""
+        return self._last_dots
+
     def aim_ring(self, ts: float, memory_s: float, min_dots: int) -> "LeadRing | None":
         """The ring to steer at for the picture of time `ts`: the newest
         confirmed one, if it was confirmed within `memory_s` and at least

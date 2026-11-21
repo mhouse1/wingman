@@ -1039,6 +1039,15 @@ class Controller:
         # displayed it should activate"; fire_while_ring_shows turns that on.
         self._ring_shown_px: "float | None" = None
         self._gun_fire_while_ring = bool(_gl_get("fire_while_ring_shows"))
+        # Operator, 2026-11-21: "as long as the circle is on screen it should
+        # activate gun". A gun firing on the ring keeps firing until no ring of
+        # the target has been seen for fire_hold_s, across the detector's misses
+        # (13:26:26.75 to 27.16: three missed pictures, ring on screen).
+        self._ring_fire_hold_s = float(_gl_get("fire_hold_s"))
+        # Picture time of the newest sighting of the target's ring (confirmed,
+        # or seen with ring_min_dots dots), and of the picture in hand.
+        self._ring_seen_ts: "float | None" = None
+        self._ring_pic_ts: "float | None" = None
         # Phase 3's measure, by arm: new pictures under 1.2 km with a tracked
         # target, and of them those with a confirmed ring within fire_px.
         self._ring_on_tally: "dict[str, list[int]]" = {}
@@ -3304,6 +3313,13 @@ class Controller:
             limit = self._pursuit_gun_centre_err * factor
             centred = (bool(visible) and err is not None and err_y is not None
                        and abs(err) <= limit and abs(err_y) <= limit)
+        if (not centred and self._gun_held_since is not None
+                and self._gun_fire_while_ring and self._ring_fire_hold_s > 0
+                and self._ring_seen_ts is not None and self._ring_pic_ts is not None
+                and self._ring_pic_ts - self._ring_seen_ts <= self._ring_fire_hold_s):
+            # Operator, 2026-11-21: the ring is still on screen; the detector
+            # missed it on this picture.
+            centred = True
         # Operator, 2026-11-13: only under gun_max_range_km, read off the
         # tracked nameplate. No fresh reading of this nameplate is out of range.
         in_range, rng = True, ""
@@ -3457,6 +3473,7 @@ class Controller:
         if self._lead_ring is None:
             self._ring_aim_px = None
             return None
+        self._ring_pic_ts = picture_ts
         aim = None
         try:
             # Rev 2: only where the game draws the ring. Past it, the shape
@@ -3466,6 +3483,12 @@ class Controller:
                 frame_shape = frame.shape
                 ring = self._lead_ring.aim_ring(picture_ts, self._ring_memory_s,
                                                 self._ring_min_dots)
+                if (self._lead_ring.seen_at(picture_ts) is not None
+                        and self._lead_ring.seen_dots >= self._ring_min_dots):
+                    self._ring_seen_ts = picture_ts
+                elif ring is not None and self._lead_ring.latest_ts is not None:
+                    self._ring_seen_ts = max(self._ring_seen_ts or 0.0,
+                                             self._lead_ring.latest_ts)
                 if ring is not None:
                     h, w = frame_shape[:2]
                     cx, cy = crosshair(frame_shape, self._lead_ring.crosshair_pct)

@@ -711,3 +711,33 @@ def test_the_ring_holds_the_gun_while_a_resupply_run_has_the_steering(monkeypatc
     ctrl._pursuit_gun_tick(False, None, None)
     assert keys[-1] == ("up", FIRE_MACHINE_GUN)
     ctrl._target_range.stop()
+
+
+def test_a_gun_on_the_ring_holds_through_missed_pictures(monkeypatch):
+    """Operator, 2026-11-21 13:26:27: "as long as the circle is on screen it
+    should activate gun". The detector missed the ring for 0.83 s and the gun
+    let go after 1.5 s. With fire_hold_s it holds until the ring is gone that
+    long, then the centre rule lets go."""
+    ctrl, keys, frame = _ring_ctrl(monkeypatch, "ring")
+    ctrl._gun_fire_while_ring = True
+    ctrl._ring_fire_hold_s = 1.0
+    ctrl._ring_aim(frame, True, 1.1)
+    ctrl._pursuit_gun_tick(True, 0.3, 0.3)
+    assert keys == [("down", FIRE_MACHINE_GUN)]
+    blank = frame * 0
+    ctrl._gun_lead_shadow(blank, {"visible": True, "centroid_x": 960,
+                                  "centroid_y": 600}, 1.1 + 0.8)
+    ctrl._ring_aim(blank, True, 1.1 + 0.8)         # past ring_memory_s, ring missed
+    ctrl._pursuit_gun_tick(True, 0.3, 0.3)
+    assert keys == [("down", FIRE_MACHINE_GUN)]
+    ctrl._ring_aim(blank, True, 1.1 + 1.2)         # gone longer than fire_hold_s
+    ctrl._pursuit_gun_tick(True, 0.3, 0.3)
+    assert keys[-1] == ("up", FIRE_MACHINE_GUN)
+    ctrl._target_range.stop()
+
+
+def test_the_shared_config_holds_the_gun_a_second_past_the_ring():
+    from wingman.config_schema import schema_default
+    assert schema_default("pursuit_mode.gun_lead.fire_hold_s") == 0.0
+    cfg = yaml.safe_load((Path(__file__).parents[1] / "wingman" / "config.yaml").read_text())
+    assert cfg["pursuit_mode"]["gun_lead"]["fire_hold_s"] == 1.0

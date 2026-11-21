@@ -1100,6 +1100,9 @@ SCHEMA = Section(
                 # ADR 182: the gun holds while a ring of the tracked target is in
                 # use, wherever it is. false = ADR 178 D3 (within fire_px).
                 "fire_while_ring_shows": Leaf(types=(bool,), default=False),
+                # A gun firing on the ring keeps firing this long after the
+                # target's ring was last seen (detector misses). 0 = off.
+                "fire_hold_s": Leaf(types=NUMBER, minimum=0, default=0.0),
             }),
             # ADR 181: the chase stays on its target through missile and
             # terrain warnings.

@@ -2169,6 +2169,12 @@ pursuit_mode:
     # gun holds wherever the ring is, in every round; fire_px then only counts
     # the ring-on-crosshair measure. false restores ADR 178 D3 (fire within fire_px).
     fire_while_ring_shows: true
+    # Operator, 2026-11-21: "as long as the circle is on screen it should
+    # activate gun". The detector missed the ring on three pictures in a row
+    # (13:26:26.75 to 27.16, ring plainly on screen) and the gun let go at
+    # 27.455 after 1.5 s. A gun firing on the ring keeps firing until the ring
+    # has gone unseen this long (0.83 s gap there). 0 = let go at once.
+    fire_hold_s: 1.0
     # Rev 4 (2026-11-14): 60, was 40. Operator: "we just need to get it close,
     # the game's aim assist will zoom the camera in and bring it closer". Of
     # ring sightings 40 to 60 px from the crosshair, the next picture had the
