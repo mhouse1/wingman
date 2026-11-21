@@ -467,6 +467,31 @@ def _process_incoming_region(
     return result
 
 
+# ADR 201: the fallback text that names an incoming missile. The incoming crop's
+# tokens also take LOCK WARNING (`ARNING`, ADR 184 D0), which holds the flare roll
+# but drops no flares (operator, 2026-11-20: "flares should not deploy on lock
+# warning, it should only deploy on INCOMING detected").
+INCOMING_TEXT_TOKENS = ("MING",)
+
+
+def is_lock_warning_only(detection_source: "str | None", text: "str | None") -> bool:
+    """True when this detection is LOCK WARNING and not INCOMING (ADR 201): an OCR
+    fallback read without an incoming token. A template hit is INCOMING's own."""
+    if detection_source != "ocr_fallback":
+        return False
+    normalized = (text or "").upper()
+    return not any(token in normalized for token in INCOMING_TEXT_TOKENS)
+
+
+def incoming_debounced(now: float, last_positive_ts: float, window_s: float,
+                       last_was_lock_warning: bool, lock_warning: bool) -> bool:
+    """Whether a detection inside the debounce window is suppressed. INCOMING
+    right after a LOCK WARNING is not (ADR 201): it is the one that drops flares."""
+    if now - last_positive_ts >= window_s:
+        return False
+    return not (last_was_lock_warning and not lock_warning)
+
+
 def _process_text_region(frame, text_tokens: "list[str]"):
     """Generic OCR worker: detect any of the given text tokens in a crop region.
 
@@ -1387,7 +1412,10 @@ class GameStateAnalyzer:
             # `timestamp` and the tick handler's clock.
             'frame_ts': 0.0,
             'detect_done_ts': 0.0,
+            # ADR 201: the cached detection is LOCK WARNING, not INCOMING.
+            'lock_warning': False,
         }
+        self._incoming_last_positive_lock = False
         self._incoming_cache_lock = threading.Lock()
         incoming_cfg = config.get("incoming_detection", {})
         self._incoming_template_matching_enabled = bool(incoming_cfg.get("incoming_template_matching_enabled", True))
@@ -2011,6 +2039,11 @@ class GameStateAnalyzer:
         not, None with no fresh read (outside battle, or no SPECIAL_WEAPON crop)."""
         return self._special_weapon.ready()
 
+    def special_weapon_charge(self) -> "int | None":
+        """ADR 199: the special weapon ring's lit sectors (its charge level), None
+        with no fresh read."""
+        return self._special_weapon.charge()
+
     def note_special_weapon_press(self) -> None:
         """The special weapon was pressed (ADR 173), for the reader's capture."""
         self._special_weapon.note_press()
@@ -2289,6 +2322,12 @@ class GameStateAnalyzer:
         """Return timestamp for the latest incoming cache update."""
         with self._incoming_cache_lock:
             return self._incoming_cache['timestamp']
+
+    def incoming_is_lock_warning(self) -> bool:
+        """ADR 201: True when the cached detection is LOCK WARNING, not INCOMING.
+        It raises the alert (the flare roll, ADR 184) but drops no flares."""
+        with self._incoming_cache_lock:
+            return bool(self._incoming_cache.get('lock_warning', False))
 
     def incoming_last_seen_ts(self) -> float:
         """When a detection pass last saw the incoming warning (LOCK WARNING and
@@ -3653,14 +3692,21 @@ class GameStateAnalyzer:
                     if incoming_detected:
                         with self._incoming_cache_lock:
                             self._incoming_last_seen_ts = now_t
+                    lock_warning = incoming_detected and is_lock_warning_only(
+                        detection_source, detected_label)
                     debounce_suppressed = False
                     if incoming_detected and self._incoming_debounce_window_s > 0.0:
-                        if (now_t - self._incoming_last_positive_ts) < self._incoming_debounce_window_s:
+                        # ADR 201: INCOMING right after a LOCK WARNING is not
+                        # debounced; the flares wait for it.
+                        if incoming_debounced(now_t, self._incoming_last_positive_ts,
+                                              self._incoming_debounce_window_s,
+                                              self._incoming_last_positive_lock, lock_warning):
                             debounce_suppressed = True
                             incoming_detected = False
                             detection_source = "none"
                         else:
                             self._incoming_last_positive_ts = now_t
+                            self._incoming_last_positive_lock = lock_warning
 
                     if incoming_detected:
                         logger.info(
@@ -3699,6 +3745,8 @@ class GameStateAnalyzer:
                         # `reaction` series stays comparable, and add the split.
                         self._incoming_cache['frame_ts'] = self._background_ocr_frame_ts
                         self._incoming_cache['detect_done_ts'] = time.time()
+                        self._incoming_cache['lock_warning'] = bool(
+                            incoming_detected and lock_warning)
                     if incoming_detected:
                         self.incoming_event.set()
 

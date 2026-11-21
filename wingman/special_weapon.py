@@ -39,7 +39,8 @@ _RING_BAND = (0.85, 1.15)
 _INSIDE_BAND = (0.55, 0.78)
 _OUTSIDE_BAND = (1.22, 1.45)
 
-TRIGGERS = ("incoming", "low_flares", "low_fuel", "gun_heat", "ready", "lead_aligned")
+TRIGGERS = ("incoming", "low_flares", "low_fuel", "gun_heat", "ready", "lead_aligned",
+            "charged")
 # Triggers the pursuit answers on its own pictures (aimed_ability.py), several
 # times a second, not the battle tick: the ability has to be aimed first (ADR 186).
 AIMED_TRIGGERS = ("lead_aligned",)
@@ -268,6 +269,7 @@ class SpecialWeaponReader:
         self._lock = threading.Lock()
         self._ready = False
         self._ready_streak = 0
+        self._lit = 0
         self._ts = 0.0
         # A READY that drops to a partial ring is either a taken press (the arc) or
         # a misread; the crop is saved so the two can be told apart against the
@@ -449,6 +451,7 @@ class SpecialWeaponReader:
         lit_now = lit >= self._min_lit or (
             lit >= self._min_lit_covered and lit + covered >= self._min_lit)
         with self._lock:
+            self._lit = lit
             self._ready_streak = self._ready_streak + 1 if lit_now else 0
             was = self._ready
             self._ready = self._ready_streak >= 2
@@ -465,9 +468,18 @@ class SpecialWeaponReader:
                 return None
             return self._ready
 
+    def charge(self) -> "int | None":
+        """ADR 199: the ring's lit sectors on the last read (its charge level, 0 to
+        `sectors`), None when there is no fresh read."""
+        with self._lock:
+            if self._ts == 0.0 or self._clock() - self._ts > self._stale_after_s:
+                return None
+            return self._lit
+
     def reset(self) -> None:
         """Forget the reading: a new life or a new round starts unknown."""
         with self._lock:
+            self._lit = 0
             self._ready = False
             self._ready_streak = 0
             self._ts = 0.0

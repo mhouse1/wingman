@@ -168,6 +168,9 @@ def register_hotkeys(ctrl, keyboard_module) -> None:
                     logger.info("Controller: '%s' key pressed - mission %s already "
                                 "running, ignoring", MISSION_J20_KEY, flying)
                     return
+                # ADR 200: a 'u' typed into the party chat is no request to fly.
+                if not ctrl.start_key_has_hud(MISSION_J20_KEY):
+                    return
                 # Before the FSM moves: the main loop reads the hold on the
                 # transition to GAME_BATTLE, and would take the aircraft back.
                 ctrl.end_manual_round_hold(f"'{MISSION_J20_KEY}' handed the aircraft back")
@@ -216,6 +219,8 @@ def register_hotkeys(ctrl, keyboard_module) -> None:
                 if now - ctrl._last_acs_key_ts < 0.5:  # debounce: ignore key-repeat
                     return
                 ctrl._last_acs_key_ts = now
+                if not ctrl.start_key_has_hud(MISSION_ACS_KEY):   # ADR 200
+                    return
                 ctrl.end_manual_round_hold(f"'{MISSION_ACS_KEY}' started a mission")
                 current_state = ctrl._analyzer.game_state if ctrl._analyzer is not None else None
                 logger.info("Controller: '%s' key pressed - starting ACS mission (state=%s)",

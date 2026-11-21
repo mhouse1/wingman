@@ -687,6 +687,14 @@ special_weapon: {enabled: true, sectors: 16, min_lit_sectors: 14, min_lit_when_c
     # 1,116 saved icon crops of other jets (ADR 188).
     pair_fire: {glyph: test_screenshots/special_weapon/glyphs/pair_fire.png,
       trigger: ready},
+    # Operator, 2026-11-20 (the F-20 Tigershark, a flaming skull with speed lines):
+    # "for that specific ability it should be used anytime there is a charge level".
+    # Its ring fills over about 90 s and starts over each life, and lives lasted
+    # 20-45 s, so it never read READY. trigger charged presses it with any lit
+    # sector. The glyph scores 1.00 on its crops and 0.39 or less against every
+    # other glyph (ADR 199).
+    skull_shot: {glyph: test_screenshots/special_weapon/glyphs/skull_shot.png,
+      trigger: charged, charge_at: 1},
     # Operator, 2026-11-18 (the PL-8 jet): phantom missiles (a white missile with
     # tail feathers) "should be activated whenever it appears". The glyph scores
     # 1.00 and 0.99 on the two lit `v` screenshots of 07:31-07:32, 0.06 on the
@@ -2052,6 +2060,13 @@ pursuit_mode:
   # would reach a boundary 0.5 away in about 50 s); terrain is covered by Climb's emergency.
   # Set a positive number of seconds to restore a cap.
   pursuit_max_duration_s: 0.0
+  # ADR 200 (operator, 2026-11-20: 'f' pressed over and over in matchmaking). A 'u'
+  # typed into the party chat started the pursuit with no battle, and it tapped 'f'
+  # into the chat box. The pursuit stops after no_hud_stop_s with no HUD altitude
+  # read (alive, the read never went missing over 10 s in ten logs of 2026-11-19/20),
+  # and 'u'/'o' start nothing unless an altitude was read in start_key_hud_window_s.
+  no_hud_stop_s: 15.0
+  start_key_hud_window_s: 30.0
   # ADR 148 (operator, 2026-09-25: after a kill and the switch to the secondary the
   # aircraft "crashed to the ground, it should have continued pursuit sequence"). The
   # longest a dive-recovery climb (a HARD emergency: time to ground or terrain) may fly

@@ -96,7 +96,7 @@ _STR_LIST = Leaf(types=(list,), item_types=(str,))
 # ADR 173/186: what spends a special weapon; special_weapon.TRIGGERS is the same
 # tuple (tests/test_aimed_ability.py checks), kept here so the schema stays numpy-free.
 SPECIAL_WEAPON_TRIGGERS = ("incoming", "low_flares", "low_fuel", "gun_heat", "ready",
-                           "lead_aligned")
+                           "lead_aligned", "charged")
 _NUM_LIST = Leaf(types=(list,), item_types=NUMBER)
 _HSV = Leaf(types=(list,), item_types=(int,), length=3)
 
@@ -373,6 +373,9 @@ SCHEMA = Section(
                 "flares_at": _int(0),
                 "fuel_at": _num(0, 100),
                 "lead": Leaf(types=(str,), choices=("green", "yellow")),
+                # charged (ADR 199): the lit ring sectors at or above which it is
+                # pressed; 1 is any charge at all.
+                "charge_at": _int(1),
             }, required=frozenset({"glyph", "trigger"}))),
             # ADR 186: an ability fired on its lead diamond.
             "aimed": Section(children={
@@ -1047,6 +1050,12 @@ SCHEMA = Section(
         "pursuit_mode": Section(children={
             "enabled": BOOL,
             "pursuit_max_duration_s": SECONDS,
+            # Operator, 2026-11-20: a 'u' typed into the lobby's party chat started
+            # the pursuit in matchmaking, which then tapped 'f' into the chat box.
+            # The pursuit stops when the HUD's altitude has not been read for this
+            # long; the start keys need an altitude read within the window (ADR 200).
+            "no_hud_stop_s": Leaf(types=NUMBER, minimum=0, default=15.0),
+            "start_key_hud_window_s": Leaf(types=NUMBER, minimum=0, default=30.0),
             "recovery_max_s": SECONDS,   # ADR 148
             "pursuit_padlock_verify": BOOL,
             "ammo_zero_grace_s": SECONDS,

@@ -909,6 +909,11 @@ class Controller:
         # a config that never sets the key behaves as it always did.
         self._pursuit_max_duration_s = float(_pm.get("pursuit_max_duration_s", 20.0))
         self._pursuit_padlock_verify = bool(_pm.get("pursuit_padlock_verify", False))
+        # ADR 200: no HUD, no pursuit; no recent HUD, no start key.
+        self._pursuit_no_hud_stop_s = float(
+            _pm.get("no_hud_stop_s", schema_default("pursuit_mode.no_hud_stop_s")))
+        self._start_key_hud_window_s = float(_pm.get(
+            "start_key_hud_window_s", schema_default("pursuit_mode.start_key_hud_window_s")))
         # ADR 148: the longest a dive-recovery climb may keep flying a pursuit before the
         # chase resumes (the tree starts a new one at once if the emergency is still on).
         # 0 turns the feature off: a climb hold then releases in GAME_BATTLE_EJECT as it
@@ -5574,6 +5579,7 @@ class Controller:
             descent: "ControlledDescent | None" = None
             handback_due = False   # rearmed, waiting out the climb-out
             handback = False       # the rearm ended the pursuit
+            no_hud_stop = False    # ADR 200: no HUD ended it
             try:
                 mission_exit_deadline = time.time() + 2.0
                 while self.is_mission_running() and time.time() < mission_exit_deadline:
@@ -5693,6 +5699,21 @@ class Controller:
                         fall_through = True
                         end_reason = "cap"
                         break
+                    # ADR 200: no HUD altitude for no_hud_stop_s (counted from the
+                    # pursuit's own start too) is no battle: stop, and press nothing.
+                    if self._pursuit_no_hud_stop_s > 0:
+                        hud_known, hud_age = self.hud_altitude_age_s()
+                        no_hud_s = time.time() - start
+                        if hud_age is not None:
+                            no_hud_s = min(no_hud_s, hud_age)
+                        if hud_known and no_hud_s >= self._pursuit_no_hud_stop_s:
+                            logger.warning(
+                                "Controller: pursue_and_engage — no HUD altitude for "
+                                "%.0fs, this is no battle: pursuit stopped, no more "
+                                "'f' (ADR 200)", no_hud_s)
+                            end_reason = "no_hud"
+                            no_hud_stop = True
+                            break
                     try:
                         frame = self._capture.grab_from_thread()
                         picture_ts = picture_clock.seen(frame, time.monotonic())
@@ -6605,7 +6626,7 @@ class Controller:
                     tally.gun_s = self._gun_fired_s
                     logger.info(tally.line(
                         "PURSUIT",
-                        end_reason if fall_through or handback
+                        end_reason if fall_through or handback or no_hud_stop
                         else "external:%s" % (self._eject_stop_reason or "unknown"),
                         switched_here))
                 self._pursuing.clear()
@@ -6648,6 +6669,9 @@ class Controller:
                     if handback:
                         logger.info("Controller: pursue_and_engage — rearmed, handing "
                                     "the aircraft back to the mission (ADR 171)")
+                    elif no_hud_stop:
+                        logger.info("Controller: pursue_and_engage — ended with no HUD "
+                                    "(ADR 200)")
                     else:
                         logger.info(
                             "Controller: pursue_and_engage — stopped externally "
@@ -10522,6 +10546,43 @@ class Controller:
     def request_finish_round(self, requested: bool = True) -> None:
         """Set or clear the deferred exit. Exposed for tests and future callers."""
         self._finish_round_event.set() if requested else self._finish_round_event.clear()
+
+    def hud_altitude_age_s(self) -> "tuple[bool, float | None]":
+        """(known, seconds since the HUD's altitude was last read) (ADR 200).
+
+        The altitude is on the HUD whenever the aircraft flies and nowhere on the
+        lobby, the matchmaking panel or the respawn screen. ``known`` is False
+        when there is no telemetry to ask (no analyzer, or its lock timed out):
+        the callers then fail open. The age is None when no altitude was ever read.
+        """
+        if self._analyzer is None:
+            return False, None
+        try:
+            snap = self._analyzer.get_telemetry()
+        except Exception:
+            return False, None
+        if snap is None:
+            return False, None
+        return True, snap.altitude.age_s(snap.taken_at_s)
+
+    def start_key_has_hud(self, key: str) -> bool:
+        """True when a start key may start a mission: the HUD was read lately (ADR 200).
+
+        A 'u' or 'o' typed into the party chat in matchmaking started the pursuit
+        there (2026-11-20 09:25:49 and 09:26:11), and the pursuit tapped 'f' into
+        the chat box 211 times. A 0 window turns the check off.
+        """
+        window = self._start_key_hud_window_s
+        if window <= 0:
+            return True
+        known, age = self.hud_altitude_age_s()
+        if not known or (age is not None and age <= window):
+            return True
+        logger.info(
+            "Controller: '%s' key pressed with no HUD altitude for %s — ignored "
+            "(typed into the chat? ADR 200; press it once the HUD shows)",
+            key, "the whole session" if age is None else "%.0fs" % age)
+        return False
 
     def is_mission_running(self) -> bool:
         """Return True when a mission thread currently holds the mission lock."""

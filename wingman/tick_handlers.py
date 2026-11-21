@@ -1086,11 +1086,14 @@ class AmmoEventsHandler:
             return False
 
         self._last_incoming_alert_ts = incoming_ts
-        if self._flares_held_by_special():
-            # ADR 198: the special is lit, so no flares. The roll, the evade and
-            # the jet's own presses still answer the alert.
+        held_why = ("LOCK WARNING, not INCOMING (ADR 201)" if self._lock_warning_only()
+                    else "the special weapon is lit (ADR 198)"
+                    if self._flares_held_by_special() else None)
+        if held_why:
+            # ADR 198/200: no flares. The roll, the evade and the jet's own
+            # presses still answer the alert.
             logger.info("\033[95m🚀 INCOMING MISSILE DETECTED - flares held: "
-                        "the special weapon is lit (ADR 198)\033[0m")
+                        "%s\033[0m", held_why)
             flares_done = threading.Event()
             flares_done.set()
             self._flare_roll(flares_done)
@@ -1151,6 +1154,14 @@ class AmmoEventsHandler:
         # incoming missile of a life, if the missile count has not already sent it.
         self.tick_auxiliary_feature(incoming_edge=True)
         return True
+
+    def _lock_warning_only(self) -> bool:
+        """ADR 201: the alert is LOCK WARNING, not INCOMING: no flares."""
+        try:
+            return self._analyzer.incoming_is_lock_warning() is True
+        except Exception as exc:
+            log_suppressed(logger, "incoming_is_lock_warning", exc)
+            return False
 
     def _flares_held_by_special(self) -> bool:
         """ADR 198: on a jet with `flares_only_when_special_grey` (the KF-21), the
@@ -1327,6 +1338,18 @@ class AmmoEventsHandler:
             self._fuel_low_streak = self._fuel_low_streak + 1 if pct <= at else 0
         return self._fuel_low_streak >= 2
 
+    def _special_weapon_charged(self, at) -> "bool | None":
+        """ADR 199: True while the ring has `at` (default 1) or more lit sectors,
+        False with fewer, None with no fresh read."""
+        try:
+            lit = self._analyzer.special_weapon_charge()
+        except Exception as exc:
+            log_suppressed(logger, "special_weapon_charge", exc)
+            return None
+        if lit is None:
+            return None
+        return lit >= (1 if at is None else int(at))
+
     def _special_weapon_ready(self) -> "bool | None":
         try:
             return self._analyzer.special_weapon_ready()
@@ -1386,7 +1409,11 @@ class AmmoEventsHandler:
             fired = self._low_fuel(float(at))
         else:
             fired = True
-        ready = self._special_weapon_ready()
+        if trigger == "charged":
+            # ADR 199: pressed at any charge level, not only a full ring.
+            ready = self._special_weapon_charged(sw.get("charge_at"))
+        else:
+            ready = self._special_weapon_ready()
         skipped = presser.skipped_not_ready
         press = presser.tick(time.time(), ready, fired)
         if presser.skipped_not_ready != skipped:
@@ -1396,8 +1423,9 @@ class AmmoEventsHandler:
                 self._stats.on_event("special_weapon_skipped", time.time())
         if not press:
             return False
-        logger.info("\033[93m✨ Special weapon %s: trigger %s, icon READY\033[0m",
-                    ability, trigger)
+        logger.info("\033[93m✨ Special weapon %s: trigger %s, icon %s\033[0m",
+                    ability, trigger,
+                    "charged" if trigger == "charged" else "READY")
         self._ctrl.activate_special_weapon()
         try:
             self._analyzer.note_special_weapon_press()
