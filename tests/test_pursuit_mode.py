@@ -2377,19 +2377,36 @@ def test_priority_target_off_scans_nothing(monkeypatch, caplog):
     assert ("key_press", ROLL_RIGHT_KEY) not in _keys(ctrl)
 
 
-def test_a_visible_target_nearer_the_centre_keeps_the_steering(monkeypatch, caplog):
-    """The resupply marker's rule (operator, 2026-10-02): whichever of the two is
-    nearer the screen centre. The target is 190 px left, the marker 740 px right."""
+def test_the_crown_in_view_takes_the_steering_from_a_target_nearer_the_centre(
+        monkeypatch, caplog):
+    """ADR 194: the crown is not weighed against a target. The target is 190 px
+    left, the marker 740 px right; the marker is flown at and firing goes on."""
     ctrl, messages, _calls = _priority_pursuit(
         monkeypatch, caplog, marker=_priority_marker(1700, 600),
         tracker=_TrackerStub(visible=True, error_norm=-0.2, error_norm_y=0.0))
 
     keys = _keys(ctrl)
-    assert ("key_press", ROLL_LEFT_KEY) in keys, "the locked target is still steered at"
-    assert ("key_press", ROLL_RIGHT_KEY) not in keys
-    assert any(m.startswith("PRIORITY: marker=(1700,600)") and "proposed=False" in m
+    assert ("key_press", ROLL_RIGHT_KEY) in keys, "the crown is steered at"
+    assert ("key_press", ROLL_LEFT_KEY) not in keys
+    assert any(m.startswith("PRIORITY: marker=(1700,600)") and "control=True" in m
                for m in messages)
     assert ("key_press", FIRE_ACTIVE_WEAPON) in keys
+
+
+def test_the_crown_beside_a_centred_target_takes_the_steering(monkeypatch, caplog):
+    """2026-11-19 04:54:02: an F-14 30 px from the centre, the crown 37 px from
+    it. The target won by 7 px and kept the steering for 17 s while the crown
+    was flown past. The crown now has it."""
+    ctrl, messages, _calls = _priority_pursuit(
+        monkeypatch, caplog, marker=_priority_marker(934, 626),
+        tracker=_TrackerStub(visible=True, error_norm=(982 - 960) / 960,
+                             error_norm_y=(577 - 600) / 600))
+
+    assert any(m.startswith("PRIORITY: marker=(934,626)") and "control=True" in m
+               for m in messages)
+    assert not any(m.startswith("PRIORITY: marker=(934,626)") and "proposed=False" in m
+                   for m in messages)
+    assert "PRIORITY TARGET: marker in view at (934,626) (steering to it)" in messages
 
 
 def test_the_marker_nearer_the_centre_than_the_target_takes_the_steering(monkeypatch, caplog):
@@ -2613,8 +2630,8 @@ def test_with_every_rack_empty_the_crown_marker_in_view_is_still_flown_at(monkey
 
 def test_with_every_rack_empty_no_target_takes_the_steering_from_the_crown(monkeypatch, caplog):
     """The target is 190 px left of the centre, the marker 480 px from it, to
-    the right and below. With missiles the nearer target has the steering;
-    with every rack empty no target is steered at, and the marker has it."""
+    the right and below. The crown has the steering before the racks empty
+    (ADR 194) and after (no target is steered at)."""
     _ctrl, messages, _calls, empty_at = _empty_rack_pursuit(
         monkeypatch, caplog, marker=_priority_marker(1400, 800),
         tracker=_TrackerStub(visible=True, error_norm=-0.2, error_norm_y=0.0))
@@ -2622,8 +2639,10 @@ def test_with_every_rack_empty_no_target_takes_the_steering_from_the_crown(monke
     before = [m for m in messages[:empty_at] if m.startswith("HOLD[roll]")]
     after = [m for m in messages[empty_at:]
              if m.startswith("HOLD[roll]") and "loop exit" not in m]
-    assert before and all("-> left/target" in m for m in before), before
-    assert after and all("-> right/target" in m for m in after), after
+    assert before and all("-> right/target" in m for m in before), before
+    assert all("-> right/target" in m for m in after), after
+    assert any(m.startswith("PRIORITY: marker=(1400,800)") and "control=True" in m
+               for m in messages[empty_at:]), "the crown lost the steering"
 
 
 def test_with_every_rack_empty_the_resupply_marker_still_comes_first(monkeypatch, caplog):

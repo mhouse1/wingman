@@ -93,6 +93,10 @@ STR = Leaf(types=(str,))
 FRACTION = _num(0.0, 1.0)
 SECONDS = _num(0.0)
 _STR_LIST = Leaf(types=(list,), item_types=(str,))
+# ADR 173/186: what spends a special weapon; special_weapon.TRIGGERS is the same
+# tuple (tests/test_aimed_ability.py checks), kept here so the schema stays numpy-free.
+SPECIAL_WEAPON_TRIGGERS = ("incoming", "low_flares", "low_fuel", "gun_heat", "ready",
+                           "lead_aligned", "charged")
 _NUM_LIST = Leaf(types=(list,), item_types=NUMBER)
 _HSV = Leaf(types=(list,), item_types=(int,), length=3)
 
@@ -122,12 +126,27 @@ _JET_PROFILE = Section(children={
     # operator, 2026-11-02). Absent: no special-weapon press on this jet.
     "special_weapon": Section(children={
         "ability": STR,
-        "trigger": Leaf(types=(str,), choices=("incoming", "low_flares", "low_fuel",
-                                                "gun_heat", "ready")),
+        # "none" (ADR 197): this jet never presses `q`, whatever its glyph.
+        "trigger": Leaf(types=(str,), choices=SPECIAL_WEAPON_TRIGGERS + ("none",)),
         "flares_at": _int(0),
         # low_fuel: the afterburner fuel percentage at or under which it fires.
         "fuel_at": _num(0, 100),
+        # lead_aligned (ADR 186): the colour of the ability's lead diamond.
+        "lead": Leaf(types=(str,), choices=("green", "yellow")),
     }, required=frozenset({"ability", "trigger"})),
+    # Operator, 2026-11-16: the jet's auxiliary feature on `w` (was the wing
+    # sweep), pressed once a life when the missile count reads `missiles_at` or
+    # fewer (the KF-21's drone into defense mode at 3), or, with `on_incoming`, on
+    # the life's first incoming missile alert if that comes first. Absent: no press.
+    "auxiliary_feature": Section(children={
+        "trigger": Leaf(types=(str,), choices=("low_missiles",)),
+        "missiles_at": _int(0),
+        "on_incoming": BOOL,
+    }, required=frozenset({"trigger", "missiles_at"})),
+    # ADR 198 (operator, 2026-11-20, the KF-21): flares go out on an incoming
+    # alert only while the special weapon's icon is greyed out (not READY).
+    # Absent or false: flares on every alert, as before.
+    "flares_only_when_special_grey": BOOL,
     # Design 021 hit counter rev 7: the largest rise of the damage text that
     # is the gun's on this jet. Absent: gun_damage.GUN_STEP_MAX.
     "gun_step_max": _num(1),
@@ -233,6 +252,10 @@ SCHEMA = Section(
             # A squad lobby (READY shown, not PLAY) with no battle this long
             # also leaves the squad, whatever the button reads.
             "squad_no_battle_s": Leaf(types=NUMBER, minimum=0, default=900.0),
+            # Top and bottom of the band (screen fractions) searched for the
+            # red X in the PARTY panel; the X moves down as the panel grows.
+            "red_x_search_y": Leaf(types=(list,), item_types=NUMBER, length=2,
+                                   default=[0.12, 0.75]),
             "scan_interval_s": SECONDS,
             "play_click_delay_s": SECONDS,
             "leave_click_delay_s": SECONDS,
@@ -302,6 +325,9 @@ SCHEMA = Section(
             "enabled": Leaf(types=(bool,), default=True),
             # A reading older than this is no reading: `f` is tapped.
             "stale_after_s": Leaf(types=NUMBER, minimum=0, default=6.0),
+            # FR-012: battle seconds without a usable count or weapon-name read
+            # before a WARNING says the crop is off the HUD. 0 = no warning.
+            "panel_silent_warn_s": Leaf(types=NUMBER, minimum=0, default=120.0),
             # Class name -> how `f` fires it and the words its weapons' names
             # contain. Tried in order; a name in no class is tapped.
             "classes": MapOf(Section(children={
@@ -327,19 +353,38 @@ SCHEMA = Section(
             # Crops of a READY dropping to a partial ring (a press or a misread).
             "capture_dir": Leaf(types=(str,), default="test_screenshots/special_weapon/live"),
             "capture_max": Leaf(types=(int,), minimum=0, default=40),
-            # The refuel ability, recognised by its glyph on any jet (operator,
-            # 2026-11-15): a template crop, the overlap that counts as a match, and
-            # the afterburner fuel percentage at or under which it is pressed.
-            "refuel_glyph": Leaf(types=(str,),
-                                 default="test_screenshots/special_weapon/glyphs/refuel.png"),
+            # The overlap of a glyph with its template that counts as a match.
             "glyph_min_iou": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.85),
-            # The gun cool-down ability, recognised by its glyph on any jet and
-            # pressed when the gun heat bar reaches gun_heat_at (operator, 2026-11-15:
-            # "we should activate when the overheat indicator reaches 80%") or red.
+            # The gun heat bar's fill at which the gun cool-down is pressed
+            # (operator, 2026-11-15: "when the overheat indicator reaches 80%").
             "gun_heat_at": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.8),
-            "gun_cooldown_glyph": Leaf(
-                types=(str,), default="test_screenshots/special_weapon/glyphs/gun_cooldown.png"),
+            # The refuel's afterburner fuel percentage when its row sets none.
             "refuel_fuel_at": Leaf(types=NUMBER, minimum=0, maximum=100, default=50),
+            # ADR 190: what a lit glyph with no row in `abilities` does ("other"):
+            # a non-aimed trigger, or "none" to leave unknown abilities unpressed.
+            "unknown_trigger": Leaf(types=(str,), default="ready",
+                                    choices=("none",) + tuple(
+                                        t for t in SPECIAL_WEAPON_TRIGGERS
+                                        if t != "lead_aligned")),
+            # ADR 186: the abilities known by their glyph on any jet.
+            "abilities": MapOf(Section(children={
+                "glyph": STR,
+                "trigger": Leaf(types=(str,), choices=SPECIAL_WEAPON_TRIGGERS),
+                "flares_at": _int(0),
+                "fuel_at": _num(0, 100),
+                "lead": Leaf(types=(str,), choices=("green", "yellow")),
+                # charged (ADR 199): the lit ring sectors at or above which it is
+                # pressed; 1 is any charge at all.
+                "charge_at": _int(1),
+            }, required=frozenset({"glyph", "trigger"}))),
+            # ADR 186: an ability fired on its lead diamond.
+            "aimed": Section(children={
+                "enabled": Leaf(types=(bool,), default=True),
+                "search_px": Leaf(types=NUMBER, minimum=20, default=600),
+                "min_score": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.65),
+                "memory_s": Leaf(types=NUMBER, minimum=0, default=0.45),
+                "fire_px": Leaf(types=NUMBER, minimum=1, default=60),
+            }),
         }),
 
         "fuel": Section(children={
@@ -370,6 +415,11 @@ SCHEMA = Section(
             "respawn_clear_stability_s": SECONDS,
             "starting_max_wait_s": SECONDS,
             "startup_stall_exit_after_s": SECONDS,
+            # ADR 189: what tells wingman a match has started. hud = health, speed
+            # and altitude read off the HUD, no key pressed; good_luck = the old
+            # loop that taps 'u' (the Good Luck emote) and OCRs the chat reply.
+            "starting_signal": Leaf(types=(str,), choices=("hud", "good_luck"),
+                                    default="hud"),
             "good_luck_wait_s": SECONDS,
             "good_luck_bypass_on_alive": BOOL,
             "starting_health_probe_interval_s": SECONDS,
@@ -469,6 +519,12 @@ SCHEMA = Section(
             "tick_s": SECONDS,
             "lock_timeout_s": SECONDS,
             "yield_to_target": BOOL,   # operator, 2026-09-26
+            # ADR 191: seconds each life flies level looking for a target
+            # before mission_acs climbs; 0 = climb at once, as before.
+            "target_watch_s": Leaf(types=NUMBER, minimum=0, default=2.0),
+            # ADR 191 D7: the spawn guard spawns an acs life level instead of
+            # pulsing nose-up (D4). Off: it raised terrain deaths.
+            "spawn_watch_only": Leaf(types=(bool,), default=False),
         }),
 
         # ADR 024 / 070 / 073 / 076 / 081 / 083
@@ -994,6 +1050,12 @@ SCHEMA = Section(
         "pursuit_mode": Section(children={
             "enabled": BOOL,
             "pursuit_max_duration_s": SECONDS,
+            # Operator, 2026-11-20: a 'u' typed into the lobby's party chat started
+            # the pursuit in matchmaking, which then tapped 'f' into the chat box.
+            # The pursuit stops when the HUD's altitude has not been read for this
+            # long; the start keys need an altitude read within the window (ADR 200).
+            "no_hud_stop_s": Leaf(types=NUMBER, minimum=0, default=15.0),
+            "start_key_hud_window_s": Leaf(types=NUMBER, minimum=0, default=30.0),
             "recovery_max_s": SECONDS,   # ADR 148
             "pursuit_padlock_verify": BOOL,
             "ammo_zero_grace_s": SECONDS,
@@ -1038,6 +1100,9 @@ SCHEMA = Section(
                 # ADR 182: the gun holds while a ring of the tracked target is in
                 # use, wherever it is. false = ADR 178 D3 (within fire_px).
                 "fire_while_ring_shows": Leaf(types=(bool,), default=False),
+                # A gun firing on the ring keeps firing this long after the
+                # target's ring was last seen (detector misses). 0 = off.
+                "fire_hold_s": Leaf(types=NUMBER, minimum=0, default=0.0),
             }),
             # ADR 181: the chase stays on its target through missile and
             # terrain warnings.
@@ -1081,6 +1146,28 @@ SCHEMA = Section(
                 "cooldown_s": Leaf(types=NUMBER, minimum=0, default=3.0),
                 # No braking under this speed, or without a fresh speed reading.
                 "min_kph": Leaf(types=NUMBER, minimum=0, maximum=3000, default=650.0),
+            }),
+            # Operator, 2026-11-21: the airbrake to turn tighter onto the aim
+            # point at gun range, in a share of rounds.
+            "turn_brake": Section(children={
+                # The share of rounds that brake. 0 = off.
+                "share": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.0),
+                # It starts when the aim point is this far off the crosshair on
+                # either axis (half-frame units), and ends under off_err.
+                "on_err": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.25),
+                "off_err": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.12),
+                # Only with the tracked target nearer than this.
+                "max_km": Leaf(types=NUMBER, minimum=0, default=1.5),
+                # The longest one hold, and the wait before the next.
+                "max_hold_s": Leaf(types=NUMBER, minimum=0, default=2.5),
+                "cooldown_s": Leaf(types=NUMBER, minimum=0, default=1.5),
+                # No braking under this speed, or without a fresh speed reading.
+                "min_kph": Leaf(types=NUMBER, minimum=0, maximum=3000, default=800.0),
+                # Under this speed the turn holds the afterburner instead; between
+                # it and min_kph, neither.
+                "burner_below_kph": Leaf(types=NUMBER, minimum=0, maximum=3000, default=600.0),
+                # The measure: the aim point counts as on target within this.
+                "on_target_err": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.1),
             }),
             # Design 021 Phase 5 (shadow): where the tracked target is going,
             # logged and drawn on the HUD. Nothing flies on it.

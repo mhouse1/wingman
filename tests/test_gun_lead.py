@@ -354,16 +354,18 @@ def test_the_marker_arm_and_a_lost_target_keep_the_marker(monkeypatch):
     ctrl._target_range.stop()
 
 
-def test_a_ring_past_steer_max_km_or_without_a_range_is_not_steered_at(monkeypatch):
+def test_a_ring_past_steer_max_km_is_not_steered_at_and_one_without_a_range_is(monkeypatch):
     """Rev 2, live 19:53: control point A's dashed circle matched as a ring at
-    1.9 km and a ring round steered on it. The ring is steered at only while
-    the tracked target reads under steer_max_km."""
+    1.9 km and a ring round steered on it. The ring is not steered at while the
+    tracked target reads steer_max_km or more. Operator, 2026-11-21: "the gun
+    should always fire if ring is on screen even if range is unknown", so a ring
+    with no range reading is used."""
     ctrl, _, frame = _ring_ctrl(monkeypatch, "ring")
     assert ctrl._lead_km == 0.73
     ctrl._lead_km = 1.9
     assert ctrl._ring_aim(frame, True, 1.1) is None
     ctrl._lead_km = None
-    assert ctrl._ring_aim(frame, True, 1.1) is None
+    assert ctrl._ring_aim(frame, True, 1.1) is not None
     ctrl._lead_km = 1.19
     assert ctrl._ring_aim(frame, True, 1.1) is not None
     ctrl._target_range.stop()
@@ -682,7 +684,6 @@ def test_the_ring_falls_back_to_the_centre_rule_when_it_goes(monkeypatch):
 
 @pytest.mark.parametrize("lead_km,visible", [
     (1.9, True),       # past steer_max_km: an objective's circle (ADR 178 rev 2)
-    (None, True),      # no fresh range reading
     (0.73, False),     # the target out of view
 ])
 def test_a_ring_not_in_use_does_not_open_the_gun(monkeypatch, lead_km, visible):
@@ -710,4 +711,69 @@ def test_the_ring_holds_the_gun_while_a_resupply_run_has_the_steering(monkeypatc
     ctrl._ring_aim(frame, True, 1.1 + 0.5)
     ctrl._pursuit_gun_tick(False, None, None)
     assert keys[-1] == ("up", FIRE_MACHINE_GUN)
+    ctrl._target_range.stop()
+
+
+def test_a_gun_on_the_ring_holds_through_missed_pictures(monkeypatch):
+    """Operator, 2026-11-21 13:26:27: "as long as the circle is on screen it
+    should activate gun". The detector missed the ring for 0.83 s and the gun
+    let go after 1.5 s. With fire_hold_s it holds until the ring is gone that
+    long, then the centre rule lets go."""
+    ctrl, keys, frame = _ring_ctrl(monkeypatch, "ring")
+    ctrl._gun_fire_while_ring = True
+    ctrl._ring_fire_hold_s = 1.0
+    ctrl._ring_aim(frame, True, 1.1)
+    ctrl._pursuit_gun_tick(True, 0.3, 0.3)
+    assert keys == [("down", FIRE_MACHINE_GUN)]
+    blank = frame * 0
+    ctrl._gun_lead_shadow(blank, {"visible": True, "centroid_x": 960,
+                                  "centroid_y": 600}, 1.1 + 0.8)
+    ctrl._ring_aim(blank, True, 1.1 + 0.8)         # past ring_memory_s, ring missed
+    ctrl._pursuit_gun_tick(True, 0.3, 0.3)
+    assert keys == [("down", FIRE_MACHINE_GUN)]
+    ctrl._ring_aim(blank, True, 1.1 + 1.2)         # gone longer than fire_hold_s
+    ctrl._pursuit_gun_tick(True, 0.3, 0.3)
+    assert keys[-1] == ("up", FIRE_MACHINE_GUN)
+    ctrl._target_range.stop()
+
+
+def test_the_shared_config_holds_the_gun_a_second_past_the_ring():
+    from wingman.config_schema import schema_default
+    assert schema_default("pursuit_mode.gun_lead.fire_hold_s") == 0.0
+    cfg = yaml.safe_load((Path(__file__).parents[1] / "wingman" / "config.yaml").read_text())
+    assert cfg["pursuit_mode"]["gun_lead"]["fire_hold_s"] == 1.0
+
+
+def test_the_ring_fires_the_gun_without_a_range_reading(monkeypatch):
+    """Operator, 2026-11-21: "the gun should always fire if ring is on screen
+    even if range is unknown". Live 14:57:01.607 and three more that run: a ring
+    burst let go "out of range range=none". With no fresh reading of the
+    nameplate the ring opens and holds the gun; the marker rule still needs one."""
+    ctrl, keys, frame = _ring_ctrl(monkeypatch, "ring")
+    ctrl._gun_fire_while_ring = True
+    ctrl._target_range._latest = None                # the nameplate's range lost
+    ctrl._lead_km = None
+    ctrl._ring_aim(frame, True, 1.2)
+    ctrl._pursuit_gun_tick(True, 0.3, 0.3)
+    assert keys == [("down", FIRE_MACHINE_GUN)]
+    ctrl._pursuit_gun_tick(True, 0.3, 0.3)
+    assert keys == [("down", FIRE_MACHINE_GUN)]      # held, not "out of range"
+    ctrl.release_gun_hold()
+    keys.clear()
+    ctrl._ring_shown_px = ctrl._ring_aim_px = None
+    ctrl._ring_seen_ts = None
+    ctrl._pursuit_gun_tick(True, 0.01, 0.01)         # a centred marker, no range
+    assert keys == []
+    ctrl._target_range.stop()
+
+
+def test_the_ring_is_searched_for_without_a_range_reading(monkeypatch):
+    ctrl, _keys, frame = _ring_ctrl(monkeypatch, "ring")
+    cfg = yaml.safe_load((Path(__file__).parents[1] / "wingman" / "config.yaml").read_text())
+    obs = TargetTracker(cfg).update(frame)
+    ctrl._target_range._latest = None
+    ctrl._gun_lead_shadow(frame, obs, 2.0)
+    ctrl._gun_lead_shadow(frame, obs, 2.1)
+    assert ctrl._gun_ring_px is not None and ctrl._lead_km is None
+    assert ctrl._lead_ring.latest_ts == 2.1
     ctrl._target_range.stop()

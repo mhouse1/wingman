@@ -3,8 +3,8 @@
 
     round-scores.py check               exit 0 when the dashboard is switched on
     round-scores.py ingest [--dry-run]  read the stats files, the logs of sessions
-                                        that have none, and grafana/changes.yaml,
-                                        and load them
+                                        that have none, the run files' timings
+                                        and grafana/changes.yaml, and load them
     round-scores.py after-session       the ingest `make r` runs once wingman exits
                                         (Phase 2); silent unless it can run
 
@@ -104,6 +104,13 @@ RESOURCE_FIGURES = ("rss_mb", "anon_mb", "mi_use_mb", "mi_free_mb", "shmem_mb", 
 _FLOAT_FIGURES = {"ocr_med", "ocr_p95", "load1", "load5", "load15"}
 RESOURCE_COLUMNS = ("session_start", "elapsed_s", "at") + RESOURCE_FIGURES
 SESSION_COLUMNS = ("session_start", "run_id", "verdict", "trim_released_mb", "complete", "tags")
+# PerformanceTracker's run file (docs/performance/{current,release}/run_*.json):
+# each crop's OCR timing and the missile-warning-to-flares reaction, which the
+# runtime trend HTML charted by version (tests/runtime_performance_tracking.py).
+# One row per session and figure; `reaction` is the warning-to-flares time.
+REACTION = "reaction"
+TIMING_COLUMNS = ("run_id", "figure", "started_at", "ended_at", "wingman_version",
+                  "n", "mean", "p50", "p95", "p99", "tags")
 # The token the first psql call prints for each session whose resource samples
 # are loaded from a finished log, so the ingest need not read that log again.
 _COMPLETE_TOKEN = "resource-complete:"
@@ -235,6 +242,57 @@ def rankings_from_stats(data: dict) -> "list[Ranking]":
                     int(r["trophies"]), tags)
             for r in data.get("squadron_rankings") or []
             if r.get("ts") is not None and r.get("rank") is not None]
+
+
+@dataclass(frozen=True)
+class Timing:
+    """One row of the `run_timings` table: one figure of a session's run file."""
+
+    run_id: str
+    figure: str                         # a crop name, or REACTION
+    started_at: datetime
+    ended_at: "datetime | None"
+    wingman_version: "str | None"
+    n: int
+    mean: "float | None" = None
+    p50: "float | None" = None
+    p95: "float | None" = None
+    p99: "float | None" = None
+    tags: dict = field(default_factory=dict)
+
+
+def _seconds(block: dict, key: str) -> "float | None":
+    value = block.get(key)
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def timings_from_run(data: dict) -> "list[Timing]":
+    """One row per crop in a run file's `ocr_crops`, and one for its `reaction`,
+    each with its sample count and its mean and percentiles in seconds. A figure
+    with no samples gives no row: its mean of 0 is not a time. Tagged with the
+    session's account, as its rounds are, and the host that ran it when the file
+    names one. None for a file without a run_id or a start."""
+    run_id, start = data.get("run_id"), data.get("start_ts")
+    if not run_id or not isinstance(start, (int, float)):
+        return []
+    run_id = str(run_id)
+    end = data.get("end_ts")
+    host = (data.get("host") or {}).get("hostname")
+    tags = {"account": account_of(run_id)} | ({"host": str(host)} if host else {})
+    figures = dict((data.get("ocr_crops") or {}).items())
+    figures[REACTION] = data.get(REACTION) or {}
+    rows = []
+    for name, block in figures.items():
+        n = int(block.get("n") or 0) if isinstance(block, dict) else 0
+        if n <= 0:
+            continue
+        rows.append(Timing(
+            run_id, str(name), datetime.fromtimestamp(start, timezone.utc),
+            datetime.fromtimestamp(end, timezone.utc) if isinstance(end, (int, float)) else None,
+            str(data["version"]) if data.get("version") else None, n,
+            _seconds(block, "mean"), _seconds(block, "p50"), _seconds(block, "p95"),
+            _seconds(block, "p99"), tags))
+    return rows
 
 
 # -- rows from a log --------------------------------------------------------------
@@ -535,6 +593,12 @@ def sessions_csv(sessions) -> str:
                  "true" if s.complete else "false", s.tags) for s in sessions)
 
 
+def timings_csv(timings) -> str:
+    """The run timings as COPY … (FORMAT csv) input, in TIMING_COLUMNS order."""
+    return _csv((t.run_id, t.figure, t.started_at, t.ended_at, t.wingman_version, t.n,
+                 t.mean, t.p50, t.p95, t.p99, t.tags) for t in timings)
+
+
 def _upsert(table: str, columns, key: int, text: str) -> str:
     """COPY `text` into a temporary copy of `table`, then upsert it on the first
     `key` columns, printing how many rows were new."""
@@ -552,12 +616,14 @@ def _upsert(table: str, columns, key: int, text: str) -> str:
 
 
 def load_script(rows_text: str, changes_text: str, rankings_text: str = "",
-                resources_text: str = "", sessions_text: str = "") -> str:
+                resources_text: str = "", sessions_text: str = "",
+                timings_text: str = "") -> str:
     """One transaction: the rows into a temporary table, then upserted by (run_id,
     mission_index), which prints how many were new; the squadron readings the
     same way by (run_id, read_at), the resource samples by (session_start,
-    elapsed_s) and their sessions by session_start; the `changes` table replaced
-    by the change log. A round, a reading or a sample is never deleted."""
+    elapsed_s), their sessions by session_start, and the run timings by (run_id,
+    figure); the `changes` table replaced by the change log. A round, a reading,
+    a sample or a timing is never deleted."""
     cols = ", ".join(COLUMNS)
     updates = ", ".join(f"{c} = EXCLUDED.{c}" for c in COLUMNS[2:])
     rcols = ", ".join(RANKING_COLUMNS)
@@ -583,6 +649,7 @@ def load_script(rows_text: str, changes_text: str, rankings_text: str = "",
         "SELECT count(*) FILTER (WHERE inserted) FROM loaded;\n"
         + _upsert("resource_samples", RESOURCE_COLUMNS, 2, resources_text)
         + _upsert("resource_sessions", SESSION_COLUMNS, 1, sessions_text)
+        + _upsert("run_timings", TIMING_COLUMNS, 2, timings_text)
         + "DELETE FROM changes;\n"
         "COPY changes (at, label, ref) FROM STDIN WITH (FORMAT csv);\n"
         f"{changes_text}\\.\n"
@@ -619,6 +686,20 @@ def read_stats(dirs) -> "list[dict]":
             except (OSError, ValueError) as exc:
                 print(f"round-scores: skipping {path}: {exc}", file=sys.stderr)
     return sessions
+
+
+def read_runs(dirs) -> "list[dict]":
+    """PerformanceTracker's run files: `run_*.json`, not the `_stats.json` beside them."""
+    runs = []
+    for directory in dirs:
+        for path in sorted(Path(directory).glob("run_*.json")):
+            if path.name.endswith("_stats.json"):
+                continue
+            try:
+                runs.append(json.loads(path.read_text(encoding="utf-8")))
+            except (OSError, ValueError) as exc:
+                print(f"round-scores: skipping {path}: {exc}", file=sys.stderr)
+    return runs
 
 
 def ingest(dry_run: bool = False, project: "str | None" = None,
@@ -667,8 +748,12 @@ def ingest(dry_run: bool = False, project: "str | None" = None,
         if log_session is not None:
             resource_sessions[start] = log_session
 
+    timings: "dict[tuple[str, str], Timing]" = {}
+    for data in read_runs(STATS_DIRS):
+        timings.update(((t.run_id, t.figure), t) for t in timings_from_run(data))
+
     changes = load_changes(CHANGES.read_text(encoding="utf-8"))
-    ordered = sorted(rows.values(), key=lambda r: (r.ended_at, r.run_id, r.mission_index))
+    ordered =sorted(rows.values(), key=lambda r: (r.ended_at, r.run_id, r.mission_index))
     read = [r for r in ordered if r.score is not None]
     new = "none loaded (dry run)"
     if not dry_run:
@@ -678,15 +763,19 @@ def ingest(dry_run: bool = False, project: "str | None" = None,
                                resources_csv(sorted(samples.values(),
                                                     key=lambda s: (s.session_start, s.elapsed_s))),
                                sessions_csv(sorted(resource_sessions.values(),
-                                                   key=lambda s: s.session_start))),
+                                                   key=lambda s: s.session_start)),
+                               timings_csv(sorted(timings.values(),
+                                                  key=lambda t: (t.started_at, t.run_id, t.figure)))),
                    compose)
-        counts = [line for line in out.split() if line.isdigit()] + ["?"] * 4
+        counts = [line for line in out.split() if line.isdigit()] + ["?"] * 5
         new = (f"{counts[0]} new rows, {counts[1]} new squadron readings, "
-               f"{counts[2]} new resource samples")
+               f"{counts[2]} new resource samples, {counts[4]} new run timings")
+    timed_runs = len({run_id for run_id, _figure in timings})
     print(f"round-scores: {from_stats} sessions from stats files, {from_logs} from logs; "
           f"{len(ordered)} rounds, {len(read)} read, score {sum(r.score for r in read):,}; "
           f"{len(rankings)} squadron readings; {len(samples)} resource samples from "
-          f"{len(resource_sessions)} sessions; {len(changes)} changes; {new}")
+          f"{len(resource_sessions)} sessions; {len(timings)} run timings from {timed_runs} "
+          f"run files; {len(changes)} changes; {new}")
     return 0
 
 

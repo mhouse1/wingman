@@ -83,6 +83,21 @@ jet_profile:
     su47:
       match: SU-47
       gun_step_max: 110
+    # Operator, 2026-11-16: the KF-21's auxiliary feature (`w`) sends its drone
+    # into defense mode; press it once a life when the missile count reaches 3
+    # or lower (it spawns with 4), or on the first incoming missile alert if that
+    # comes first (operator, same day).
+    kf21:
+      match: KF-21
+      auxiliary_feature: {trigger: low_missiles, missiles_at: 3, on_incoming: true}
+      # Operator, 2026-11-19 (`v` screenshot 19:58:45): the KF-21's `q` ability (a
+      # jet with four arrows) "should not press 'q'". Its glyph matches no row, so
+      # unknown_trigger (ADR 190) pressed it on every recharge; trigger none wins
+      # over that (ADR 196 D7).
+      special_weapon: {ability: kf21_q, trigger: none}
+      # Operator, 2026-11-20: "flares only deploy when the kf21 special is greyed
+      # out". While its icon reads READY an incoming alert drops no flares (ADR 198).
+      flares_only_when_special_grey: true
 
 unattended_mode: true
 # Party invites: false clicks REJECT, true clicks ACCEPT then readies up.
@@ -105,9 +120,11 @@ crops:
     - [0.5486, 0.7022]
     text: [RESPAWN]
   incoming:
+    # ADR 184 (2026-11-16): widened from x 0.4521-0.5486. That crop cut LOCK
+    # WARNING to "OCKWARNIN", which has neither token, so it never raised an alert.
     coords:
-    - [0.4521, 0.2667]
-    - [0.5486, 0.2967]
+    - [0.438, 0.2667]
+    - [0.562, 0.2967]
     text: [MING, ARNING]
   click_to:
     coords:
@@ -241,6 +258,25 @@ crops:
     - [0.4826, 0.5089]
     - [0.5167, 0.5378]
     text: [OK]
+  # 2026-11-19 19:16: "Matchmaking in progress. Unable to join." after accepting
+  # an invite into a squad that was already queueing. Same dialog as
+  # CREATION_FAILED with a one-line message, so OK sits 30 px higher (button
+  # rows 565-631 against 595-660) and that crop never read it: the lobby sat
+  # blacked out (screenshot_20261119_191726, ADR 196 D5).
+  # ADR 196 D9 (2026-11-20 02:44): the 3RD YEAR ANNIVERSARY daily-reward
+  # window, with an orange COLLECT under the day that is due. The crop is the
+  # whole button row, so it reads COLLECT under any day; the click goes to
+  # the orange button found in it (analyzer.locate_collect_button).
+  EVENT_COLLECT:
+    coords:
+    - [0.2188, 0.6917]
+    - [0.7813, 0.725]
+    text: [COLLECT]
+  UNABLE_TO_JOIN:
+    coords:
+    - [0.4826, 0.484]
+    - [0.5167, 0.5129]
+    text: [OK]
   INSPECT:
     coords:
     - [0.0285, 0.0289]
@@ -258,12 +294,12 @@ crops:
     text: [UNREADY]
   AMMO_FLARES:
     coords:
-    - [0.7965, 0.9044]
-    - [0.8028, 0.9156]
+    - [0.7979, 0.885]
+    - [0.8057, 0.9017]
   AMMO_MISSILE:
     coords:
-    - [0.9639, 0.93]
-    - [0.9736, 0.9489]
+    - [0.8281, 0.9208]
+    - [0.8531, 0.9483]
   ENEMY_CLOSE_BY:
     coords:
     - [0.8764, 0.0822]
@@ -320,8 +356,8 @@ crops:
   # 1560 for longer names (the "x3" by the special weapon ends at x 1545).
   WEAPON_NAME:
     coords:
-    - [0.8125, 0.8983]
-    - [0.9974, 0.9217]
+    - [0.8125, 0.8817]
+    - [0.9974, 0.91]
   MINIMAP:
     coords:
     - [0.8319, 0.0044]
@@ -417,11 +453,13 @@ crops:
   # Detection text measured from the "+100 UNIVERSAL PARTS" banner;
   # STALL_PARTS_CRATE_DISMISS is the '?' mark itself (both pixel-color-
   # thresholded from the archived reference frame).
+  # SILVER (ADR 196 D7): the same crate with a "+300 SILVER" card in the same
+  # place stranded GAME_LOBBY for 15 min on 2026-11-19 05:14.
   STALL_PARTS_CRATE:
     coords:
     - [0.0901, 0.325]
     - [0.2641, 0.3425]
-    text: [PARTS, UNIVERSAL]
+    text: [PARTS, UNIVERSAL, SILVER]
   STALL_PARTS_CRATE_DISMISS:
     coords:
     - [0.6365, 0.5608]
@@ -526,6 +564,7 @@ stall_recovery:
   action_after_s: 15.0        # dwell in GAME_UNKNOWN/GAME_STARTING_STALLED before acting
   unready_dwell_s: 160.0      # UNREADY suppressing the PLAY click before leaving the squad (was 40; +2 min 2026-10-23 so a party leader has time to launch)
   squad_no_battle_s: 900.0    # squad lobby (READY shown, not PLAY) with no battle before leaving the squad
+  red_x_search_y: [0.12, 0.75]  # band searched for the PARTY panel's red X (it moves down with members and banners)
   scan_interval_s: 5.0        # how often the stall batch runs once the gate is open
   play_click_delay_s: 2.0     # after leaving the squad, before clicking PLAY
   leave_click_delay_s: 1.0    # after clicking LEAVE (squad-leave confirmation), before re-scanning PLAY/READY
@@ -611,19 +650,64 @@ special_weapon: {enabled: true, sectors: 16, min_lit_sectors: 14, min_lit_when_c
   # A READY dropping to 8-14 of 16 saves the icon's crop here, up to capture_max a
   # session: the 2026-11-07 run had 8 one-read drops with no press (cause unseen).
   capture_dir: test_screenshots/special_weapon/live, capture_max: 40,
-  # Operator, 2026-11-15: "whenever a jet has the refuel special ability ... activate
-  # it when afterburner fuel reaches 50% or lower". Recognised by its glyph on any
-  # jet without a profile of its own: on 689 saved crops the refuel glyph matched
-  # its template at 0.95-1.00 and every other glyph at 0.68 or less.
-  refuel_glyph: test_screenshots/special_weapon/glyphs/refuel.png,
-  glyph_min_iou: 0.85, refuel_fuel_at: 50,
-  # Operator, 2026-11-15: "for jets with machine gun cool down special it should auto
-  # activate when machine gun overheats". Its glyph is bullets with a circular arrow
-  # (the F-100's). Then: "we should activate when the overheat indicator reaches
-  # 80%": pressed when the gun heat bar (crop GUN_HEAT) is gun_heat_at of its width
-  # or more, or red (overheated).
-  gun_cooldown_glyph: test_screenshots/special_weapon/glyphs/gun_cooldown.png,
-  gun_heat_at: 0.8}
+  glyph_min_iou: 0.85, refuel_fuel_at: 50, gun_heat_at: 0.8,
+  # ADR 190 (operator, 2026-11-18): "anytime an undefined special weapon appears
+  # activate it automatically". A lit ring round a glyph no row below knows reads
+  # 'other' and gets this trigger: ready presses `q` whenever the icon is lit.
+  # A jet's own special_weapon profile still wins; "none" turns it off.
+  unknown_trigger: ready,
+  # ADR 186: the abilities known by their glyph, on any jet without a
+  # special_weapon profile of its own. A jet that draws the glyph gets the row's
+  # rule, so a new jet with a known ability needs nothing here, and a new ability
+  # is a glyph crop and a row. `trigger` is one of special_weapon.TRIGGERS.
+  abilities: {
+    # Operator, 2026-11-15: "whenever a jet has the refuel special ability ...
+    # activate it when afterburner fuel reaches 50% or lower". On 689 saved crops
+    # the refuel glyph matched its template at 0.95-1.00, every other at 0.68 or less.
+    refuel: {glyph: test_screenshots/special_weapon/glyphs/refuel.png,
+      trigger: low_fuel, fuel_at: 50},
+    # Operator, 2026-11-15: "for jets with machine gun cool down special it should
+    # auto activate when machine gun overheats", then "when the overheat indicator
+    # reaches 80%": the gun heat bar (crop GUN_HEAT) at gun_heat_at or red.
+    gun_cooldown: {glyph: test_screenshots/special_weapon/glyphs/gun_cooldown.png,
+      trigger: gun_heat},
+    # Operator, 2026-11-17 (the F-106): a single-use nuke that "needs the boresight
+    # to align with the diamond before launching". With the icon lit the game draws
+    # a yellow lead diamond on each enemy in reach; the pursuit steers the
+    # crosshair onto the one nearest the centre of the screen and presses `q` when
+    # it is within aimed.fire_px. The glyph scores 0.98-1.00 on the five `v`
+    # screenshots of 02:38-02:41, and 0.40 or less against every other glyph.
+    nuke: {glyph: test_screenshots/special_weapon/glyphs/nuke.png,
+      trigger: lead_aligned, lead: yellow},
+    # Operator, 2026-11-17 (the Super Falcon jet, RB 27 Super Falcon on the panel):
+    # pair firing (a red arrow with a + over a white missile) "should press the 'q'
+    # key and activate whenever available": trigger ready, pressed as soon as the
+    # icon reads READY. The glyph scores 1.00 on the three lit `v` screenshots of
+    # 21:07-21:19, 0.15 or less against every other glyph crop, and 0.3 or less on
+    # 1,116 saved icon crops of other jets (ADR 188).
+    pair_fire: {glyph: test_screenshots/special_weapon/glyphs/pair_fire.png,
+      trigger: ready},
+    # Operator, 2026-11-20 (the F-20 Tigershark, a flaming skull with speed lines):
+    # "for that specific ability it should be used anytime there is a charge level".
+    # Its ring fills over about 90 s and starts over each life, and lives lasted
+    # 20-45 s, so it never read READY. trigger charged presses it with any lit
+    # sector. The glyph scores 1.00 on its crops and 0.39 or less against every
+    # other glyph (ADR 199).
+    skull_shot: {glyph: test_screenshots/special_weapon/glyphs/skull_shot.png,
+      trigger: charged, charge_at: 1},
+    # Operator, 2026-11-18 (the PL-8 jet): phantom missiles (a white missile with
+    # tail feathers) "should be activated whenever it appears". The glyph scores
+    # 1.00 and 0.99 on the two lit `v` screenshots of 07:31-07:32, 0.06 on the
+    # countdown, 0.12 or less against every other glyph crop (ADR 190). The row
+    # names it in the log; unknown_trigger would press it anyway.
+    phantom_missiles: {glyph: test_screenshots/special_weapon/glyphs/phantom_missiles.png,
+      trigger: ready}},
+  # ADR 186: an ability fired on its lead (trigger lead_aligned). The diamond is
+  # searched within search_px of the crosshair (px at 1200 high), counts from
+  # min_score (the four diamonds of 2026-11-17 scored 0.79-0.83, nothing else in
+  # 153 screenshots above 0.43), needs two pictures in a row, and is the aim for
+  # memory_s. `q` goes out with the diamond within fire_px of the crosshair.
+  aimed: {enabled: true, search_px: 600, min_score: 0.65, memory_s: 0.45, fire_px: 60}}
 # ADR 098: suppress injection when the game does not have focus. Off until a
 # full session confirms it never suppresses legitimate presses (ADR 098 D6).
 # on_unknown: "inject" (default) or "suppress" — see ADR 098 D4.
@@ -643,6 +727,10 @@ special_weapon: {enabled: true, sectors: 16, min_lit_sectors: 14, min_lit_when_c
 weapon:
   enabled: true
   stale_after_s: 6.0
+  # FR-012: battle seconds with no usable AMMO_MISSILE, AMMO_FLARES or
+  # WEAPON_NAME read before a WARNING says that crop is off the HUD (a game
+  # update moved the panel on 2026-11-18 and nothing said so for 15 hours).
+  panel_silent_warn_s: 120.0
   classes:
     rocket:
       fire: hold_on_lead
@@ -675,7 +763,13 @@ incoming_detection:
 mission: {manual_takeover: {persist_through_respawn: false},
   weapon_loop_interval: 1.0, no_missiles_consecutive_required: 2, no_missiles_abort_grace_s: 6.0,
   starting_stalled_reclassify_after_s: 3.0, respawn_clear_stability_s: 1.5, starting_max_wait_s: 150.0,
-  startup_stall_exit_after_s: 600.0, good_luck_wait_s: 13.0, good_luck_bypass_on_alive: true,
+  startup_stall_exit_after_s: 600.0,
+  # ADR 189: hud launches the mission on health, speed and altitude read off the
+  # HUD, with no key pressed. good_luck restores the loop that tapped 'u' (the Good
+  # Luck emote) every 5 s and OCRed the chat reply; the two good_luck_* keys
+  # below apply only then.
+  starting_signal: hud,
+  good_luck_wait_s: 13.0, good_luck_bypass_on_alive: true,
   starting_health_probe_interval_s: 0.4, capture_stale_inject_s: 10.0,
   # ADR 132: seconds after mission_j20 starts (battle entry or a respawn
   # restart) during which left/right turns are suppressed. The aircraft flies
@@ -864,7 +958,16 @@ j20_mission: {target_painting_mode: false, attack_mode_dry_run: false, min_safe_
 acs_mission: {climb_alt_m: 3000, alt_floor_m: 3000, climb_max_s: 90.0,
   nose_angle_deg: -10, angle_tolerance_deg: 4.0, angle_confirm_reads: 2,
   angle_pulse_s: 0.6, angle_max_s: 20.0, tick_s: 0.5, lock_timeout_s: 5.0,
-  yield_to_target: true}
+  yield_to_target: true,
+  # ADR 191: each life flies level for this many seconds looking for a target;
+  # a target goes straight to the pursuit, none means terrain may hide it and
+  # the climb starts. Inside the window only a hard terrain or time-to-ground
+  # emergency climbs. 0 climbs at once, as before.
+  target_watch_s: 2.0,
+  # ADR 191 D7: true spawns an acs life level instead of the spawn guard's
+  # nose-up pulses. Off: lives that went straight to the pursuit then died on
+  # terrain 8 times in 34, against 5 in 106 with the pulses.
+  spawn_watch_only: false}
 # yield_to_target (operator, 2026-09-26): a tracker lock or a ring icon during the
 # climb or the nose-angle step ends the script and starts the pursuit at once (after
 # the respawn the script climbed and held -10 deg past targets it had acquired).
@@ -1957,6 +2060,13 @@ pursuit_mode:
   # would reach a boundary 0.5 away in about 50 s); terrain is covered by Climb's emergency.
   # Set a positive number of seconds to restore a cap.
   pursuit_max_duration_s: 0.0
+  # ADR 200 (operator, 2026-11-20: 'f' pressed over and over in matchmaking). A 'u'
+  # typed into the party chat started the pursuit with no battle, and it tapped 'f'
+  # into the chat box. The pursuit stops after no_hud_stop_s with no HUD altitude
+  # read (alive, the read never went missing over 10 s in ten logs of 2026-11-19/20),
+  # and 'u'/'o' start nothing unless an altitude was read in start_key_hud_window_s.
+  no_hud_stop_s: 15.0
+  start_key_hud_window_s: 30.0
   # ADR 148 (operator, 2026-09-25: after a kill and the switch to the secondary the
   # aircraft "crashed to the ground, it should have continued pursuit sequence"). The
   # longest a dive-recovery climb (a HARD emergency: time to ground or terrain) may fly
@@ -2059,6 +2169,12 @@ pursuit_mode:
     # gun holds wherever the ring is, in every round; fire_px then only counts
     # the ring-on-crosshair measure. false restores ADR 178 D3 (fire within fire_px).
     fire_while_ring_shows: true
+    # Operator, 2026-11-21: "as long as the circle is on screen it should
+    # activate gun". The detector missed the ring on three pictures in a row
+    # (13:26:26.75 to 27.16, ring plainly on screen) and the gun let go at
+    # 27.455 after 1.5 s. A gun firing on the ring keeps firing until the ring
+    # has gone unseen this long (0.83 s gap there). 0 = let go at once.
+    fire_hold_s: 1.0
     # Rev 4 (2026-11-14): 60, was 40. Operator: "we just need to get it close,
     # the game's aim assist will zoom the camera in and bring it closer". Of
     # ring sightings 40 to 60 px from the crosshair, the next picture had the
@@ -2123,6 +2239,31 @@ pursuit_mode:
     max_hold_s: 4.0
     cooldown_s: 3.0
     min_kph: 650
+  # Operator, 2026-11-21: "improve the machine gun accuracy, use throttle up and
+  # down to increase turn rate". Half the rounds, drawn per round (tags
+  # turn_arm_brake / turn_arm_control), hold the airbrake while the aim point
+  # (the lead ring, or the marker) is on_err or more off the crosshair with the
+  # target under max_km, until it is within off_err; cruise's afterburner comes
+  # back as it lets go. On 2026-11-21 (50 rounds) 28% of pictures under 1.5 km
+  # had the target 0.25 or more off, at a median 704 KPH, and the error after a
+  # steering hold was still 0.86 to 0.90 of itself 0.35 s later. The summary's
+  # TURNBRAKE line gives, by arm, the share of near pictures on target.
+  # Rev 2 (operator, 2026-11-21 17:30): "the braking to turn fast only works if
+  # speed is high ... you can also engage afterburner to turn faster". The
+  # airbrake from min_kph up (was 500; the median speed in pursuit was 704), the
+  # afterburner under burner_below_kph, neither between. Rev 1 (14:53 to 17:30,
+  # 24 rounds): 13 airbrake holds; near pictures on target, by the marker,
+  # brake arm 43% of 248, control 55% of 172 (noise at this size).
+  turn_brake:
+    share: 0.5
+    on_err: 0.25
+    off_err: 0.12
+    max_km: 1.5
+    max_hold_s: 2.5
+    cooldown_s: 1.5
+    min_kph: 800
+    burner_below_kph: 600
+    on_target_err: 0.1
   # Design 021 Phase 5 (shadow): where the tracked target is going, drawn on
   # live_hud.png as PROJ and logged as TARGETPROJ. Nothing flies on it. The
   # three values are the fit on 630 ring sightings of 2026-11-13: the marker's

@@ -937,7 +937,7 @@ def test_every_injectable_key_resolves_to_a_keysym():
         controller_module.NOSE_UP_KEY, controller_module.NOSE_DOWN_KEY,
         controller_module.ROLL_LEFT_KEY, controller_module.ROLL_RIGHT_KEY,
         controller_module.YAW_LEFT, controller_module.AFTERBURNER_KEY,
-        controller_module.AIRBRAKE_KEY, controller_module.WINGSWEEP_KEY,
+        controller_module.AIRBRAKE_KEY, controller_module.AUXILIARY_FEATURE_KEY,
         controller_module.DEPLOY_FLARES_KEY, controller_module.FIRE_MACHINE_GUN,
         controller_module.FIRE_ACTIVE_WEAPON, controller_module.PADLOCK_CAMERA,
         controller_module.SPECIAL_ABILITY, controller_module.SWITCH_WEAPON,
@@ -1114,6 +1114,7 @@ def _real_fsm_ctrl(monkeypatch):
 
 def _run_starting_loop(ctrl, analyzer, monkeypatch, done):
     """The real GAME_STARTING loop, with Good Luck read on its first scan."""
+    monkeypatch.setattr(ctrl, "_starting_signal", "good_luck")
     monkeypatch.setattr(ctrl, "_capture",
                         types.SimpleNamespace(grab_from_thread=lambda: object()))
     monkeypatch.setattr(analyzer, "scan_region_for_good_luck", lambda _frame: True)

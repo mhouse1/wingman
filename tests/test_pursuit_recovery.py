@@ -45,6 +45,8 @@ class _Snapshot:
     def __init__(self, altitude, angle=None):
         self.altitude = _Alt(altitude)
         self._angle = angle
+        # TelemetrySnapshot.taken_at_s: hud_altitude_age_s (ADR 200) reads it.
+        self.taken_at_s = time.time()
 
     def altitude_fresh(self):
         return True

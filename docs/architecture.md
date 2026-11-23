@@ -268,7 +268,7 @@ Started by the flare handler on every alert edge, after the flares. Holds ROLL_R
 
 **Game-starting loop** (`_start_game_starting_loop`):
 
-Runs as a daemon thread, started by `on_enter_GAME_STARTING`. Polls for "Good Luck" and fires `good_luck_detected` when found. After 10s, arms the health-scan fallback: if `game_battle_alive` becomes True (health OCR detects the aircraft is alive) before Good Luck appears, fires `good_luck_detected` immediately. On 120s timeout, fires `starting_timeout` → `GAME_STARTING_STALLED`. See [ADR 032](adr/032-game-battle-alive-fallback-trigger.md).
+Runs as a daemon thread, started by `on_enter_GAME_STARTING`. Under the shipped `mission.starting_signal: hud` it presses nothing: every `starting_health_probe_interval_s` it hands a fresh frame to the analyzer's HUD probe, which reads health, speed and altitude, and it fires `good_luck_detected` and launches the mission once the probe confirms the HUD ([ADR 189](adr/189-the-match-start-is-read-off-the-hud-not-the-good-luck-emote.md)). Under `good_luck` it taps the Good Luck emote every 5 s, polls for the "Good Luck" reply, and after 10 s also arms the same probe as a fallback ([ADR 032](adr/032-game-battle-alive-fallback-trigger.md)). On the `starting_max_wait_s` timeout either mode fires `starting_timeout` → `GAME_STARTING_STALLED`.
 
 ```
 while state == GAME_STARTING:
@@ -489,6 +489,7 @@ and stall prevention still re-press every tick, which now only renews their leas
 | `missile_evade` | tactic hold; inside a pursuit started by the pursuit on an alert, for the trial's evade arm; does not start while a hard-emergency climb flies | eject (ADR 070 d11), a hard-emergency climb (ADR 163 D5) | nothing | presses at start | ADR 070, ADR 075, ADR 163 |
 | `eject_and_dive` | eject sequence | nothing | nothing; its descent control cuts the burner | presses at phase start | ADR 056, ADR 134 D9 |
 | `rearm_climb` | pursuit hold, `pursuit_mode.resupply_priority.rearm_climb_s` after a rearm | manual takeover, the emergency climb's airbrake | nothing; it adds its lease to whoever else holds | presses at the first count that shows the rearm, re-presses every steering tick | operator, 2026-10-13 |
+| `turn_burner` | pursuit hold in a `pursuit_mode.turn_brake` brake round, while the aim point (the lead ring or the marker) is `on_err` or more off the crosshair with the target under `max_km` and a fresh speed under `burner_below_kph` | manual takeover, the emergency climb's airbrake, any airbrake holder (the approach, closing or turn brake) | nothing; it adds its lease to whoever else holds | re-presses every steering tick, gives the lease back on the first tick the turn no longer wants it | operator, 2026-11-21; Design 021 |
 
 **Airbrake, `AIRBRAKE_KEY`.**
 
@@ -715,6 +716,9 @@ stateDiagram-v2
     GAME_STARTING_STALLED --> GAME_UNKNOWN : starting stalled reclassify
     GAME_STARTING_STALLED --> GAME_STARTING : starting recovery
     GAME_STARTING_STALLED --> GAME_LOBBY : starting give up or manual reset
+    GAME_BATTLE --> GAME_UNKNOWN : battle hud lost
+    GAME_BATTLE_MANUAL --> GAME_UNKNOWN : battle hud lost
+    GAME_BATTLE_EJECT --> GAME_UNKNOWN : battle hud lost
     GAME_BATTLE --> GAME_END_B : click to detected
     GAME_BATTLE_MANUAL --> GAME_END_B : click to detected
     GAME_BATTLE_EJECT --> GAME_END_B : click to detected
@@ -942,12 +946,13 @@ enter main loop → startup classifier routes GAME_UNKNOWN → lobby or battle (
   → CANCEL visible → fire cancel_detected → GAME_STARTING
 
 [GAME_STARTING]
-  → _start_game_starting_loop() thread starts
-  → press J20 key every 5s
-  → scan good_luck crop
-  → Good Luck detected → wait 13s → launch the jet's mission
+  → _start_game_starting_loop() thread starts (starting_signal: hud, ADR 189)
+  → every 0.4s probe health, speed and altitude; no key pressed
+  → HUD confirmed → launch the jet's mission
     (_start_default_mission, jet_profile.profiles, else mission.default_mission)
   → fire good_luck_detected → GAME_BATTLE
+  (starting_signal: good_luck instead presses u every 5s, waits for the
+   Good Luck reply, then up to 13s or until health confirms)
 
 [GAME_BATTLE]
   → background OCR thread runs continuous parallel OCR

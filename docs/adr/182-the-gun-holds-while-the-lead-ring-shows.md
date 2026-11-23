@@ -109,6 +109,11 @@ confirmed` pictures under 1.2 km with 2 or more dots (a ring in use):
 - [x] Live, 21:01 session: 74 opens `lead ring showing`; the gun held on 57% of ring-in-use
       pictures (15% before); no off-centre release with a ring in use. 27 pictures missed while a
       resupply run had the steering, which D6 fixes.
-- [ ] Live: no `LEADRING: confirmed … gun=-` repeat during a resupply run.
+- [x] Live: no `LEADRING: confirmed … gun=-` repeat during a resupply run. Session of
+      2026-11-15 23:51 to 11-16 07:03 (69 missions): after a ring's first picture, the gun was
+      on in 2 of 3 ring-in-use pictures under a resupply run. The one off picture followed a
+      `target lost` release, and the gun reopened on the next picture
+      (`06:15:30,152 HOLD[gun]: None -> fire (lead ring showing ring_px=56 range=0.61km)`).
+      In the chase the gun was on in 528 of 531. The sample under a resupply run is small.
 - [ ] Gun damage per round (`GUNHIT:`) and overheat count (`GUNHEAT:`) against the 2026-11-15
       sessions.

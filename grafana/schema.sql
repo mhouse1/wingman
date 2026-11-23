@@ -122,3 +122,23 @@ SELECT s.spelling, n.name AS jet
 FROM spellings s
 LEFT JOIN cut_short c ON c.short = s.letters
 JOIN names n ON n.letters = coalesce(c.long, s.letters);
+
+-- 2026-11-16 (operator): the runtime trend HTML's figures on the dashboard
+-- (tests/runtime_performance_tracking.py). One row per session and figure of
+-- PerformanceTracker's run file (docs/performance/{current,release}/run_*.json):
+-- each crop's OCR read time, and `reaction`, the missile warning to flares.
+CREATE TABLE IF NOT EXISTS run_timings (
+    run_id          text        NOT NULL,  -- the session, e.g. 20261115_210159_acct2
+    figure          text        NOT NULL,  -- a crop (incoming, health, …) or reaction
+    started_at      timestamptz NOT NULL,  -- the time axis
+    ended_at        timestamptz,
+    wingman_version text,
+    n               integer     NOT NULL,  -- samples; the weight of the mean
+    mean            real,                  -- seconds
+    p50             real,
+    p95             real,
+    p99             real,
+    tags            jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    PRIMARY KEY (run_id, figure)
+);
+CREATE INDEX IF NOT EXISTS run_timings_started_at ON run_timings (started_at);

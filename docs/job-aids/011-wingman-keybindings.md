@@ -36,3 +36,24 @@ In settings > general
 Up Direction=Normal
 Turning Mode=Standard
 ```
+# Copying the bindings to another PC
+
+VEDA's bindings are version-controlled in `scripts/metalstorm-keybindings.reg`
+(controls only: no volumes, resolution, login or chat). Close the game first in
+both steps, because it writes its bindings to disk only when it quits.
+
+On VEDA, after changing a binding in the game:
+```
+make export-keybindings      # game -> repo; then commit the .reg
+```
+
+On the other PC, after pulling:
+```
+make deploy-keybindings DRY=--dry-run   # list what would change
+make deploy-keybindings                 # repo -> game
+```
+
+On Linux this writes the main Heroic prefix (backup `user.reg.bak-*` beside it;
+`KEYBINDINGS_PREFIX=...` picks another), and the account prefixes pick it up at
+their next launch. On Windows it runs `reg import`, after saving the old key to
+`%TEMP%\metalstorm-before-*.reg`.

@@ -80,6 +80,11 @@ FSM_TRANSITIONS = [
     {"trigger": "starting_stalled_reclassify", "source": "GAME_STARTING_STALLED", "dest": "GAME_UNKNOWN"},
     {"trigger": "starting_recovery",  "source": "GAME_STARTING_STALLED", "dest": "GAME_STARTING"},
     {"trigger": "starting_give_up",   "source": "GAME_STARTING_STALLED", "dest": "GAME_LOBBY"},
+    # ADR 195: a battle state with no weapon panel and no speed or altitude for a
+    # minute; GAME_UNKNOWN reads the screen afresh.
+    {"trigger": "battle_hud_lost",
+     "source": ["GAME_BATTLE", "GAME_BATTLE_MANUAL", "GAME_BATTLE_EJECT"],
+     "dest": "GAME_UNKNOWN"},
     {"trigger": "click_to_detected",  "source": ["GAME_BATTLE", "GAME_BATTLE_MANUAL", "GAME_BATTLE_EJECT"], "dest": "GAME_END_B"},
     {"trigger": "manual_takeover",    "source": ["GAME_BATTLE", "GAME_BATTLE_EJECT"], "dest": "GAME_BATTLE_MANUAL"},
     {"trigger": "respawn_reset",      "source": "GAME_BATTLE_MANUAL",     "dest": "GAME_BATTLE"},

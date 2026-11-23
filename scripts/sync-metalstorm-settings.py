@@ -135,6 +135,41 @@ def parse_section(text: str):
     return entries, start, end
 
 
+def merge_entries(dst_text: str, copy: dict):
+    """Return (`dst_text` with `copy`'s entries written into its section, added keys).
+
+    An entry the target already has is replaced in place; a new one is appended
+    to the end of the section. Everything else in the file is left as it was.
+    `dst_text` must already have the section (see `parse_section`).
+    """
+    dst_entries, d_start, d_end = parse_section(dst_text)
+    lines = dst_text.splitlines(keepends=True)
+    head, section, tail = lines[:d_start + 1], lines[d_start + 1:d_end], lines[d_end:]
+    kept = []
+    i = 0
+    while i < len(section):
+        line = section[i]
+        if line.startswith('"'):
+            chunk = [line]
+            while chunk[-1].rstrip("\n").endswith("\\") and i + 1 < len(section):
+                i += 1
+                chunk.append(section[i])
+            raw = "".join(chunk)
+            key = raw[1:raw.index('"', 1)]
+            kept.append(copy.get(key, raw))
+        else:
+            kept.append(line)
+        i += 1
+    added = [k for k in copy if k not in dst_entries]
+
+    body = "".join(head) + "".join(kept)
+    if added:
+        if not body.endswith("\n"):
+            body += "\n"
+        body += "".join(copy[k] for k in added)
+    return body + "".join(tail), added
+
+
 def main(argv) -> int:
     args = [a for a in argv[1:] if not a.startswith("--")]
     dry = "--dry-run" in argv
@@ -201,32 +236,8 @@ def main(argv) -> int:
     backup = dst_reg.with_suffix(f".reg.bak-{time.strftime('%Y%m%d_%H%M%S')}")
     backup.write_text(dst_text, encoding="utf-8")
 
-    lines = dst_text.splitlines(keepends=True)
-    head, section, tail = lines[:d_start + 1], lines[d_start + 1:d_end], lines[d_end:]
-    kept = []
-    i = 0
-    while i < len(section):
-        line = section[i]
-        if line.startswith('"'):
-            chunk = [line]
-            while chunk[-1].rstrip("\n").endswith("\\") and i + 1 < len(section):
-                i += 1
-                chunk.append(section[i])
-            raw = "".join(chunk)
-            key = raw[1:raw.index('"', 1)]
-            kept.append(copy.get(key, raw))
-        else:
-            kept.append(line)
-        i += 1
-    existing = {k for k in dst_entries}
-    added = [v for k, v in copy.items() if k not in existing]
-
-    body = "".join(head) + "".join(kept)
-    if added:
-        if not body.endswith("\n"):
-            body += "\n"
-        body += "".join(added)
-    dst_reg.write_text(body + "".join(tail), encoding="utf-8")
+    merged, added = merge_entries(dst_text, copy)
+    dst_reg.write_text(merged, encoding="utf-8")
     if launch:
         print(f"settings sync: copied {len(changed)} settings from "
               f"{src_reg.parent.name} into {dst_reg.parent.name} "

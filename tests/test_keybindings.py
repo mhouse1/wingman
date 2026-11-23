@@ -16,7 +16,7 @@ from wingman import keybindings
 # settings — see the keybindings module docstring.
 GAME_KEYS = {
     "NOSE_UP_KEY", "NOSE_DOWN_KEY", "ROLL_LEFT_KEY", "ROLL_RIGHT_KEY",
-    "YAW_LEFT", "AFTERBURNER_KEY", "AIRBRAKE_KEY", "WINGSWEEP_KEY",
+    "YAW_LEFT", "AFTERBURNER_KEY", "AIRBRAKE_KEY", "AUXILIARY_FEATURE_KEY",
     "DEPLOY_FLARES_KEY", "FIRE_MACHINE_GUN", "FIRE_ACTIVE_WEAPON",
     "SWITCH_WEAPON", "SPECIAL_ABILITY", "PADLOCK_CAMERA",
     # A game control wingman does not inject yet. It is here so the collision

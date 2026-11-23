@@ -101,6 +101,7 @@ def test_the_waiting_tick_asks_for_the_read():
     analyzer.scan_region_for_cancel.return_value = False
     analyzer.scan_region_for_play_button.return_value = None
     analyzer.crops = {}
+    analyzer.join_refused_recently.return_value = False
     handler = WaitingFallbackHandler(analyzer, MagicMock(), {})
     handler.on_state_change(GameState.GAME_WAITING)
     frame = _frame()

@@ -269,9 +269,11 @@ def test_unleased_keys_keep_phase_one_semantics():
 
 def test_production_leases_the_throttle_the_pitch_and_the_roll_keys():
     """The roll keys since ADR 163: the missile evade holds roll-right through a
-    pursuit whose yield releases its own tracking roll."""
+    pursuit whose yield releases its own tracking roll. And `;` since ADR 185: the
+    flare roll and the evade both hold it."""
     assert controller._actuator._leased == {AFTERBURNER_KEY, NOSE_UP_KEY, NOSE_DOWN_KEY,
-                                            ROLL_LEFT_KEY, ROLL_RIGHT_KEY}
+                                            ROLL_LEFT_KEY, ROLL_RIGHT_KEY,
+                                            controller.BARREL_ROLL_KEY}
 
 
 @pytest.fixture

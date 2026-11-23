@@ -626,6 +626,21 @@ sync-settings-3:
 	@$(PYTHON_RUN) scripts/sync-metalstorm-settings.py \
 	  "$(SETTINGS_SRC_PREFIX)" "$(ACCT3_PREFIX)" $(DRY)
 
+# Keybindings under version control (scripts/metalstorm-keybindings.reg), so a
+# second PC flies VEDA's bindings. Controls only — no volumes, resolution or
+# identity. Close the game first: it writes its bindings to disk when it quits.
+#   make export-keybindings               # on VEDA: game -> repo, then commit the .reg
+#   make deploy-keybindings DRY=--dry-run # on the other PC: list what would change
+#   make deploy-keybindings               # repo -> game (Linux: main prefix; Windows: reg import)
+# Account prefixes pick the bindings up from the main prefix at their next launch.
+KEYBINDINGS_PREFIX ?= $(SETTINGS_SRC_PREFIX)
+
+export-keybindings:
+	@$(PYTHON_RUN) scripts/metalstorm-keybindings.py export "$(KEYBINDINGS_PREFIX)"
+
+deploy-keybindings:
+	@$(PYTHON_RUN) scripts/metalstorm-keybindings.py deploy "$(KEYBINDINGS_PREFIX)" $(DRY)
+
 # Does an X11 focus guard work on this Wayland session? Run this, then alt-tab
 # between the game and another window for the duration. See scripts/focus-probe.py.
 focus-probe:
@@ -710,7 +725,7 @@ nested-status:
 nested-stop:
 	@$(PYTHON_RUN) scripts/nested-display.py stop
 
-.PHONY: g1 g2 g3 r1 r2 r3 ensure-virtual-desktop sync-settings-1 sync-settings-2 sync-settings-3 sync-account-settings stop-game nested-setup nested-focus nested-status nested-stop
+.PHONY: g1 g2 g3 r1 r2 r3 ensure-virtual-desktop sync-settings-1 sync-settings-2 sync-settings-3 sync-account-settings export-keybindings deploy-keybindingsstop-game nested-setup nested-focus nested-status nested-stop
 
 # Launch MetalStorm via umu-run + GE-Proton (no Heroic UI click needed).
 # Always kills any stale instance and relaunches fresh so the window comes to front.

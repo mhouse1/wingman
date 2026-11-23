@@ -35,18 +35,22 @@ thresholds in config.yaml.
 **Rationale**: The performance regression workflow: PerformanceTracker histograms per crop,
 docs/performance/current vs release, make tp preview gates.
 
-## Mission launch after Good Luck
+## Mission launch on the battle HUD
 
 **UID**: FR-003
 
-**Statement**: On detecting the Good Luck banner in GAME_STARTING, wingman shall launch the
-mission after at most mission.good_luck_wait_s, and earlier when battle-alive
-evidence is confirmed while mission.good_luck_bypass_on_alive is enabled.
-Whether the wait ran its full length or was bypassed shall be logged.
+**Statement**: With mission.starting_signal set to hud, wingman shall press no key during
+GAME_STARTING and shall launch the mission when the HUD is confirmed from the
+health, speed and altitude readings. With it set to good_luck, on detecting
+the Good Luck banner wingman shall launch the mission after at most
+mission.good_luck_wait_s, and earlier when battle-alive evidence is confirmed
+while mission.good_luck_bypass_on_alive is enabled; whether that wait ran its
+full length or was bypassed shall be logged.
 
-**Rationale**: ADR 065: the wait is the no-evidence fallback; the bypass converts confirmed
-health evidence into earlier launches (measured mean saving 3.9 s per launch
-across 54 armed windows in three sessions).
+**Rationale**: ADR 189: the Good Luck emote went to the whole match every 5 s, and the launch
+waited on health anyway. ADR 065: in the good_luck mode the wait is the
+no-evidence fallback and the bypass converts confirmed health evidence into
+earlier launches.
 
 ## Battle entry on confirmed battle-alive evidence
 
@@ -70,7 +74,8 @@ the fallback; ADR 065 made it reachable.
   **ID**: `FR-004`
 
 **Statement**: The GAME_STARTING battle-alive probe shall log every attempt, including
-attempts that read no value, and shall report attempt count and
+attempts that read no value, with the health, speed and altitude it read, shall
+name the evidence that confirmed the HUD, and shall report attempt count and
 first-raw-read time on disarm.
 
 **Rationale**: ADR 065 Decision 4. The probe was unreachable for three months because a
@@ -223,31 +228,35 @@ already exited. Implemented by close_nested_display
 race are in wingman/main.py (the SIGTERM/SIGHUP handlers near the top of
 main(), and the standby KeyboardInterrupt handler).
 
-## Roll-right held through the flares on an incoming-missile alert
+## Barrel roll held through the flares on an incoming-missile alert
 
 **UID**: FR-011
 
 **Statement**: When a new incoming-missile detection triggers a flare burst during
-GAME_BATTLE or GAME_BATTLE_EJECT, wingman shall hold roll-right from the
+GAME_BATTLE or GAME_BATTLE_EJECT, wingman shall hold the game's roll
+control (not the bank-and-turn keys, ADR 185) from the
 detection until behavior_tree.missile_evade.flare_roll_after_s after the
-burst's last flare has been deployed. A detection that triggers another
+later of the burst's last flare and the last detection of the incoming
+warning. A detection that triggers another
 burst while the roll is held shall extend the hold to the same interval
 after that burst's last flare, rather than start a second hold. The roll
 shall be held whether or not the missile-evade tactic (FR-006) is enabled
-or flying. While it is held, the pursuit's steering shall write neither
-pitch nor roll, so the roll leaves the flight path unchanged. The hold
+or flying. While it is held, the pursuit shall keep steering on pitch and
+on the bank-and-turn keys toward its target (ADR 193). The hold
 shall end on manual takeover, on program exit, when an eject begins, and
-when a hard-emergency climb takes the airframe, and in any case no later
-than behavior_tree.missile_evade.flare_roll_max_s after it began. In a
-round where the pursuit holds its target (pursuit_mode.hold_target), no
-roll shall start, and a held roll shall end, while the pursuit has its
-target in view; the flare burst itself shall be unaffected.
+when a hard-emergency climb takes the airframe. A burst that never reports
+its last flare shall not hold it longer than
+behavior_tree.missile_evade.flare_roll_max_s after it began, unless the
+warning is still being detected. The roll shall hold whether or not the
+pursuit has its target in view (ADR 184).
 
 **Rationale**: Operator, 2026-10-27; ADR 164. The roll is a continuous barrel roll about
 the aircraft's own axis: it does not change the trajectory, it keeps the
 aircraft turning about that axis, which makes it harder for a missile to
-hit. The flight path stays unchanged only if nothing else steers while it
-rolls, hence the pursuit's yield. flare_roll_after_s ships at the
+hit. ADR 164 had the pursuit yield while it rolled; ADR 193 (operator,
+2026-11-19: "the jet can roll while still steering towards targets")
+removed the yield after a 22 s roll under a LOCK WARNING that never cleared
+flew straight into terrain with the nuke ready. flare_roll_after_s ships at the
 operator's 2 s. The behaviour existed before and was lost twice: the
 March 2026 mission_j20 script rolled right while it dropped flares, and
 went with the scripted missions; ADR 070's evade held roll-right on every
@@ -260,7 +269,38 @@ whose pull-up a roll would turn sideways. The cap is a fault backstop for
 a burst that never reports its last flare. Implemented by
 Controller.flare_roll (wingman/controller.py), started from
 AmmoEventsHandler.deploy_flares_on_new_incoming (wingman/tick_handlers.py);
-pinned by tests/test_flare_roll.py. The exception for a target in view is
-ADR 181 (operator, 2026-11-15): the roll kept the flight path but cost the
-chase its target. The roll still flies in every other case, so the
-behaviour is not lost. Pinned by tests/test_pursuit_hold.py.
+pinned by tests/test_flare_roll.py. ADR 181 (operator, 2026-11-15) had
+withheld the roll with a target in view; ADR 184 (operator, 2026-11-16)
+restores it there and holds it until the warning has been gone
+flare_roll_after_s, because the roll had stopped happening on most alerts.
+
+## The weapon panel reads off the HUD the game draws
+
+**UID**: FR-012 \
+**Status**: Draft
+
+**Statement**: In GAME_BATTLE, GAME_BATTLE_MANUAL, GAME_BATTLE_EJECT and GAME_END_B,
+wingman shall read the selected weapon's count whole for any count from 0
+to 999, the flare count, and the selected weapon's name well enough to
+sort it into its weapon class (weapon.classes), on the weapon panel the
+game currently draws, for every jet. When any of those three reads has
+produced no usable reading for weapon.panel_silent_warn_s seconds of battle
+time, wingman shall log a WARNING naming the crop, once per silent stretch,
+and log when that crop reads again.
+
+**Rationale**: Operator, 2026-11-19. A game update between 13:43 and 13:58 on 2026-11-18
+redrew the weapon panel: the count moved from the right of the panel to the
+left, right-aligned to its slash, and the name and flare rows moved up about
+20 px. The crops did not move, so AMMO_MISSILE read no digits for 15 hours
+and WEAPON_NAME read 'ee'. With no count of 0 the primary-empty switch
+never pressed SWITCH_WEAPON (Meteor 0/4 fired on with a loaded 2/2
+secondary); with no weapon class the rocket pod was tapped at 5.6 km
+instead of held on its lead diamond (ADR 180). The first recalibration
+clipped a three-digit rocket-pod count, so 114 read as junk. Nothing in the
+log said any of this above DEBUG. Only battle time counts towards the
+warning: a lobby or a respawn screen is not a failed read. Implemented by
+the AMMO_MISSILE, AMMO_FLARES and WEAPON_NAME crops in wingman/config.yaml,
+_process_health_region and _process_weapon_name_region
+(wingman/analyzer.py) and PanelReadWatch (wingman/panel_read_watch.py);
+pinned by tests/test_weapon_panel_ocr.py (real OCR on the redrawn panel,
+including 114/114) and tests/test_panel_read_watch.py.

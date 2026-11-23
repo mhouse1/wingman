@@ -33,9 +33,12 @@ from .clear_path import PathGoal
 from .gun_damage import GunDamageLog
 from .lead_ring import LeadRingWatch, RingAimTrial, crosshair
 from .rocket_lead import RocketLead
+from .aimed_ability import AimedAbility, AimView
+from .special_weapon import resolve_profile
 from .pursuit_hold import HOLD as _HOLD_ARM, PursuitHoldTrial
 from .target_projection import TargetProjection
 from .closing_brake import ClosingBrake
+from .turn_brake import TurnBrake
 from .target_range import TargetRangeReader
 from .crop_region import CropCoords, crop_centre
 from .icon_steering import IconPoints, IconSteeringConfig, find_ring_icons
@@ -137,7 +140,9 @@ def _may_inject(what: str = "key") -> bool:
 _actuator = Actuator(lambda: keyboard_module, lambda what: _may_inject(what),
                      leased_keys=(_keybindings.AFTERBURNER_KEY,
                                   _keybindings.NOSE_UP_KEY, _keybindings.NOSE_DOWN_KEY,
-                                  _keybindings.ROLL_LEFT_KEY, _keybindings.ROLL_RIGHT_KEY))
+                                  _keybindings.ROLL_LEFT_KEY, _keybindings.ROLL_RIGHT_KEY,
+                                  # ADR 185: the flare roll and the evade both hold `;`.
+                                  _keybindings.BARREL_ROLL_KEY))
 
 # A failed key RELEASE is the start of a stuck-key incident, and the key does not
 # come back when this process dies: on Linux XTest key state lives in the X
@@ -197,8 +202,9 @@ from .keybindings import (                                          # noqa: F401
     SPECIAL_ABILITY,
     SWITCH_WEAPON,
     TOGGLE_WEAPON_LOOP_KEY,
-    WINGSWEEP_KEY,
+    AUXILIARY_FEATURE_KEY,
     YAW_LEFT,
+    BARREL_ROLL_KEY,
     _WATCHED_MANEUVER_KEYS,
 )
 
@@ -215,7 +221,7 @@ TAKEOVER_KEYS = ((MANUAL_TAKEOVER_KEY, NOSE_UP_KEY, NOSE_DOWN_KEY,
 # there they are wingman's own keystrokes rather than the operator's.
 INJECTABLE_KEYS = (
     NOSE_UP_KEY, NOSE_DOWN_KEY, ROLL_LEFT_KEY, ROLL_RIGHT_KEY,
-    YAW_LEFT, AFTERBURNER_KEY, AIRBRAKE_KEY, WINGSWEEP_KEY,
+    YAW_LEFT, AFTERBURNER_KEY, AIRBRAKE_KEY, AUXILIARY_FEATURE_KEY,
     DEPLOY_FLARES_KEY, FIRE_MACHINE_GUN, FIRE_ACTIVE_WEAPON,
     PADLOCK_CAMERA, SPECIAL_ABILITY, MISSION_J20_KEY,
     SWITCH_WEAPON,
@@ -734,6 +740,9 @@ class Controller:
         # a battle-alive signal ends it early (2026-08-05).
         self._good_luck_wait_s = float(good_luck_wait_s)
         self._good_luck_bypass_on_alive = bool(good_luck_bypass_on_alive)
+        # ADR 189: what the GAME_STARTING loop watches for, and how often it looks.
+        self._starting_signal = _c.starting_signal
+        self._starting_probe_interval_s = max(0.1, float(_c.starting_health_probe_interval_s))
 
         # Search-and-destroy loop state (padlock + weapon fire; used during disengage)
         self._sdl_stop: threading.Event | None = None
@@ -901,6 +910,11 @@ class Controller:
         # a config that never sets the key behaves as it always did.
         self._pursuit_max_duration_s = float(_pm.get("pursuit_max_duration_s", 20.0))
         self._pursuit_padlock_verify = bool(_pm.get("pursuit_padlock_verify", False))
+        # ADR 200: no HUD, no pursuit; no recent HUD, no start key.
+        self._pursuit_no_hud_stop_s = float(
+            _pm.get("no_hud_stop_s", schema_default("pursuit_mode.no_hud_stop_s")))
+        self._start_key_hud_window_s = float(_pm.get(
+            "start_key_hud_window_s", schema_default("pursuit_mode.start_key_hud_window_s")))
         # ADR 148: the longest a dive-recovery climb may keep flying a pursuit before the
         # chase resumes (the tree starts a new one at once if the emergency is still on).
         # 0 turns the feature off: a climb hold then releases in GAME_BATTLE_EJECT as it
@@ -991,6 +1005,29 @@ class Controller:
         self._closing_brake_count = 0
         self._closing_brake_held_s = 0.0
         self._closing_brake_read_ts: "float | None" = None
+        # Operator, 2026-11-21: in a share of rounds the airbrake turns the jet
+        # tighter onto an aim point far off the crosshair at gun range.
+        _tb = _pm.get("turn_brake") or {}
+
+        def _tb_get(key):
+            return _tb.get(key, schema_default("pursuit_mode.turn_brake." + key))
+        self._turn_brake = TurnBrake(
+            float(_tb_get("share")) if self._target_range is not None else 0.0,
+            _tb_get("on_err"), _tb_get("off_err"), _tb_get("max_km"),
+            _tb_get("max_hold_s"), _tb_get("cooldown_s"), _tb_get("on_target_err"))
+        self._turn_brake_min_kph = float(_tb_get("min_kph"))
+        self._turn_burner_below_kph = float(_tb_get("burner_below_kph"))
+        if self._turn_burner_below_kph > self._turn_brake_min_kph:
+            raise ValueError("turn_brake.burner_below_kph must not exceed min_kph")
+        self._turn_burn_wanted = False
+        self._turn_burner_held = False
+        self._turn_burner_since = 0.0
+        self._turn_burner_count = 0
+        self._turn_burner_held_s = 0.0
+        self._turn_brake_holds = False          # the airbrake is down for it
+        self._turn_brake_since = 0.0
+        self._turn_brake_count = 0
+        self._turn_brake_held_s = 0.0
         # Design 021 Phase 5 (shadow): where the tracked target is going, from
         # the marker's motion with the chase's own keys taken out. Logged and
         # drawn on the HUD; nothing flies on it.
@@ -1026,6 +1063,15 @@ class Controller:
         # displayed it should activate"; fire_while_ring_shows turns that on.
         self._ring_shown_px: "float | None" = None
         self._gun_fire_while_ring = bool(_gl_get("fire_while_ring_shows"))
+        # Operator, 2026-11-21: "as long as the circle is on screen it should
+        # activate gun". A gun firing on the ring keeps firing until no ring of
+        # the target has been seen for fire_hold_s, across the detector's misses
+        # (13:26:26.75 to 27.16: three missed pictures, ring on screen).
+        self._ring_fire_hold_s = float(_gl_get("fire_hold_s"))
+        # Picture time of the newest sighting of the target's ring (confirmed,
+        # or seen with ring_min_dots dots), and of the picture in hand.
+        self._ring_seen_ts: "float | None" = None
+        self._ring_pic_ts: "float | None" = None
         # Phase 3's measure, by arm: new pictures under 1.2 km with a tracked
         # target, and of them those with a confirmed ring within fire_px.
         self._ring_on_tally: "dict[str, list[int]]" = {}
@@ -1063,6 +1109,15 @@ class Controller:
         self._rocket_held_since: "float | None" = None
         self._rocket_holds = 0
         self._rocket_held_s = 0.0
+        # ADR 186: an ability fired on its lead diamond (the F-106's nuke), on any
+        # jet whose glyph names it. It aims the pursuit ahead of every other source
+        # and presses `q` once the diamond is on the crosshair.
+        self._special_weapon_cfg = dict(_c.special_weapon or {})
+        self._aimed_ability = AimedAbility(self._special_weapon_cfg,
+                                           self._rocket_crosshair_pct)
+        self._ability_view: "AimView | None" = None
+        self._ability_view_was = False
+        self._ability_presses = 0
         # mission_acs defers SWITCH_WEAPON until the selected weapon runs out
         # (ADR 144 D4, 2026-09-24). The key is a toggle, so this many
         # consecutive ammo==0 reads are required before pressing it. At the
@@ -1417,6 +1472,20 @@ class Controller:
         # and held -10 deg (nose-up pulses 3 s apart) while the tracker
         # had acquired targets twice, 12 s apart.
         self._acs_yield_to_target = bool(_acs.get("yield_to_target", False))
+        # ADR 191: seconds of each life spent level, looking for a target, before
+        # mission_acs climbs. The tree's floor climb took the nose up from the
+        # spawn whether or not a target was in view; now only a hard terrain or
+        # time-to-ground emergency climbs inside the window. 0 = no window.
+        self._acs_target_watch_s = max(0.0, float(_acs.get(
+            "target_watch_s", schema_default("acs_mission.target_watch_s"))))
+        # ADR 191 D7: whether the spawn guard spawns an acs life level (D4). Off:
+        # lives that went straight to the pursuit died on terrain 8 times in 34
+        # with it, against 5 in 106 on the three sessions before it.
+        self._acs_spawn_watch_only = bool(_acs.get(
+            "spawn_watch_only", schema_default("acs_mission.spawn_watch_only")))
+        self._start_watch_until = 0.0
+        self._start_watch_armed_ts = 0.0
+        self._start_watch_refused_log_ts = 0.0
         # ADR 147: the altitude doctrine mission_acs flies. The tree's hard
         # floor (behavior_tree.climb.alt_floor_m) sits above this mission's
         # level-off altitude, so the tree restarted the climb the script had
@@ -1511,6 +1580,7 @@ class Controller:
         self._sg_observe_s = float(_sg_cfg.get("observe_s", 1.0))
         self._spawn_guarding = threading.Event()
         self._sg_stop = threading.Event()
+        self._sg_watch_only = False          # ADR 191 D4
         self._sg_thread: "threading.Thread | None" = None
         # Stamped by notify_spawn_alive(); read by the guard thread (float
         # store is atomic under the GIL, same pattern as the cooldown stamps).
@@ -2243,6 +2313,57 @@ class Controller:
             return "closing target"
         except Exception as exc:
             log_suppressed(logger, "closing_brake_goal", exc)
+            return None
+
+    def turn_brake_new_round(self) -> None:
+        """A round has started: draw the turn brake's arm for it, log it, and
+        tag the round for the summary."""
+        brake = getattr(self, "_turn_brake", None)
+        arm = brake.new_round() if brake is not None else None
+        if arm is None:
+            return
+        logger.info("TURNBRAKE TRIAL: round %d — %s arm (share %.2f)",
+                    brake.rounds, arm, brake.share)
+        if self._round_note is not None:
+            try:
+                self._round_note("turn_arm_" + arm, time.time())
+            except Exception as exc:
+                log_suppressed(logger, "turn_brake_note", exc)
+
+    def _turn_brake_goal(self, target_steers: bool, err: "float | None",
+                         err_y: "float | None", picture_ts: "float | None") -> "str | None":
+        """Operator, 2026-11-21: "tight turn" while a `brake` round should hold
+        the airbrake: the target steers, the aim point (ring or marker) is far
+        off the crosshair with the target near, and a fresh speed reading is at
+        `min_kph` or more. Tallies the trial's measure in both arms."""
+        brake = self._turn_brake
+        if not brake.enabled:
+            return None
+        try:
+            km = None
+            if self._target_range is not None and self._gun_cluster is not None:
+                reading = self._target_range.latest(self._gun_cluster,
+                                                    self._gun_range_max_age_s)
+                km = reading.km if reading is not None else None
+            if not target_steers:
+                err = err_y = None
+            if not brake.update(err, err_y, km, time.monotonic(), picture_ts):
+                return None
+            # Operator, 2026-11-21: "the braking to turn fast only works if speed
+            # is high ... you can also engage afterburner to turn faster". Over
+            # min_kph the airbrake, under burner_below_kph the afterburner, and
+            # between them neither.
+            speed, _ts = self._speed_reading()
+            if speed is None:
+                brake.stop("no fresh speed")
+                return None
+            if speed >= self._turn_brake_min_kph:
+                return "tight turn"
+            if speed < self._turn_burner_below_kph:
+                self._turn_burn_wanted = True
+            return None
+        except Exception as exc:
+            log_suppressed(logger, "turn_brake_goal", exc)
             return None
 
     def gun_aim_new_round(self) -> None:
@@ -3033,6 +3154,36 @@ class Controller:
         """
         cfg = self._approach_brake_cfg
         now = time.time()
+        # Operator, 2026-11-21: the turn brake, held for as long as the goal is
+        # given (the TurnBrake decides), with the same vetoes.
+        if goal == "tight turn":
+            veto = self._approach_brake_veto(now)
+            if veto is not None:
+                self._turn_brake.stop(veto)
+                self._approach_brake_off(veto)
+                return
+            if self._closing_brake_holds:
+                self._closing_brake_holds = False
+                self._closing_brake_held_s += max(0.0, now - self._closing_brake_since)
+                self._closing_brake.stop("handed to the turn brake")
+            if not self._turn_brake_holds:
+                self._turn_brake_holds = True
+                self._turn_brake_since = now
+                self._turn_brake_count += 1
+                logger.info("TURNBRAKE: airbrake on — the aim point is far off the crosshair")
+            self._dive_dose_running = False
+            self._approach_brake_until = now + 1.0
+            self._approach_brake_on()
+            return
+        if self._turn_brake_holds:
+            self._turn_brake_holds = False
+            self._turn_brake_held_s += max(0.0, now - self._turn_brake_since)
+            why = self._turn_brake.why_off or "the turn brake's goal ended"
+            self._turn_brake.stop("handed to the %s brake" % goal if goal else why)
+            if goal is not None:
+                logger.info("TURNBRAKE: airbrake handed to the %s brake", goal)
+            else:
+                self._approach_brake_off("turn brake: " + why)
         # ADR 179: the chase closing fast on a near target. Held for as long as
         # the goal is given, not dosed on the speed; the vetoes are the same.
         if goal == "closing target":
@@ -3138,6 +3289,10 @@ class Controller:
         if getattr(self, "_closing_brake_holds", False):
             self._closing_brake_holds = False
             self._closing_brake_held_s += max(0.0, time.time() - self._closing_brake_since)
+        if getattr(self, "_turn_brake_holds", False):
+            self._turn_brake_holds = False
+            self._turn_brake_held_s += max(0.0, time.time() - self._turn_brake_since)
+            self._turn_brake.stop(why)
         if not getattr(self, "_approach_brake_held", False):
             return
         self._approach_brake_held = False
@@ -3213,6 +3368,26 @@ class Controller:
             self._climb_key(AIRBRAKE_KEY, press=False, action="rearm_climb")
             self._rearm_brake_held = False
 
+    def _turn_burner(self, hold: bool, why: str = "") -> None:
+        """Operator, 2026-11-21: the turn assist's lease on the afterburner, taken
+        while a `brake` round's far aim point is flown under burner_below_kph and
+        given back otherwise. The key is leased (ADR 151): giving it back lifts it
+        only if cruise or another holder does not still want it."""
+        if hold and self._may_hold_key(AFTERBURNER_KEY, requester="turn_burner"):
+            self._climb_key(AFTERBURNER_KEY, press=True, action="turn_burner")
+            if not self._turn_burner_held:
+                self._turn_burner_held = True
+                self._turn_burner_since = time.time()
+                self._turn_burner_count += 1
+                logger.info("TURNBRAKE: afterburner on — the aim point is far off the "
+                            "crosshair at low speed")
+        elif self._turn_burner_held:
+            self._turn_burner_held = False
+            self._turn_burner_held_s += max(0.0, time.time() - self._turn_burner_since)
+            self._climb_key(AFTERBURNER_KEY, press=False, action="turn_burner")
+            logger.info("TURNBRAKE: afterburner released (%s)",
+                        why or self._turn_brake.why_off or "the turn no longer wants it")
+
     def _rearm_afterburner(self, hold: bool) -> None:
         """The rearm climb-out's lease on the afterburner: taken and renewed
         while `hold`, given back otherwise. The key is leased (ADR 151), so
@@ -3267,13 +3442,26 @@ class Controller:
             limit = self._pursuit_gun_centre_err * factor
             centred = (bool(visible) and err is not None and err_y is not None
                        and abs(err) <= limit and abs(err_y) <= limit)
+        if (not centred and self._gun_held_since is not None
+                and self._gun_fire_while_ring and self._ring_fire_hold_s > 0
+                and self._ring_seen_ts is not None and self._ring_pic_ts is not None
+                and self._ring_pic_ts - self._ring_seen_ts <= self._ring_fire_hold_s):
+            # Operator, 2026-11-21: the ring is still on screen; the detector
+            # missed it on this picture.
+            centred = True
+            ring_fire = True
+        else:
+            ring_fire = centred and (shown_px is not None or ring_px is not None)
         # Operator, 2026-11-13: only under gun_max_range_km, read off the
         # tracked nameplate. No fresh reading of this nameplate is out of range.
-        in_range, rng = True, ""
+        # Operator, 2026-11-21: "the gun should always fire if ring is on
+        # screen even if range is unknown": the game draws the ring only in gun
+        # range, so firing on the ring skips the range rule.
+        in_range, rng, km = True, "", None
         if self._target_range is not None:
             reading = self._target_range.latest(self._gun_cluster, self._gun_range_max_age_s)
             km = reading.km if reading is not None else None
-            in_range = km is not None and km < self._gun_range_limit_km()
+            in_range = ring_fire or (km is not None and km < self._gun_range_limit_km())
             rng = (" range=%.2fkm" % km if km is not None else " range=none")
         if centred and in_range and self._gun_held_since is None:
             self._press_tracking_key(FIRE_MACHINE_GUN, "pursuit_gun")
@@ -3333,15 +3521,19 @@ class Controller:
                 reading = self._target_range.latest(self._gun_cluster,
                                                     self._gun_range_max_age_s)
                 self._lead_km = reading.km if reading is not None else None
-                if reading is not None and reading.km < self._lead_search_max_km:
+                # Operator, 2026-11-21: "the gun should always fire if ring is on
+                # screen even if range is unknown": searched without a reading too.
+                if reading is None or reading.km < self._lead_search_max_km:
                     ring = self._lead_ring.observe(
-                        frame, (obs["centroid_x"], obs["centroid_y"]), reading.km,
+                        frame, (obs["centroid_x"], obs["centroid_y"]),
+                        reading.km if reading is not None else None,
                         picture_ts, self._gun_held_since is not None)
                     if ring is not None:
                         self._gun_ring_px = self._lead_ring.cross_px(frame.shape, ring)
                     # Phase 3's measure: how often the ring sits on the crosshair
                     # under 1.2 km, by arm; each picture once.
-                    if reading.km < 1.2 and picture_ts != self._ring_tally_ts:
+                    if (reading is not None and reading.km < 1.2
+                            and picture_ts != self._ring_tally_ts):
                         self._ring_tally_ts = picture_ts
                         tally = self._ring_on_tally.setdefault(
                             self._ring_aim_trial.arm or "off", [0, 0])
@@ -3420,15 +3612,24 @@ class Controller:
         if self._lead_ring is None:
             self._ring_aim_px = None
             return None
+        self._ring_pic_ts = picture_ts
         aim = None
         try:
             # Rev 2: only where the game draws the ring. Past it, the shape
             # match can take an objective's dashed circle for one (19:53).
-            if (visible and self._lead_km is not None
-                    and self._lead_km < self._ring_steer_max_km):
+            # Operator, 2026-11-21: and with no range reading (ring_min_dots
+            # dots to the marker still say it is this target's ring).
+            if (visible and (self._lead_km is None
+                             or self._lead_km < self._ring_steer_max_km)):
                 frame_shape = frame.shape
                 ring = self._lead_ring.aim_ring(picture_ts, self._ring_memory_s,
                                                 self._ring_min_dots)
+                if (self._lead_ring.seen_at(picture_ts) is not None
+                        and self._lead_ring.seen_dots >= self._ring_min_dots):
+                    self._ring_seen_ts = picture_ts
+                elif ring is not None and self._lead_ring.latest_ts is not None:
+                    self._ring_seen_ts = max(self._ring_seen_ts or 0.0,
+                                             self._lead_ring.latest_ts)
                 if ring is not None:
                     h, w = frame_shape[:2]
                     cx, cy = crosshair(frame_shape, self._lead_ring.crosshair_pct)
@@ -3467,6 +3668,101 @@ class Controller:
         """True while the selected weapon is fired by holding `f` on its lead
         diamond (the rocket pod), not by tapping."""
         return self._active_weapon_fire() == "hold_on_lead"
+
+    def _pursuit_aim(self, frame, obs: dict, visible, picture_ts: float
+                     ) -> "tuple[tuple[float, float] | None, str | None]":
+        """The ACS pursuit's aim sources, highest precedence first (ADR 186). Each
+        sees every picture, because each keeps its own two-picture confirmation;
+        the first with an aim wins. Returns ((err, err_y), source name) in the
+        tracker's half-frame units, or (None, None) for the marker itself.
+
+        - ability: a special ability fired on its lead diamond (the nuke, ADR 186);
+        - rocket: the selected weapon's lead diamond (the rocket pod, ADR 180);
+        - ring: the gun's lead ring in a `ring` round (Design 021 Phase 3, D4).
+
+        A new aimed weapon is one more source here and one fire rule beside
+        `_pursuit_gun_tick`."""
+        sources = (
+            ("ability", lambda: self._ability_aim(frame, picture_ts)),
+            ("rocket", lambda: self._rocket_view(frame, obs, picture_ts)),
+            ("ring", lambda: self._ring_aim(frame, visible, picture_ts)),
+        )
+        chosen: "tuple[tuple[float, float] | None, str | None]" = (None, None)
+        for name, source in sources:
+            aim = source()
+            if chosen[0] is None and aim is not None:
+                chosen = (aim, name)
+        return chosen
+
+    def _special_ability(self) -> "tuple[dict | None, bool | None]":
+        """(the jet's resolved special-weapon profile, the icon's READY) for the
+        aimed abilities; (None, None) when either cannot be read."""
+        try:
+            jet = self.special_weapon_profile()
+            glyph = None if jet else self._analyzer.special_weapon_glyph()
+            profile = resolve_profile(jet, glyph, self._special_weapon_cfg)
+            if not AimedAbility.applies(profile):
+                return profile, None
+            return profile, self._analyzer.special_weapon_ready()
+        except Exception as exc:
+            log_suppressed(logger, "special_ability", exc)
+            return None, None
+
+    def _ability_aim(self, frame, picture_ts: float) -> "tuple[float, float] | None":
+        """ADR 186: with a lead_aligned ability READY, the diamond nearest the
+        crosshair is the aim. Sets `_ability_view` for the fire rule. Its failure
+        must not cost the steering tick."""
+        view = None
+        if self._analyzer is not None and self._aimed_ability.enabled:
+            try:
+                profile, ready = self._special_ability()
+                view = self._aimed_ability.view(frame, picture_ts, profile, ready)
+            except Exception as exc:
+                log_suppressed(logger, "ability_aim", exc)
+                view = None
+        self._ability_view = view
+        if (view is not None) != self._ability_view_was:
+            self._ability_view_was = view is not None
+            logger.debug("ABILITYAIM: %s", "diamond at (%.0f,%.0f) diamond_px=%.0f score=%.2f" % (
+                view.diamond.x, view.diamond.y, view.px, view.diamond.score)
+                if view is not None else "none")
+        return None if view is None else (view.err, view.err_y)
+
+    def _pursuit_ability_tick(self) -> bool:
+        """ADR 186: press `q` once the lead_aligned ability's diamond is within
+        `special_weapon.aimed.fire_px` of the crosshair, with the icon READY.
+        Returns True when `q` went out."""
+        if self._analyzer is None or not self._aimed_ability.enabled:
+            return False
+        try:
+            if self._analyzer.game_state not in (GameState.GAME_BATTLE,
+                                                 GameState.GAME_BATTLE_EJECT):
+                return False
+            profile, ready = self._special_ability()
+            if not AimedAbility.applies(profile):
+                return False
+            view = self._ability_view
+            if not self._aimed_ability.press_now(time.time(), ready, view):
+                return False
+        except Exception as exc:
+            log_suppressed(logger, "ability_tick", exc)
+            return False
+        ability = profile.get("ability") or "special_weapon"
+        logger.info("\033[93m✨ Special weapon %s: lead diamond on the crosshair "
+                    "(diamond_px=%.0f score=%.2f), icon READY\033[0m",
+                    ability, view.px, view.diamond.score)
+        self.activate_special_weapon()
+        self._ability_presses += 1
+        try:
+            self._analyzer.note_special_weapon_press()
+        except Exception as exc:
+            log_suppressed(logger, "note_special_weapon_press", exc)
+        if self._round_note is not None:
+            try:
+                self._round_note("special_weapon_used", time.time())
+            except Exception as exc:
+                log_suppressed(logger, "round_note", exc)
+        return True
 
     def _rocket_view(self, frame, obs: dict, picture_ts: float
                      ) -> "tuple[float, float] | None":
@@ -3553,9 +3849,29 @@ class Controller:
         """Deploy flares (short press of the configured flares key)."""
         self._execute_key_press(DEPLOY_FLARES_KEY, hold_seconds=hold_seconds, block=block, action_name='deploy_flares', ignore_cancel=ignore_cancel)
 
-    def wingsweep(self, hold_seconds: float = 0.5, block: bool = True):
-        """Perform a wingsweep maneuver by pressing the configured wingsweep key."""
-        self._execute_key_press(WINGSWEEP_KEY, hold_seconds=hold_seconds, block=block, action_name='wingsweep')
+    def activate_auxiliary_feature(self, block: bool = False, ignore_cancel: bool = True):
+        """Press AUXILIARY_FEATURE_KEY once (was the wing sweep). What it does depends
+        on the jet: on the KF-21 it sends the drone into defense mode (operator,
+        2026-11-16). The same 0.1 s tap as activate_special_weapon, and the same
+        `ignore_cancel`, because a pursuit runs with the mission cancelled. The
+        caller logs the press."""
+        self._execute_key_press(AUXILIARY_FEATURE_KEY, hold_seconds=0.1, block=block,
+                                action_name='activate_auxiliary_feature',
+                                ignore_cancel=ignore_cancel)
+
+    def auxiliary_feature_profile(self) -> "dict | None":
+        """The jet on record's `auxiliary_feature` section ({trigger, missiles_at}),
+        or None for a jet without one or a round whose jet was not read."""
+        profile = profile_for_jet(self._jet_on_record(), self._jet_profiles) or {}
+        section = profile.get("auxiliary_feature")
+        return dict(section) if section else None
+
+    def flares_wait_for_special_grey(self) -> bool:
+        """ADR 198: True when the jet on record drops flares only while its special
+        weapon's icon is greyed out (the KF-21); False for any other jet, or a
+        round whose jet was not read."""
+        profile = profile_for_jet(self._jet_on_record(), self._jet_profiles) or {}
+        return bool(profile.get("flares_only_when_special_grey"))
 
     def press_escape(self, hold_seconds: float = 0.05, block: bool = False):
         """Press Escape once, used by safety-recovery handlers."""
@@ -5427,6 +5743,7 @@ class Controller:
             descent: "ControlledDescent | None" = None
             handback_due = False   # rearmed, waiting out the climb-out
             handback = False       # the rearm ended the pursuit
+            no_hud_stop = False    # ADR 200: no HUD ended it
             try:
                 mission_exit_deadline = time.time() + 2.0
                 while self.is_mission_running() and time.time() < mission_exit_deadline:
@@ -5546,6 +5863,21 @@ class Controller:
                         fall_through = True
                         end_reason = "cap"
                         break
+                    # ADR 200: no HUD altitude for no_hud_stop_s (counted from the
+                    # pursuit's own start too) is no battle: stop, and press nothing.
+                    if self._pursuit_no_hud_stop_s > 0:
+                        hud_known, hud_age = self.hud_altitude_age_s()
+                        no_hud_s = time.time() - start
+                        if hud_age is not None:
+                            no_hud_s = min(no_hud_s, hud_age)
+                        if hud_known and no_hud_s >= self._pursuit_no_hud_stop_s:
+                            logger.warning(
+                                "Controller: pursue_and_engage — no HUD altitude for "
+                                "%.0fs, this is no battle: pursuit stopped, no more "
+                                "'f' (ADR 200)", no_hud_s)
+                            end_reason = "no_hud"
+                            no_hud_stop = True
+                            break
                     try:
                         frame = self._capture.grab_from_thread()
                         picture_ts = picture_clock.seen(frame, time.monotonic())
@@ -5561,30 +5893,26 @@ class Controller:
                         self._gun_lead_shadow(frame, obs, picture_ts)
                         self._target_projection_shadow(frame, obs, picture_ts)
                         self._closing_brake_note()
-                        # Design 021 Phase 3 (D4): in a `ring` round, with a ring
-                        # of this target in view, the chase and the gun take
-                        # their error from the ring against the crosshair. Every
-                        # rule that outranks the chase acts on it as on the marker.
-                        ring_aim = self._ring_aim(frame, visible, picture_ts)
-                        if ring_aim is not None:
-                            err, err_y = ring_aim
-                        # ADR 180: with a weapon selected that is held on its lead
-                        # (the rocket pod), the chase aims the crosshair at the
-                        # weapon's lead diamond instead.
-                        rocket_aim = self._rocket_view(frame, obs, picture_ts)
-                        if rocket_aim is not None:
-                            err, err_y = rocket_aim
+                        # Where the crosshair goes on this picture: the marker, or
+                        # the first aim source with an aim (ADR 186). Every rule
+                        # that outranks the chase acts on it as on the marker.
+                        aim, _aim_source = self._pursuit_aim(frame, obs, visible, picture_ts)
+                        if aim is not None:
+                            err, err_y = aim
                         # ADR 148: while a hard-emergency climb is flying the airframe
                         # (a dive the chase followed, or a search roll that spiralled),
                         # the chase writes neither axis: the recovery is the only writer,
                         # and the search roll is released so the wings can come level.
                         # Tracking and firing carry on; steering resumes when it ends.
                         # ADR 163: a missile evade flies it the same way, from its first
-                        # key to its last. ADR 164: so does the flare roll, which only
-                        # leaves the flight path alone if nothing pitches while it rolls.
+                        # key to its last. ADR 193: the flare roll does not. It holds
+                        # only the barrel roll (`;`) and the chase keeps steering on
+                        # j/l and i/k through it (operator, 2026-11-19: "the jet can
+                        # roll while still steering towards targets"). Yielding to it
+                        # (ADR 164) flew a 22 s roll straight into a cliff at 03:17:42
+                        # with the nuke READY, because the LOCK WARNING never cleared.
                         owner = ("dive recovery" if self.pursuit_recovery_active()
                                  else "missile evade" if self._missile_evading.is_set()
-                                 else "flare roll" if self._flare_roll.is_running()
                                  else None)
                         if owner != yield_owner:
                             if owner is not None:
@@ -5595,8 +5923,8 @@ class Controller:
                                 logger.info(
                                     "Controller: pursue_and_engage — yielding pitch and "
                                     "roll to the %s (%s)", owner,
-                                    {"dive recovery": "ADR 148", "missile evade": "ADR 163",
-                                     "flare roll": "ADR 164"}[owner])
+                                    {"dive recovery": "ADR 148",
+                                     "missile evade": "ADR 163"}[owner])
                             else:
                                 logger.info(
                                     "Controller: pursue_and_engage — %s over, "
@@ -5742,9 +6070,16 @@ class Controller:
                         # the rule the resupply marker follows (2026-10-02).
                         # With every rack empty no target is steered at, so
                         # none is weighed against it.
+                        # ADR 194: the crown is not weighed against a target at
+                        # all. The chase centres its target, so the target won
+                        # every later comparison: on 2026-11-19 at 04:54 an F-14
+                        # 13 km out won by 7 px, and the crown was in view for
+                        # 17 s, grew from 16 to 49 px and was flown past. A
+                        # control point keeps the nearer-to-centre rule.
                         priority_in_reach = (
                             priority_marker is not None
                             and not (not resupply_search
+                                     and priority_kind != "priority_target"
                                      and bool(visible) and err is not None
                                      and not marker_nearer_than_target(
                                          priority_marker, err, err_y,
@@ -5955,6 +6290,7 @@ class Controller:
                         # objective's marker has the steering; none in a climb-out
                         # or recovery.
                         brake_goal = None
+                        self._turn_burn_wanted = False
                         if not yielding and not rearm_climb_until:
                             if resupply_control:
                                 brake_goal = "resupply"
@@ -5968,9 +6304,15 @@ class Controller:
                                 # goal is set in any dive of -10 deg under 3 km,
                                 # braking or not, and cut the closing brake at
                                 # 726 KPH (live 04:37:29); both hold the same key.
-                                brake_goal = (self._closing_brake_goal(control_visible)
+                                # Operator, 2026-11-21: the turn brake before the
+                                # closing brake; both hold the same key.
+                                turn_goal = self._turn_brake_goal(
+                                    control_visible, err, err_y, picture_ts)
+                                brake_goal = (turn_goal
+                                              or self._closing_brake_goal(control_visible)
                                               or self._dive_brake_goal())
                         self._approach_brake_tick(brake_goal)
+                        self._turn_burner(self._turn_burn_wanted)
                         # Code Review 019 step 3e: the planner's aim in place of the
                         # marker while it detours or escapes (when steering is on).
                         resupply_aim, resupply_plan = (None, None)
@@ -6142,6 +6484,7 @@ class Controller:
                                     self._search_look_down()
                         self._pursuit_gun_tick(control_visible, err, err_y)
                         self._pursuit_rocket_tick(control_visible)
+                        self._pursuit_ability_tick()
                         # ADR 176 (shadow): what the map says about the command just held.
                         self._steer_guard_shadow()
                         if icon_state is not None:
@@ -6428,6 +6771,7 @@ class Controller:
                 self.release_tracking_holds(why="pursuit loop exit")
                 self._descent_flying = False
                 self._approach_brake_off("pursuit loop exit")
+                self._turn_burner(False, why="pursuit loop exit")
                 # A marker in view when the pursuit ends was not flown through.
                 with self._objective_tally_lock:
                     self._objective_tally.drop_approaches()
@@ -6454,7 +6798,7 @@ class Controller:
                     tally.gun_s = self._gun_fired_s
                     logger.info(tally.line(
                         "PURSUIT",
-                        end_reason if fall_through or handback
+                        end_reason if fall_through or handback or no_hud_stop
                         else "external:%s" % (self._eject_stop_reason or "unknown"),
                         switched_here))
                 self._pursuing.clear()
@@ -6497,6 +6841,9 @@ class Controller:
                     if handback:
                         logger.info("Controller: pursue_and_engage — rearmed, handing "
                                     "the aircraft back to the mission (ADR 171)")
+                    elif no_hud_stop:
+                        logger.info("Controller: pursue_and_engage — ended with no HUD "
+                                    "(ADR 200)")
                     else:
                         logger.info(
                             "Controller: pursue_and_engage — stopped externally "
@@ -7153,16 +7500,18 @@ class Controller:
         self._evade_trial.new_round()
 
     def flare_roll(self, flares_done: threading.Event) -> bool:
-        """Hold roll-right through a flare burst and flare_roll_after_s past its
-        last flare (FR-011, ADR 164).
+        """Hold the barrel roll (`;`, ADR 185) through a flare burst and flare_roll_after_s past the
+        later of its last flare and the last sight of the incoming warning
+        (FR-011, ADR 164; ADR 184: "holds the roll until no more incoming missile
+        detected for 2 seconds", with a target in view too).
 
         @relation(FR-011, scope=function)
 
         Called by the flare handler on every alert edge, with the event its burst
         sets once the last flare is out. The roll is a continuous barrel roll about
         the aircraft's own axis: it does not change the trajectory, and the turning
-        aircraft is harder for the missile to hit. Inside a pursuit the chase yields
-        pitch and roll while it is held, so nothing turns it into a corkscrew.
+        aircraft is harder for the missile to hit. Inside a pursuit the chase keeps
+        steering on j/l and i/k while it is held (ADR 193; ADR 164 had it yield).
 
         A burst while the roll is held extends it to flare_roll_after_s past that
         burst's last flare instead of starting a second hold, so through a volley
@@ -7187,7 +7536,7 @@ class Controller:
             except queue.Empty:
                 break
         self._flare_roll_bursts.put(flares_done)
-        logger.info("\033[95m🌀 FLARE ROLL — holding roll right until %.1fs after the "
+        logger.info("\033[95m🌀 FLARE ROLL — holding the barrel roll until %.1fs after the "
                     "flares\033[0m", self._flare_roll_after_s)
         self._flare_roll.start(self._run_flare_roll, thread_name="FlareRoll")
         return True
@@ -7206,9 +7555,8 @@ class Controller:
             return "not in battle"
         if self._ejecting.is_set():
             return "eject in progress"
-        # ADR 181: the chase keeps its target; the flares still go out.
-        if self.pursuit_holds_target():
-            return "the chase stays on its target (ADR 181)"
+        # Operator, 2026-11-16: the roll holds on every incoming warning, with a
+        # target in view too, so ADR 181 no longer withholds it.
         if self.pursuit_recovery_active() or (self._climbing.is_set()
                                               and self._climb_emergency_requested):
             return "emergency climb"
@@ -7223,15 +7571,19 @@ class Controller:
         pending: "list[threading.Event]" = []
         release_at = 0.0
         reason = "flares done"
-        # ROLL_RIGHT is a watched maneuver key: without the bracket and release
-        # grace its auto-repeats read as the operator taking over (ADR 070 d4).
-        self._inc_programmatic_key(ROLL_RIGHT_KEY)
+        # ADR 185: the barrel roll is `;`. j/l only bank the jet into a turn and
+        # it stops at knife-edge. A watched key would need the bracket and release
+        # grace, or its auto-repeats read as the operator taking over (ADR 070 d4).
+        key = BARREL_ROLL_KEY
+        watched = key in _WATCHED_MANEUVER_KEYS
+        if watched:
+            self._inc_programmatic_key(key)
         try:
             if self._simulate_os_input:
-                self._record_action_intent("key_press", key=ROLL_RIGHT_KEY,
+                self._record_action_intent("key_press", key=key,
                                            action="flare_roll")
             else:
-                _press_key(ROLL_RIGHT_KEY, owner="flare_roll")
+                _press_key(key, owner="flare_roll")
             while True:
                 now = time.time()
                 while True:
@@ -7241,10 +7593,14 @@ class Controller:
                         break
                 for burst in [b for b in pending if b.is_set()]:
                     pending.remove(burst)
-                    release_at = now + self._flare_roll_after_s
+                    release_at = max(release_at, now + self._flare_roll_after_s)
+                # Operator, 2026-11-16: and until the warning has been gone 2 s.
+                seen = self._incoming_last_seen()
+                if seen > 0.0:
+                    release_at = max(release_at, seen + self._flare_roll_after_s)
                 if not pending and now >= release_at:
                     break
-                if now - started >= self._flare_roll_max_s:
+                if pending and now - started >= self._flare_roll_max_s and now >= release_at:
                     reason = "cap"
                     logger.warning("Controller: flare roll hit its %.0fs cap with a burst "
                                    "still unreported", self._flare_roll_max_s)
@@ -7264,18 +7620,27 @@ class Controller:
         finally:
             _release_started = time.time()
             if self._simulate_os_input:
-                self._record_action_intent("key_release", key=ROLL_RIGHT_KEY,
+                self._record_action_intent("key_release", key=key,
                                            action="flare_roll")
             else:
                 try:
-                    _actuator.release(ROLL_RIGHT_KEY, "flare_roll")
+                    _actuator.release(key, "flare_roll")
                 except Exception:
                     logger.error("Controller: release of %r failed ending the flare roll — %s",
-                                 ROLL_RIGHT_KEY, _LATCH_NOTE)
-            self._arm_release_grace(ROLL_RIGHT_KEY, span_s=time.time() - _release_started)
-            self._dec_programmatic_key(ROLL_RIGHT_KEY)
+                                 key, _LATCH_NOTE)
+            if watched:
+                self._arm_release_grace(key, span_s=time.time() - _release_started)
+                self._dec_programmatic_key(key)
         logger.info("Controller: flare roll released (%s, %.1fs)", reason,
                     time.time() - started)
+
+    def _incoming_last_seen(self) -> float:
+        """The analyzer's last sight of the incoming warning, or 0.0."""
+        try:
+            return float(self._analyzer.incoming_last_seen_ts() or 0.0)
+        except Exception as exc:
+            log_suppressed(logger, "incoming_last_seen_ts", exc)
+            return 0.0
 
     def is_flare_rolling(self) -> bool:
         """True while the flare roll holds roll-right (FR-011)."""
@@ -7499,6 +7864,20 @@ class Controller:
         if self._ejecting.is_set():
             logger.info("Controller: climb suppressed — eject in progress")
             return
+        # ADR 191 D6: a watch-only spawn guard holds ordinary climbs off from the
+        # respawn to the hand-off as well: on 2026-11-18 13:21:47 the floor climb
+        # pressed nose-up for 0.9 s before the watch had opened.
+        _respawn_watch = self._sg_watch_only and self._spawn_guarding.is_set()
+        if not emergency and (_respawn_watch or self.start_watch_remaining_s() > 0.0):
+            # ADR 191: the life's opening seconds look for a target level; only a
+            # hard terrain or time-to-ground emergency takes the nose up in them.
+            now = time.time()
+            if now - self._start_watch_refused_log_ts >= 5.0:
+                self._start_watch_refused_log_ts = now
+                logger.info("Controller: climb held off — looking for a target for "
+                            "%.1fs more before climbing (ADR 191)",
+                            self.start_watch_remaining_s())
+            return
         evading = self._missile_evading.is_set()
         if evading and not emergency:
             logger.info("Controller: climb suppressed — missile evade in progress")
@@ -7561,9 +7940,14 @@ class Controller:
             # Code Review 019 cycle 36: so does a severe pull-out alarm.
             if _objective is not None and self._pullout_breaks_holdoff():
                 if _held:
-                    self.note_hold_target_withheld(
-                        "crash recovery (a pull-out would bottom out at %.0f m)"
-                        % self._pullout_lowest_m)
+                    # ADR 192 (operator, 2026-11-18): a predicted impact pulls up
+                    # even with the target in view. Withheld here, it preceded 15
+                    # of 21 terrain deaths on 2026-11-18. A pull-up, not a turn:
+                    # the terrain turn and the missile evade stay held (ADR 181).
+                    logger.info("Controller: crash recovery breaks the chase hold — a "
+                                "pull-out would bottom out at %.0f m (ADR 192)",
+                                self._pullout_lowest_m)
+                    _objective = None
                 else:
                     logger.info("Controller: crash recovery starts with the %s in view — a "
                                 "pull-out would bottom out at %.0f m (HLDD 001 part 2)",
@@ -8116,12 +8500,16 @@ class Controller:
         # The pursuit's climb-out after a rearm (operator, 2026-10-13). The
         # emergency climb may want the airbrake; the pursuit yields to it anyway.
         "rearm_climb": ("manual_takeover", "climb_emergency"),
+        # Operator, 2026-11-21: the chase's afterburner to turn tighter onto a
+        # far aim point at low speed. Any airbrake holder outranks it.
+        "turn_burner": ("manual_takeover", "climb_emergency", "approach_brake"),
     }
     # The requester names ADR 139 D4 introduced, onto Actuator owners.
     _REQUESTER_OWNER = {
         "cruise": "cruise", "afterburner_evade": "evade", "climb": "climb",
         "missile_evade": "missile_evade", "eject": "eject_and_dive",
         "stall_prevention": "stall_prevention", "rearm_climb": "rearm_climb",
+        "turn_burner": "turn_burner",
     }
 
     def _yield_condition(self, name: str) -> bool:
@@ -8196,8 +8584,25 @@ class Controller:
         self._spawn_guarding.set()
         self._sg_stop.clear()
         self._sg_alive_deadline = None
-        logger.info("\033[95m🛫 SPAWN GUARD — holding nose up until the "
-                    "respawn hands off (cap %.0fs)\033[0m", self._sg_max_hold_s)
+        # ADR 191 D4: an acs life with a target watch spawns level. The guard
+        # still runs, to find the moment the aircraft is in the world and open
+        # the watch there, but presses nothing: its pulses had the nose at +90
+        # and the speed at 285 kph 2.4 s after the hand-off (2026-11-18 12:10:48).
+        self._sg_watch_only = self._acs_spawn_watch_only and self._target_watch_applies()
+        if self._sg_watch_only:
+            logger.info("\033[95m🛫 SPAWN GUARD — watch only, no nose-up: the life "
+                        "looks for a target first (ADR 191)\033[0m")
+            # ADR 191 D5: a climb the last life started still holds NOSE_UP
+            # through the respawn screen, so the new life spawns pitching up
+            # (2026-11-18 12:59:53: an 11.2 s climb stopped only at the hand-off,
+            # +90 deg 1.5 s later). Whatever it was for, that life is over.
+            if self._climbing.is_set():
+                logger.info("Controller: spawn guard — ending the last life's climb "
+                            "so the next one spawns level (ADR 191)")
+                self._climb_stop.set()
+        else:
+            logger.info("\033[95m🛫 SPAWN GUARD — holding nose up until the "
+                        "respawn hands off (cap %.0fs)\033[0m", self._sg_max_hold_s)
 
         def _run():
             try:
@@ -8271,6 +8676,8 @@ class Controller:
                     self._climb_key(NOSE_UP_KEY, press=False, action="spawn_guard")
                     nose_held = False
                     observe_until = now + self._sg_observe_s
+                elif self._sg_watch_only:
+                    pass                       # ADR 191 D4: no nose-up
                 elif not nose_held and now >= observe_until:
                     self._climb_key(NOSE_UP_KEY, press=True, action="spawn_guard")
                     nose_held = True
@@ -8321,6 +8728,9 @@ class Controller:
             if bracketed:
                 self._arm_release_grace(NOSE_UP_KEY, span_s=_release_span)
                 self._dec_programmatic_key(NOSE_UP_KEY)
+        if exit_reason == "telemetry_handoff" and self._target_watch_applies():
+            # ADR 191: the aircraft is in the world; its target watch starts now.
+            self.arm_start_watch("respawn")
         logger.info("Controller: spawn guard complete (%s, %.1fs)",
                     exit_reason, time.time() - entry_ts)
 
@@ -8718,8 +9128,10 @@ class Controller:
                             _objective = None
                         # ADR 181: in a `hold` round a target in view takes the
                         # airframe back whatever the warnings say.
+                        # ADR 192: not while that severe pull-out alarm stands.
                         if (_recovering and recovery_since is not None
-                                and self.pursuit_holds_target()):
+                                and self.pursuit_holds_target()
+                                and not self._pullout_breaks_holdoff()):
                             _objective = "target"
                         if _objective is not None:
                             logger.info(
@@ -9478,6 +9890,73 @@ class Controller:
         mission_a.start()
         self._await_mission("mission_acs", mission_a)
 
+    # ADR 191: a watch armed this recently belongs to the life the mission is
+    # starting in (the respawn hand-off precedes the restart by about 2.7 s).
+    _START_WATCH_SAME_LIFE_S = 10.0
+
+    def _target_watch_applies(self) -> bool:
+        """True when the life now starting is an acs life with a target watch."""
+        if self._acs_target_watch_s <= 0.0 or not self._acs_yield_to_target:
+            return False
+        # Reached from the main loop's respawn flow: never wait on the lock.
+        if not self._last_mission_lock.acquire(timeout=1.0):
+            return False
+        try:
+            return self._last_mission == "acs"
+        finally:
+            if self._last_mission_lock.locked():
+                self._last_mission_lock.release()
+
+    def start_watch_remaining_s(self) -> float:
+        """Seconds left in this life's target watch (ADR 191), 0.0 outside it."""
+        return max(0.0, self._start_watch_until - time.time())
+
+    def arm_start_watch(self, reason: str) -> None:
+        """Start this life's target watch (ADR 191): the next target_watch_s
+        seconds fly level unless a hard emergency climbs.
+
+        A floor climb the tree already started is stopped: at the spawn it is
+        ordinary (no terrain or dive yet), and it is what took the nose up from
+        every spawn (2026-11-18 10:33:35, Climb selected at 561 m 3 s before the
+        mission started). An emergency climb is left running.
+        """
+        if self._acs_target_watch_s <= 0.0 or not self._acs_yield_to_target:
+            return
+        self._start_watch_armed_ts = time.time()
+        self._start_watch_until = self._start_watch_armed_ts + self._acs_target_watch_s
+        logger.info("Controller: target watch — level for %.1fs looking for a "
+                    "target before any climb (%s, ADR 191)",
+                    self._acs_target_watch_s, reason)
+        if self._climbing.is_set() and not (self._climb_emergency_active
+                                            or self._climb_emergency_requested):
+            self._climb_stop.set()
+
+    def end_start_watch(self) -> None:
+        self._start_watch_until = 0.0
+
+    def _acs_watch_for_target(self) -> "str | None":
+        """Look for a target until the watch ends; the reason, or None (ADR 191).
+
+        Always looks at least once, so with no window (or one that ran out during
+        the respawn's hand-off) this is the single start-of-mission check it
+        replaces. Ends early on a cancel or exit request.
+        """
+        # A respawn armed it at the spawn guard's hand-off, about 2.7 s before the
+        # restart; that window may have run out, and the life has had its watch.
+        if time.time() - self._start_watch_armed_ts > self._START_WATCH_SAME_LIFE_S:
+            self.arm_start_watch("battle entry")
+        while True:
+            reason = self._target_in_view()
+            if reason:
+                return reason
+            remaining = self.start_watch_remaining_s()
+            if remaining <= 0.0:
+                return None
+            if self._mission_cancel.wait(timeout=min(self._acs_tick_s, remaining)):
+                return None
+            if self._mission_exit_requested():
+                return None
+
     def _run_acs_sequence(self) -> bool:
         """The four mission_acs steps. True when pursuit mode was activated.
 
@@ -9489,11 +9968,21 @@ class Controller:
         # looked after the climb had begun: the crown was in view
         # from the spawn, the climb held the nose up for 1.6 s, the crown went
         # under the airframe and the pursuit reached it 19 s later.
-        reason = self._target_in_view() if self._acs_yield_to_target else None
+        # ADR 191: look for a target for the life's first target_watch_s seconds,
+        # level, and climb only if none showed: terrain ahead is what hides one.
+        watch_start = time.time()
+        reason = self._acs_watch_for_target() if self._acs_yield_to_target else None
+        self.end_start_watch()
+        if self._mission_cancel.is_set() or self._mission_exit_requested():
+            return False
         if reason:
             logger.info("Controller: mission_acs - target in view (%s) at the start, "
-                        "no climb: going straight to the pursuit", reason)
+                        "no climb: going straight to the pursuit (+%.1fs)",
+                        reason, time.time() - watch_start)
             return self._acs_activate_pursuit()
+        if self._acs_yield_to_target:
+            logger.info("Controller: mission_acs - no target in %.1fs, terrain may "
+                        "be hiding it: climbing", time.time() - watch_start)
 
         # Step 1: nose up. climb_mode is non-blocking and idempotent, so the
         # steps below happen while the climb is already under way.
@@ -10234,6 +10723,43 @@ class Controller:
         """Set or clear the deferred exit. Exposed for tests and future callers."""
         self._finish_round_event.set() if requested else self._finish_round_event.clear()
 
+    def hud_altitude_age_s(self) -> "tuple[bool, float | None]":
+        """(known, seconds since the HUD's altitude was last read) (ADR 200).
+
+        The altitude is on the HUD whenever the aircraft flies and nowhere on the
+        lobby, the matchmaking panel or the respawn screen. ``known`` is False
+        when there is no telemetry to ask (no analyzer, or its lock timed out):
+        the callers then fail open. The age is None when no altitude was ever read.
+        """
+        if self._analyzer is None:
+            return False, None
+        try:
+            snap = self._analyzer.get_telemetry()
+        except Exception:
+            return False, None
+        if snap is None:
+            return False, None
+        return True, snap.altitude.age_s(snap.taken_at_s)
+
+    def start_key_has_hud(self, key: str) -> bool:
+        """True when a start key may start a mission: the HUD was read lately (ADR 200).
+
+        A 'u' or 'o' typed into the party chat in matchmaking started the pursuit
+        there (2026-11-20 09:25:49 and 09:26:11), and the pursuit tapped 'f' into
+        the chat box 211 times. A 0 window turns the check off.
+        """
+        window = self._start_key_hud_window_s
+        if window <= 0:
+            return True
+        known, age = self.hud_altitude_age_s()
+        if not known or (age is not None and age <= window):
+            return True
+        logger.info(
+            "Controller: '%s' key pressed with no HUD altitude for %s — ignored "
+            "(typed into the chat? ADR 200; press it once the HUD shows)",
+            key, "the whole session" if age is None else "%.0fs" % age)
+        return False
+
     def is_mission_running(self) -> bool:
         """Return True when a mission thread currently holds the mission lock."""
         return self._mission_lock.locked()
@@ -10316,6 +10842,10 @@ class Controller:
         # would see the flag already set and exit immediately. No token: the loop
         # ends on its own when the FSM leaves GAME_STARTING.
         self._claim_mission_cancel("game_starting_loop", None)
+
+        if self._starting_signal == "hud":
+            threading.Thread(target=self._game_starting_hud_loop, daemon=True).start()
+            return
 
         good_luck_event = threading.Event()
         ocr_running = threading.Event()
@@ -10468,6 +10998,77 @@ class Controller:
                 logger.info("Controller: game_starting loop stopped")
 
         threading.Thread(target=_loop, daemon=True).start()
+
+    def _game_starting_hud_loop(self) -> None:
+        """GAME_STARTING under mission.starting_signal: hud (ADR 189).
+
+        Presses nothing. Grabs a frame every starting_health_probe_interval_s and
+        offers it to the analyzer's HUD probe, which reads health, speed and
+        altitude from it; launches the mission the moment the probe confirms the
+        HUD. The probe is armed at once: its confirmation flag is fresh per arm,
+        so the 10 s gate the Good-Luck loop keeps (ADR 032, against a stale
+        game_battle_alive) has nothing to guard here.
+
+        The 'u' loop it replaces sent the Good Luck emote to the whole match
+        every 5 s, and its launch waited on health anyway: in 1,412 November
+        launches the Good Luck timer was either cut short by health (801) or ran
+        out a median 0.7 s before health showed (611).
+
+        @relation(FR-003, scope=function)
+        """
+        if self._analyzer is None:
+            return
+        interval = self._starting_probe_interval_s
+        max_wait = self._starting_max_wait_s
+        loop_start = time.time()
+
+        def _in_starting():
+            return (self._analyzer.game_state == GameState.GAME_STARTING
+                    and not self._mission_cancel.is_set())
+
+        logger.info(
+            "Controller: game_starting loop started - watching the HUD (health, speed, "
+            "altitude) every %.1fs; no '%s' press (ADR 189)", interval, MISSION_J20_KEY)
+        self._analyzer.arm_starting_health_scan()
+        try:
+            while _in_starting():
+                if self._capture is not None:
+                    self._analyzer.probe_starting_frame(self._capture.grab_from_thread())
+                deadline = time.time() + interval
+                while time.time() < deadline:
+                    if self._analyzer.starting_battle_confirmed or not _in_starting():
+                        break
+                    self._mission_cancel.wait(timeout=0.05)
+                if self._analyzer.starting_battle_confirmed and _in_starting():
+                    logger.info(
+                        "\033[92mController: HUD up %.1fs into GAME_STARTING — "
+                        "launching mission\033[0m", time.time() - loop_start)
+                    self._analyzer.trigger_event("good_luck_detected")
+                    if not self.take_claimed_round():
+                        logger.info("Controller: game_starting - launching %s mission",
+                                    self.launch_mission_name().upper())
+                        self._start_default_mission()
+                    return
+                if not _in_starting():
+                    break
+                if time.time() - loop_start > max_wait:
+                    logger.warning(
+                        "Controller: game_starting timed out after %ds without the HUD",
+                        max_wait)
+                    self._analyzer.trigger_event("starting_timeout")
+                    return
+            # Left GAME_STARTING without the HUD. As in the Good-Luck loop: a
+            # cancel while the FSM still says GAME_STARTING goes to stalled, except
+            # on program exit (2026-08-17).
+            if (self._mission_cancel.is_set()
+                    and not (self._exit_event is not None and self._exit_event.is_set())
+                    and self._analyzer.game_state == GameState.GAME_STARTING):
+                self._analyzer.trigger_event("starting_timeout")
+        except Exception:
+            logger.exception("Controller: game_starting HUD loop error")
+        finally:
+            self._analyzer.disarm_starting_health_scan()
+            logger.info("Controller: game_starting loop stopped")
 
     def _jet_on_record(self) -> "str | None":
         """The jet read off the lobby, or None. A failed read is no reading."""
@@ -10629,6 +11230,14 @@ class Controller:
                             self._closing_brake_count, self._closing_brake_held_s)
             except Exception as exc:
                 log_suppressed(logger, "closing_brake_summary", exc)
+        if self._turn_brake.enabled:
+            try:
+                logger.info("TURNBRAKE: %s; %d holds, %.1f s; afterburner %d holds, %.1f s",
+                            self._turn_brake.summary(), self._turn_brake_count,
+                            self._turn_brake_held_s, self._turn_burner_count,
+                            self._turn_burner_held_s)
+            except Exception as exc:
+                log_suppressed(logger, "turn_brake_summary", exc)
         if self._lead_ring is not None:
             try:
                 logger.info("LEADRING: %s", self._lead_ring.summary())

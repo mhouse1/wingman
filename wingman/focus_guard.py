@@ -4,7 +4,7 @@ Wingman types into whatever window is focused. The pre-existing capture-stalenes
 check cannot catch an alt-tab, because mss keeps grabbing the monitor fine while
 another window holds focus — frames arrive, and wingman keeps typing. On
 2026-08-28 the operator's message reached them as "tryi auganw": the stray `i`
-and `w` were NOSE_UP_KEY and WINGSWEEP_KEY, injected into their editor.
+and `w` were NOSE_UP_KEY and WINGSWEEP_KEY (now AUXILIARY_FEATURE_KEY), injected into their editor.
 
 Identity is the game's *Wine session*, never a window title. See ADR 098 for the
 three traps that establishes: the game window is titled "Wine Desktop", any

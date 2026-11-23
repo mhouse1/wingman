@@ -257,6 +257,51 @@ The chart below is a historical snapshot covering v1.6.7 through v1.6.19, captur
 
 ---
 
+## Score and Resource Dashboard
+
+Every round's score, the squadron's standing and each session's memory use are
+charted in Grafana ([Design 018](docs/hldd/018-score-per-round-in-grafana-hldd.md)).
+The ingest (`scripts/round-scores.py`) reads the session stats files and logs
+wingman already writes into Postgres; both run in Docker beside Grafana, and the
+dashboard itself is provisioned from `grafana/dashboards/score-per-round.json`.
+
+```bash
+make grafana         # start the stack, ingest, serve http://127.0.0.1:3000
+make grafana-ingest  # load new rounds and samples into a running stack
+make grafana-down    # stop the stack (the rows stay in its volume)
+```
+
+The stack runs on veda only, and only with `score_dashboard.enabled` set in
+`wingman/config.local.yaml` and the passwords in `grafana/.env`
+(copy `grafana/.env.example`).
+
+Granularity, aggregate, metric, moving-average and tag selectors drive every
+panel, and the dashed orange markers are play-affecting changes from
+`grafana/changes.yaml`.
+
+![Score dashboard: totals, score per round with moving averages, score range by jet, squadron rank and trophies](docs/images/dashboard_1.png)
+
+*Two days of play. Score per round, coloured by account, with wingman's moving
+average in blue and manual takeover in orange; the score range of each jet; and
+the squadron's leaderboard rank and trophies read from the lobby
+([ADR 166](docs/adr/166-read-the-squadron-leaderboard-from-the-lobby.md)).*
+
+![Score dashboard over 30 days: squadron trend, wingman by jet, score and rounds per day, periods and tags](docs/images/dashboard_2.png)
+
+*Thirty days. Wingman by jet compares mean score, kills, deaths and assists per
+airframe ([ADR 167](docs/adr/167-read-each-rounds-jet-from-the-lobby.md)); the
+daily bars split rounds whose end-of-round panel was read from those that were
+not.*
+
+![Resource panels: memory, threads and open files, OCR time per sample, and resources per session](docs/images/dashboard_3.png)
+
+*The resource trail. Wingman's 5-minute `RESOURCE` samples chart wingman and
+game RSS, malloc live and retained, threads, open files and OCR time, with each
+session's growth in MB/h (the long-session leak tracked in
+[Performance 008](docs/performance/008-long-session-memory-leak-and-ocr-degradation.md)).*
+
+---
+
 ## Hardware Target — CPU Only, Deliberately
 
 Wingman runs entirely on the **CPU**. OCR's GPU switch, `respawn_detection.use_gpu`,
@@ -389,6 +434,7 @@ Roadmap: [`docs/PROJECT_AI_ROADMAP.md`](docs/PROJECT_AI_ROADMAP.md) · Architect
 | [`docs/hldd/005-target-tracking-hldd.md`](docs/hldd/005-target-tracking-hldd.md) | ACS ([Design 011](docs/hldd/011-acs-mode-hldd.md)) target tracker: finding and locking enemy nameplates on screen |
 | [`docs/hldd/001-terrain-avoidance-hldd.md`](docs/hldd/001-terrain-avoidance-hldd.md) | Terrain avoidance: the direction (speed, dive angle and height first; the forward view second), the forward-view detectors, and the measurements behind both |
 | [`docs/hldd/017-terrain-map-from-flight-footage-hldd.md`](docs/hldd/017-terrain-map-from-flight-footage-hldd.md) | Free airspace record and golden resupply paths: where aircraft have flown safely on each arena, the flight planner's query on it, and a recorded path to each resupply ring. Builds on [Design 020](docs/hldd/020-terrain-service-from-the-maps-own-geometry-hldd.md)'s position fix. Not built yet |
+| [`docs/hldd/018-score-per-round-in-grafana-hldd.md`](docs/hldd/018-score-per-round-in-grafana-hldd.md) | The Grafana dashboard: score per round, squadron rank and trophies, wingman by jet, and the resource trail |
 | [`docs/hldd/009-nested-display-isolation-hldd.md`](docs/hldd/009-nested-display-isolation-hldd.md) | Nested display lane: the four `DISPLAY` consumers and the takeover-key listener |
 | [`docs/hldd/008-gpu-accelerated-realtime-wingman-hldd.md`](docs/hldd/008-gpu-accelerated-realtime-wingman-hldd.md) | **A GPU-accelerated real-time profile** — batched GPU OCR, per-frame missile detection, and what must not regress. Design only; the CPU path stays the default |
 

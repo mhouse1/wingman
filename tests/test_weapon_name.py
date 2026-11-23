@@ -19,6 +19,7 @@ import wingman.analyzer as analyzer_module
 from wingman.analyzer import GameStateAnalyzer
 from wingman.config_schema import validate_config
 from wingman.crop_region import load_crops
+from wingman.panel_read_watch import PanelReadWatch
 from wingman.weapon_name import FIRE_MODES, WeaponNameReader, classify
 
 _FIX = Path(__file__).parent / "fixtures" / "weapon_name"
@@ -131,6 +132,8 @@ def _analyzer(monkeypatch, text):
     an.crops = load_crops(_CFG["crops"])
     an._weapon_name = WeaponNameReader(_CLASSES)
     an._weapon_name_future = None
+    an._weapon_classes = _CLASSES
+    an._panel_watch = PanelReadWatch(120.0)
     monkeypatch.setattr(analyzer_module, "_process_weapon_name_region", lambda crop: text)
     return an
 
@@ -142,6 +145,17 @@ def test_the_analyzer_reads_the_name_off_the_panel(monkeypatch):
     an._submit_weapon_name(_Now(), np.zeros((1200, 1920, 3), np.uint8))
     assert an.selected_weapon().fire == "hold_on_lead"
     assert an._weapon_name_future is None       # ready for the next read
+
+
+def test_each_name_read_reaches_the_panel_watch(monkeypatch):
+    # FR-012: the watch hears every read, with its class
+    import numpy as np
+    an = _analyzer(monkeypatch, "ee")
+    seen = []
+    monkeypatch.setattr(an._panel_watch, "note_weapon_name",
+                        lambda text, cls: seen.append((text, cls)))
+    an._submit_weapon_name(_Now(), np.zeros((1200, 1920, 3), np.uint8))
+    assert seen == [("ee", None)]
 
 
 def test_the_analyzer_reads_one_name_at_a_time(monkeypatch):
