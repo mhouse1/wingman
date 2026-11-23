@@ -38,6 +38,7 @@ from .special_weapon import resolve_profile
 from .pursuit_hold import HOLD as _HOLD_ARM, PursuitHoldTrial
 from .target_projection import TargetProjection
 from .closing_brake import ClosingBrake
+from .turn_brake import TurnBrake
 from .target_range import TargetRangeReader
 from .crop_region import CropCoords, crop_centre
 from .icon_steering import IconPoints, IconSteeringConfig, find_ring_icons
@@ -1004,6 +1005,29 @@ class Controller:
         self._closing_brake_count = 0
         self._closing_brake_held_s = 0.0
         self._closing_brake_read_ts: "float | None" = None
+        # Operator, 2026-11-21: in a share of rounds the airbrake turns the jet
+        # tighter onto an aim point far off the crosshair at gun range.
+        _tb = _pm.get("turn_brake") or {}
+
+        def _tb_get(key):
+            return _tb.get(key, schema_default("pursuit_mode.turn_brake." + key))
+        self._turn_brake = TurnBrake(
+            float(_tb_get("share")) if self._target_range is not None else 0.0,
+            _tb_get("on_err"), _tb_get("off_err"), _tb_get("max_km"),
+            _tb_get("max_hold_s"), _tb_get("cooldown_s"), _tb_get("on_target_err"))
+        self._turn_brake_min_kph = float(_tb_get("min_kph"))
+        self._turn_burner_below_kph = float(_tb_get("burner_below_kph"))
+        if self._turn_burner_below_kph > self._turn_brake_min_kph:
+            raise ValueError("turn_brake.burner_below_kph must not exceed min_kph")
+        self._turn_burn_wanted = False
+        self._turn_burner_held = False
+        self._turn_burner_since = 0.0
+        self._turn_burner_count = 0
+        self._turn_burner_held_s = 0.0
+        self._turn_brake_holds = False          # the airbrake is down for it
+        self._turn_brake_since = 0.0
+        self._turn_brake_count = 0
+        self._turn_brake_held_s = 0.0
         # Design 021 Phase 5 (shadow): where the tracked target is going, from
         # the marker's motion with the chase's own keys taken out. Logged and
         # drawn on the HUD; nothing flies on it.
@@ -2291,6 +2315,57 @@ class Controller:
             log_suppressed(logger, "closing_brake_goal", exc)
             return None
 
+    def turn_brake_new_round(self) -> None:
+        """A round has started: draw the turn brake's arm for it, log it, and
+        tag the round for the summary."""
+        brake = getattr(self, "_turn_brake", None)
+        arm = brake.new_round() if brake is not None else None
+        if arm is None:
+            return
+        logger.info("TURNBRAKE TRIAL: round %d — %s arm (share %.2f)",
+                    brake.rounds, arm, brake.share)
+        if self._round_note is not None:
+            try:
+                self._round_note("turn_arm_" + arm, time.time())
+            except Exception as exc:
+                log_suppressed(logger, "turn_brake_note", exc)
+
+    def _turn_brake_goal(self, target_steers: bool, err: "float | None",
+                         err_y: "float | None", picture_ts: "float | None") -> "str | None":
+        """Operator, 2026-11-21: "tight turn" while a `brake` round should hold
+        the airbrake: the target steers, the aim point (ring or marker) is far
+        off the crosshair with the target near, and a fresh speed reading is at
+        `min_kph` or more. Tallies the trial's measure in both arms."""
+        brake = self._turn_brake
+        if not brake.enabled:
+            return None
+        try:
+            km = None
+            if self._target_range is not None and self._gun_cluster is not None:
+                reading = self._target_range.latest(self._gun_cluster,
+                                                    self._gun_range_max_age_s)
+                km = reading.km if reading is not None else None
+            if not target_steers:
+                err = err_y = None
+            if not brake.update(err, err_y, km, time.monotonic(), picture_ts):
+                return None
+            # Operator, 2026-11-21: "the braking to turn fast only works if speed
+            # is high ... you can also engage afterburner to turn faster". Over
+            # min_kph the airbrake, under burner_below_kph the afterburner, and
+            # between them neither.
+            speed, _ts = self._speed_reading()
+            if speed is None:
+                brake.stop("no fresh speed")
+                return None
+            if speed >= self._turn_brake_min_kph:
+                return "tight turn"
+            if speed < self._turn_burner_below_kph:
+                self._turn_burn_wanted = True
+            return None
+        except Exception as exc:
+            log_suppressed(logger, "turn_brake_goal", exc)
+            return None
+
     def gun_aim_new_round(self) -> None:
         """A round has started: draw Design 021 Phase 3's arm for it, log it,
         and tag the round for the summary (as ADR 172 does)."""
@@ -3079,6 +3154,36 @@ class Controller:
         """
         cfg = self._approach_brake_cfg
         now = time.time()
+        # Operator, 2026-11-21: the turn brake, held for as long as the goal is
+        # given (the TurnBrake decides), with the same vetoes.
+        if goal == "tight turn":
+            veto = self._approach_brake_veto(now)
+            if veto is not None:
+                self._turn_brake.stop(veto)
+                self._approach_brake_off(veto)
+                return
+            if self._closing_brake_holds:
+                self._closing_brake_holds = False
+                self._closing_brake_held_s += max(0.0, now - self._closing_brake_since)
+                self._closing_brake.stop("handed to the turn brake")
+            if not self._turn_brake_holds:
+                self._turn_brake_holds = True
+                self._turn_brake_since = now
+                self._turn_brake_count += 1
+                logger.info("TURNBRAKE: airbrake on — the aim point is far off the crosshair")
+            self._dive_dose_running = False
+            self._approach_brake_until = now + 1.0
+            self._approach_brake_on()
+            return
+        if self._turn_brake_holds:
+            self._turn_brake_holds = False
+            self._turn_brake_held_s += max(0.0, now - self._turn_brake_since)
+            why = self._turn_brake.why_off or "the turn brake's goal ended"
+            self._turn_brake.stop("handed to the %s brake" % goal if goal else why)
+            if goal is not None:
+                logger.info("TURNBRAKE: airbrake handed to the %s brake", goal)
+            else:
+                self._approach_brake_off("turn brake: " + why)
         # ADR 179: the chase closing fast on a near target. Held for as long as
         # the goal is given, not dosed on the speed; the vetoes are the same.
         if goal == "closing target":
@@ -3184,6 +3289,10 @@ class Controller:
         if getattr(self, "_closing_brake_holds", False):
             self._closing_brake_holds = False
             self._closing_brake_held_s += max(0.0, time.time() - self._closing_brake_since)
+        if getattr(self, "_turn_brake_holds", False):
+            self._turn_brake_holds = False
+            self._turn_brake_held_s += max(0.0, time.time() - self._turn_brake_since)
+            self._turn_brake.stop(why)
         if not getattr(self, "_approach_brake_held", False):
             return
         self._approach_brake_held = False
@@ -3259,6 +3368,26 @@ class Controller:
             self._climb_key(AIRBRAKE_KEY, press=False, action="rearm_climb")
             self._rearm_brake_held = False
 
+    def _turn_burner(self, hold: bool, why: str = "") -> None:
+        """Operator, 2026-11-21: the turn assist's lease on the afterburner, taken
+        while a `brake` round's far aim point is flown under burner_below_kph and
+        given back otherwise. The key is leased (ADR 151): giving it back lifts it
+        only if cruise or another holder does not still want it."""
+        if hold and self._may_hold_key(AFTERBURNER_KEY, requester="turn_burner"):
+            self._climb_key(AFTERBURNER_KEY, press=True, action="turn_burner")
+            if not self._turn_burner_held:
+                self._turn_burner_held = True
+                self._turn_burner_since = time.time()
+                self._turn_burner_count += 1
+                logger.info("TURNBRAKE: afterburner on — the aim point is far off the "
+                            "crosshair at low speed")
+        elif self._turn_burner_held:
+            self._turn_burner_held = False
+            self._turn_burner_held_s += max(0.0, time.time() - self._turn_burner_since)
+            self._climb_key(AFTERBURNER_KEY, press=False, action="turn_burner")
+            logger.info("TURNBRAKE: afterburner released (%s)",
+                        why or self._turn_brake.why_off or "the turn no longer wants it")
+
     def _rearm_afterburner(self, hold: bool) -> None:
         """The rearm climb-out's lease on the afterburner: taken and renewed
         while `hold`, given back otherwise. The key is leased (ADR 151), so
@@ -3320,13 +3449,19 @@ class Controller:
             # Operator, 2026-11-21: the ring is still on screen; the detector
             # missed it on this picture.
             centred = True
+            ring_fire = True
+        else:
+            ring_fire = centred and (shown_px is not None or ring_px is not None)
         # Operator, 2026-11-13: only under gun_max_range_km, read off the
         # tracked nameplate. No fresh reading of this nameplate is out of range.
-        in_range, rng = True, ""
+        # Operator, 2026-11-21: "the gun should always fire if ring is on
+        # screen even if range is unknown": the game draws the ring only in gun
+        # range, so firing on the ring skips the range rule.
+        in_range, rng, km = True, "", None
         if self._target_range is not None:
             reading = self._target_range.latest(self._gun_cluster, self._gun_range_max_age_s)
             km = reading.km if reading is not None else None
-            in_range = km is not None and km < self._gun_range_limit_km()
+            in_range = ring_fire or (km is not None and km < self._gun_range_limit_km())
             rng = (" range=%.2fkm" % km if km is not None else " range=none")
         if centred and in_range and self._gun_held_since is None:
             self._press_tracking_key(FIRE_MACHINE_GUN, "pursuit_gun")
@@ -3386,15 +3521,19 @@ class Controller:
                 reading = self._target_range.latest(self._gun_cluster,
                                                     self._gun_range_max_age_s)
                 self._lead_km = reading.km if reading is not None else None
-                if reading is not None and reading.km < self._lead_search_max_km:
+                # Operator, 2026-11-21: "the gun should always fire if ring is on
+                # screen even if range is unknown": searched without a reading too.
+                if reading is None or reading.km < self._lead_search_max_km:
                     ring = self._lead_ring.observe(
-                        frame, (obs["centroid_x"], obs["centroid_y"]), reading.km,
+                        frame, (obs["centroid_x"], obs["centroid_y"]),
+                        reading.km if reading is not None else None,
                         picture_ts, self._gun_held_since is not None)
                     if ring is not None:
                         self._gun_ring_px = self._lead_ring.cross_px(frame.shape, ring)
                     # Phase 3's measure: how often the ring sits on the crosshair
                     # under 1.2 km, by arm; each picture once.
-                    if reading.km < 1.2 and picture_ts != self._ring_tally_ts:
+                    if (reading is not None and reading.km < 1.2
+                            and picture_ts != self._ring_tally_ts):
                         self._ring_tally_ts = picture_ts
                         tally = self._ring_on_tally.setdefault(
                             self._ring_aim_trial.arm or "off", [0, 0])
@@ -3478,8 +3617,10 @@ class Controller:
         try:
             # Rev 2: only where the game draws the ring. Past it, the shape
             # match can take an objective's dashed circle for one (19:53).
-            if (visible and self._lead_km is not None
-                    and self._lead_km < self._ring_steer_max_km):
+            # Operator, 2026-11-21: and with no range reading (ring_min_dots
+            # dots to the marker still say it is this target's ring).
+            if (visible and (self._lead_km is None
+                             or self._lead_km < self._ring_steer_max_km)):
                 frame_shape = frame.shape
                 ring = self._lead_ring.aim_ring(picture_ts, self._ring_memory_s,
                                                 self._ring_min_dots)
@@ -6149,6 +6290,7 @@ class Controller:
                         # objective's marker has the steering; none in a climb-out
                         # or recovery.
                         brake_goal = None
+                        self._turn_burn_wanted = False
                         if not yielding and not rearm_climb_until:
                             if resupply_control:
                                 brake_goal = "resupply"
@@ -6162,9 +6304,15 @@ class Controller:
                                 # goal is set in any dive of -10 deg under 3 km,
                                 # braking or not, and cut the closing brake at
                                 # 726 KPH (live 04:37:29); both hold the same key.
-                                brake_goal = (self._closing_brake_goal(control_visible)
+                                # Operator, 2026-11-21: the turn brake before the
+                                # closing brake; both hold the same key.
+                                turn_goal = self._turn_brake_goal(
+                                    control_visible, err, err_y, picture_ts)
+                                brake_goal = (turn_goal
+                                              or self._closing_brake_goal(control_visible)
                                               or self._dive_brake_goal())
                         self._approach_brake_tick(brake_goal)
+                        self._turn_burner(self._turn_burn_wanted)
                         # Code Review 019 step 3e: the planner's aim in place of the
                         # marker while it detours or escapes (when steering is on).
                         resupply_aim, resupply_plan = (None, None)
@@ -6623,6 +6771,7 @@ class Controller:
                 self.release_tracking_holds(why="pursuit loop exit")
                 self._descent_flying = False
                 self._approach_brake_off("pursuit loop exit")
+                self._turn_burner(False, why="pursuit loop exit")
                 # A marker in view when the pursuit ends was not flown through.
                 with self._objective_tally_lock:
                     self._objective_tally.drop_approaches()
@@ -8351,12 +8500,16 @@ class Controller:
         # The pursuit's climb-out after a rearm (operator, 2026-10-13). The
         # emergency climb may want the airbrake; the pursuit yields to it anyway.
         "rearm_climb": ("manual_takeover", "climb_emergency"),
+        # Operator, 2026-11-21: the chase's afterburner to turn tighter onto a
+        # far aim point at low speed. Any airbrake holder outranks it.
+        "turn_burner": ("manual_takeover", "climb_emergency", "approach_brake"),
     }
     # The requester names ADR 139 D4 introduced, onto Actuator owners.
     _REQUESTER_OWNER = {
         "cruise": "cruise", "afterburner_evade": "evade", "climb": "climb",
         "missile_evade": "missile_evade", "eject": "eject_and_dive",
         "stall_prevention": "stall_prevention", "rearm_climb": "rearm_climb",
+        "turn_burner": "turn_burner",
     }
 
     def _yield_condition(self, name: str) -> bool:
@@ -11077,6 +11230,14 @@ class Controller:
                             self._closing_brake_count, self._closing_brake_held_s)
             except Exception as exc:
                 log_suppressed(logger, "closing_brake_summary", exc)
+        if self._turn_brake.enabled:
+            try:
+                logger.info("TURNBRAKE: %s; %d holds, %.1f s; afterburner %d holds, %.1f s",
+                            self._turn_brake.summary(), self._turn_brake_count,
+                            self._turn_brake_held_s, self._turn_burner_count,
+                            self._turn_burner_held_s)
+            except Exception as exc:
+                log_suppressed(logger, "turn_brake_summary", exc)
         if self._lead_ring is not None:
             try:
                 logger.info("LEADRING: %s", self._lead_ring.summary())

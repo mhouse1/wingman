@@ -188,10 +188,12 @@ class LeadRingWatch:
         self.confirmed = [0] * len(_BANDS)
         self.colours: "dict[str, int]" = {}
 
-    def observe(self, frame: np.ndarray, marker: "tuple[float, float]", km: float,
+    def observe(self, frame: np.ndarray, marker: "tuple[float, float]", km: "float | None",
                 ts: float, gun_held: bool) -> "LeadRing | None":
         """Search this picture; log a `LEADRING:` line; return the ring if it
-        counts. A repeated picture is not searched again."""
+        counts. A repeated picture is not searched again. `km` is None without
+        a fresh range reading (operator, 2026-11-21: the ring is searched for
+        then too); such a picture is in no range band."""
         if ts == self._last_ts:
             return self.latest if self._last_confirmed else None
         started = time.perf_counter()
@@ -212,24 +214,26 @@ class LeadRingWatch:
         self._last_ring = ring
         self._last_dots = dots
         self._last_confirmed = confirmed
-        band = next((i for i, (lo, hi) in enumerate(_BANDS) if lo <= km < hi), None)
+        band = (None if km is None
+                else next((i for i, (lo, hi) in enumerate(_BANDS) if lo <= km < hi), None))
+        km_text = "-" if km is None else "%.2f" % km
         if band is not None:
             self.searched[band] += 1
             self.found[band] += ring is not None
             self.confirmed[band] += confirmed
         cx, cy = crosshair(frame.shape, self.crosshair_pct)
         if ring is None:
-            logger.debug("LEADRING: none km=%.2f marker=(%.0f,%.0f) gun=%s cost=%.0fms",
-                         km, marker[0], marker[1], "fire" if gun_held else "-", cost_ms)
-            if km < _MISS_CROP_MAX_KM:
+            logger.debug("LEADRING: none km=%s marker=(%.0f,%.0f) gun=%s cost=%.0fms",
+                         km_text, marker[0], marker[1], "fire" if gun_held else "-", cost_ms)
+            if km is not None and km < _MISS_CROP_MAX_KM:
                 self._save(frame, marker, None, km, miss=True)
         else:
             self.colours[ring.colour] = self.colours.get(ring.colour, 0) + 1
             logger.debug(
-                "LEADRING: %s at=(%.0f,%.0f) %s score=%.2f km=%.2f cross_px=%.0f "
+                "LEADRING: %s at=(%.0f,%.0f) %s score=%.2f km=%s cross_px=%.0f "
                 "marker_px=%.0f dots=%d gun=%s cost=%.0fms",
                 "confirmed" if confirmed else "seen", ring.x, ring.y, ring.colour,
-                ring.score, km, math.hypot(ring.x - cx, ring.y - cy),
+                ring.score, km_text, math.hypot(ring.x - cx, ring.y - cy),
                 math.hypot(ring.x - marker[0], ring.y - marker[1]), dots,
                 "fire" if gun_held else "-", cost_ms)
             if confirmed and not self._was_confirmed:
@@ -284,7 +288,7 @@ class LeadRingWatch:
             y0 = int(min(max(0, cy - 240), max(0, h - 480)))
             _CROP_DIR.mkdir(parents=True, exist_ok=True)
             name = "leadring_%s%s_%.2fkm_x%d_y%d.png" % (
-                "miss_" if miss else "", time.strftime("%Y%m%d_%H%M%S"), km, x0, y0)
+                "miss_" if miss else "", time.strftime("%Y%m%d_%H%M%S"), km if km is not None else -1.0, x0, y0)
             cv2.imwrite(str(_CROP_DIR / name), frame[y0:y0 + 480, x0:x0 + 640])
         except Exception as exc:
             log_suppressed(logger, "lead_ring_save", exc)

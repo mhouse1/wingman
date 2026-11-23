@@ -1014,6 +1014,11 @@ class AmmoEventsHandler:
                 self._ctrl.closing_brake_new_round()
             except Exception as exc:
                 log_suppressed(logger, "closing_brake_new_round", exc)
+            # Operator, 2026-11-21: and the turn brake trial.
+            try:
+                self._ctrl.turn_brake_new_round()
+            except Exception as exc:
+                log_suppressed(logger, "turn_brake_new_round", exc)
             # ADR 181: and whether the chase stays on its target this round.
             try:
                 self._ctrl.pursuit_hold_new_round()

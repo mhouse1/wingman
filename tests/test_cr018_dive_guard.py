@@ -5,20 +5,22 @@ time to ground is under `dive_guard_ttg_s`. Roll, fire and nose-up untouched.
 
 import threading
 import time
-import types
 
 import wingman.controller as controller_module
 from wingman.controller import NOSE_DOWN_KEY, NOSE_UP_KEY, Controller
 from wingman.controller_config import ControllerConfig
+from wingman.telemetry import TelemetrySignal, TelemetrySnapshot
 from tests.test_pursuit_mode import (
     _AnalyzerStub, _CaptureStub, _TrackerStub, _keys, _wait_for_pursuit_to_settle,
 )
 
 
 def _snap(alt, rate=0.0, fresh=True):
-    return types.SimpleNamespace(
-        altitude=types.SimpleNamespace(stable_value=alt, rate=rate, ts=time.time()),
-        altitude_fresh=lambda: fresh)
+    """The real TelemetrySnapshot; a stale one was taken past stale_after_s."""
+    now = time.time()
+    return TelemetrySnapshot(
+        altitude=TelemetrySignal(value=int(alt), ts=now, stable_value=alt, rate=rate),
+        taken_at_s=now if fresh else now + 60.0)
 
 
 class _TelemetryAnalyzer(_AnalyzerStub):

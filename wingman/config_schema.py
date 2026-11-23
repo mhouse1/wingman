@@ -1147,6 +1147,28 @@ SCHEMA = Section(
                 # No braking under this speed, or without a fresh speed reading.
                 "min_kph": Leaf(types=NUMBER, minimum=0, maximum=3000, default=650.0),
             }),
+            # Operator, 2026-11-21: the airbrake to turn tighter onto the aim
+            # point at gun range, in a share of rounds.
+            "turn_brake": Section(children={
+                # The share of rounds that brake. 0 = off.
+                "share": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.0),
+                # It starts when the aim point is this far off the crosshair on
+                # either axis (half-frame units), and ends under off_err.
+                "on_err": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.25),
+                "off_err": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.12),
+                # Only with the tracked target nearer than this.
+                "max_km": Leaf(types=NUMBER, minimum=0, default=1.5),
+                # The longest one hold, and the wait before the next.
+                "max_hold_s": Leaf(types=NUMBER, minimum=0, default=2.5),
+                "cooldown_s": Leaf(types=NUMBER, minimum=0, default=1.5),
+                # No braking under this speed, or without a fresh speed reading.
+                "min_kph": Leaf(types=NUMBER, minimum=0, maximum=3000, default=800.0),
+                # Under this speed the turn holds the afterburner instead; between
+                # it and min_kph, neither.
+                "burner_below_kph": Leaf(types=NUMBER, minimum=0, maximum=3000, default=600.0),
+                # The measure: the aim point counts as on target within this.
+                "on_target_err": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.1),
+            }),
             # Design 021 Phase 5 (shadow): where the tracked target is going,
             # logged and drawn on the HUD. Nothing flies on it.
             "target_projection": Section(children={

@@ -2239,6 +2239,31 @@ pursuit_mode:
     max_hold_s: 4.0
     cooldown_s: 3.0
     min_kph: 650
+  # Operator, 2026-11-21: "improve the machine gun accuracy, use throttle up and
+  # down to increase turn rate". Half the rounds, drawn per round (tags
+  # turn_arm_brake / turn_arm_control), hold the airbrake while the aim point
+  # (the lead ring, or the marker) is on_err or more off the crosshair with the
+  # target under max_km, until it is within off_err; cruise's afterburner comes
+  # back as it lets go. On 2026-11-21 (50 rounds) 28% of pictures under 1.5 km
+  # had the target 0.25 or more off, at a median 704 KPH, and the error after a
+  # steering hold was still 0.86 to 0.90 of itself 0.35 s later. The summary's
+  # TURNBRAKE line gives, by arm, the share of near pictures on target.
+  # Rev 2 (operator, 2026-11-21 17:30): "the braking to turn fast only works if
+  # speed is high ... you can also engage afterburner to turn faster". The
+  # airbrake from min_kph up (was 500; the median speed in pursuit was 704), the
+  # afterburner under burner_below_kph, neither between. Rev 1 (14:53 to 17:30,
+  # 24 rounds): 13 airbrake holds; near pictures on target, by the marker,
+  # brake arm 43% of 248, control 55% of 172 (noise at this size).
+  turn_brake:
+    share: 0.5
+    on_err: 0.25
+    off_err: 0.12
+    max_km: 1.5
+    max_hold_s: 2.5
+    cooldown_s: 1.5
+    min_kph: 800
+    burner_below_kph: 600
+    on_target_err: 0.1
   # Design 021 Phase 5 (shadow): where the tracked target is going, drawn on
   # live_hud.png as PROJ and logged as TARGETPROJ. Nothing flies on it. The
   # three values are the fit on 630 ring sightings of 2026-11-13: the marker's

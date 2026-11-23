@@ -788,6 +788,49 @@ running.
   the Mirage III and MiG-23, and the "read twice" rule drops a count that changes fast. Gun damage by arm
   is not measured for these rounds.
 
+### Turn brake trial (2026-11-21)
+
+Operator, 2026-11-21: "improve the machine gun accuracy, use throttle up and down to increase turn rate,
+and flight controls". Measured on `logs/wingman_20261121_134757.log` (08:47 to 13:45, 50 rounds, ring
+aim and the closing brake in every round):
+
+- 404 gun bursts, median 0.6 s, mean 0.8 s. Of 111 bursts with no missile near, 1 gained damage. The
+  ring was within 60 px of the crosshair on 193 of 1,201 pictures under 1.2 km (16%).
+- **The jet does not close the angle.** When a steering hold ended with the hold model predicting a
+  residual of about 0.03 half-frame, the next press (median 0.35 s later) found the error at a median 0.86
+  of the release error on pitch (720 pairs) and 0.90 on roll (1,105 pairs); 70% of roll pairs kept their
+  sign. Measured from `HOLD[pitch|roll]` lines.
+- Of 1,782 pictures with the target under 1.5 km, 28% had it 0.25 half-frame or more off the crosshair.
+  The median speed read was 704 KPH (p10 396, p90 1,132).
+- One burst let go with the ring on screen (13:26:27.455, the operator's screenshot 132626): the
+  detector missed the ring on three pictures in a row and the 0.45 s memory ran out. `fire_hold_s` (1.0)
+  now keeps a gun firing on the ring until no ring has been seen for that long (commit 0137611).
+
+**The change.** `wingman/turn_brake.py`: in half the rounds (tag `turn_arm_brake` or
+`turn_arm_control`), the chase holds the airbrake while the aim point (the ring, or the marker) is 0.25
+or more off the crosshair on either axis, with the target under 1.5 km and the speed at 500 KPH or more,
+until it is within 0.12 (at most 2.5 s, then 1.5 s before the next). It goes before the closing brake;
+both hold the same key and hand it over held. Cruise's afterburner (`afterburner_cruise`) yields while
+the airbrake holds and comes back when it lets go, which is the "throttle up" half.
+
+That a slower jet turns tighter in this game is the operator's premise, **assumed**, not measured. The
+measure says whether it does: the session-end `TURNBRAKE:` line gives, by arm, the share of pictures
+under 1.5 km with the aim point within 0.1 half-frame, and the median time the aim took to come in from
+0.25 to 0.12. Judge on 40 or more rounds an arm.
+
+Next candidates, from the first minutes of the 14:53 run (measured):
+
+- **The marker rule lets go too early.** It opens within `gun_centre_err` (0.05) and lets go past 1.5
+  times that, 0.075. On the 08:47 to 13:45 log, 128 of 278 "off centre" releases (46%) had the target
+  within 0.15 of the crosshair. Live 14:57:13, a burst let go at err +0.075, +0.055.
+- **A missing range reading cuts a ring burst.** 14:57:01.607: "out of range range=none" with the ring
+  last seen 0.84 s before, inside `fire_hold_s`. The range gate treats no reading as out of range.
+
+| Session | Code | Rounds by arm | On target, by arm | Catch time, by arm | Notes |
+|---|---|---|---|---|---|
+| 2026-11-21 18:00 to 18:20, `make r3` | rev 2 (operator 17:30): airbrake from 800 KPH, afterburner under 600, the gun fires on the ring with no range reading | 3 rounds: control 2, brake 1 | brake 5 of 36 (14%), control 16 of 48 (33%) | brake 0, control 1 (0.6 s). 3 airbrake holds, 2.8 s; afterburner 0 holds | Stopped by the operator's z in matchmaking (18:20:47, injected=False). Gun: 19 bursts, 1 with gun hits; 1 opened on a ring with no range reading (first 18:11:15.6, a green ring, 3 to 4 dots, 503 px out, held 1.3 s); 0 let go out of range. Too short to read |
+| 2026-11-21 14:53 to 17:48, `make r3` | 0137611 plus the turn brake rev 1 (airbrake from 500 KPH; uncommitted) | 30 missions; arms of the first 24 rounds: brake 9, control 11 (draw logged per round) | aim point within 0.1: brake 128 of 235 (54%), control 105 of 187 (56%) | brake 4 catches, median 0.4 s; control 0. 14 airbrake holds, 7.2 s | Stopped with z at 17:43 for rev 2. Gun: 109 bursts, 22 with gun hits (20%; 54 of 404, 13%, on 08:47 to 13:45), 667 damage; median burst 0.7 s (0.6 before). No difference between arms in aim; holds were cut by dive recoveries, resupply runs, lost targets and head-on passes. First hold 15:14:30.5; the brakes swapped the held key on head-on passes (log noise). Range "none" cut a ring burst 4 times (14:57:01.6, 15:03:44.4, 16:19:49.3, and one at 15:03:44.2). MetalStorm UI as of 2026-11-21; J35 Draken among the jets |
+
 ## Risks and open questions
 
 - **The ring may not show for wingman.** No frame on file shows a ring while wingman flies. Phase 1's

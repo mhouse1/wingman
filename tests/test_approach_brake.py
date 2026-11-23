@@ -333,7 +333,12 @@ def test_the_pursuit_ticks_the_brake_while_the_marker_has_the_steering():
                                 # goal is set in any dive of -10 deg under 3 km,
                                 # braking or not, and cut the closing brake at
                                 # 726 KPH (live 04:37:29); both hold the same key.
-                                brake_goal = (self._closing_brake_goal(control_visible)
+                                # Operator, 2026-11-21: the turn brake before the
+                                # closing brake; both hold the same key.
+                                turn_goal = self._turn_brake_goal(
+                                    control_visible, err, err_y, picture_ts)
+                                brake_goal = (turn_goal
+                                              or self._closing_brake_goal(control_visible)
                                               or self._dive_brake_goal())
                         self._approach_brake_tick(brake_goal)""") in src
     exit_ = src.index('self.release_tracking_holds(why="pursuit loop exit")')
@@ -453,12 +458,15 @@ def test_levelling_out_lets_the_dive_brake_go(monkeypatch, clock):
 def test_the_pursuit_arms_the_dive_brake_only_with_no_objective_steering():
     src = inspect.getsource(Controller.pursue_and_engage)
     i = src.index("brake_goal = None")
-    window = src[i:i + 1400]
+    window = src[i:i + 1900]
     assert "elif priority_control:" in window
     # ADR 179 rev 3: the chase closing fast on a near target first, then the dive.
-    closing = "brake_goal = (self._closing_brake_goal(control_visible)"
-    assert closing in window
-    assert window.index(closing) > window.index("elif priority_control:")
+    # Operator, 2026-11-21: the turn brake before the closing brake.
+    turn = "turn_goal = self._turn_brake_goal("
+    closing = "or self._closing_brake_goal(control_visible)"
+    assert turn in window and closing in window
+    assert window.index(turn) > window.index("elif priority_control:")
+    assert window.index(closing) > window.index(turn)
     assert window.index("or self._dive_brake_goal())") > window.index(closing)
 
 

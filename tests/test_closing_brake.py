@@ -301,7 +301,7 @@ def test_a_slow_dive_does_not_cut_the_closing_brake(monkeypatch, clock):  # noqa
     import wingman.controller as controller_module
     from wingman.controller import Controller
     src = inspect.getsource(Controller.pursue_and_engage)
-    assert ("brake_goal = (self._closing_brake_goal(control_visible)\n"
+    assert ("or self._closing_brake_goal(control_visible)\n"
             "                                              or self._dive_brake_goal())") in src
     ctrl, _ = _closing_ctrl(monkeypatch, speed=726)
     now = [100.0]

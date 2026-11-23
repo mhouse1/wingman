@@ -489,6 +489,7 @@ and stall prevention still re-press every tick, which now only renews their leas
 | `missile_evade` | tactic hold; inside a pursuit started by the pursuit on an alert, for the trial's evade arm; does not start while a hard-emergency climb flies | eject (ADR 070 d11), a hard-emergency climb (ADR 163 D5) | nothing | presses at start | ADR 070, ADR 075, ADR 163 |
 | `eject_and_dive` | eject sequence | nothing | nothing; its descent control cuts the burner | presses at phase start | ADR 056, ADR 134 D9 |
 | `rearm_climb` | pursuit hold, `pursuit_mode.resupply_priority.rearm_climb_s` after a rearm | manual takeover, the emergency climb's airbrake | nothing; it adds its lease to whoever else holds | presses at the first count that shows the rearm, re-presses every steering tick | operator, 2026-10-13 |
+| `turn_burner` | pursuit hold in a `pursuit_mode.turn_brake` brake round, while the aim point (the lead ring or the marker) is `on_err` or more off the crosshair with the target under `max_km` and a fresh speed under `burner_below_kph` | manual takeover, the emergency climb's airbrake, any airbrake holder (the approach, closing or turn brake) | nothing; it adds its lease to whoever else holds | re-presses every steering tick, gives the lease back on the first tick the turn no longer wants it | operator, 2026-11-21; Design 021 |
 
 **Airbrake, `AIRBRAKE_KEY`.**
 
