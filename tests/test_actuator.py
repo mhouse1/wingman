@@ -197,6 +197,7 @@ def test_takeover_names_what_wingman_was_holding(fresh_actuator, caplog):
         setattr(c, name, threading.Event())
     c._ab_evade = HoldTactic("afterburner evade", stop=c._ab_evade_stop)
     c._flare_roll = HoldTactic("flare roll")
+    c._special_hold = HoldTactic("special hold")
     c._eject_stop_reason = None
     c.cancel_mission = lambda: None
     c.release_tracking_holds = lambda why=None: None

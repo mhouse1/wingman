@@ -465,9 +465,13 @@ def test_guard_and_stall_exits_still_leave_the_session_up():
     # The teardown gates must be the operator flags, never exit_requested.
     # Comments are stripped: the block explains in prose why exit_requested is
     # the wrong signal, and matching that would be checking the wrong thing.
-    teardown = MAIN_SRC[MAIN_SRC.index("standby_armed = (ctrl.operator_stop_requested()"):]
+    # Up to the end of main(). ADR 202's wait is handed exit_requested so a
+    # signal can cut it short; it runs after the 'z' close, so it gates nothing.
+    teardown = MAIN_SRC[MAIN_SRC.index("standby_armed = (ctrl.operator_stop_requested()"):
+                        MAIN_SRC.index("\ndef _cycle_wait(")]
     code = "\n".join(ln for ln in teardown.splitlines()
-                     if not ln.strip().startswith("#"))
+                     if not ln.strip().startswith("#")
+                     and "_cycle_wait(cycle, exit_requested" not in ln)
     assert "exit_requested" not in code
 
 

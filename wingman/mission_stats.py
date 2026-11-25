@@ -351,6 +351,11 @@ class MissionStatsTracker:
             # terrain warnings this round. Drawn at the same round start.
             self._tag_round("hold_target", event_name.rsplit("_", 1)[1], ts)
 
+        elif event_name in ("start_arm_skip", "start_arm_climb"):
+            # ADR 204: whether this round's lives may skip the start climb when the
+            # map's level path is clear. Drawn at the same round start.
+            self._tag_round("start_climb", event_name.rsplit("_", 1)[1], ts)
+
         elif event_name in ("gun_arm_ring", "gun_arm_marker"):
             # Design 021 Phase 3: whether the chase steers on the lead ring this
             # round. Drawn at the same round start.

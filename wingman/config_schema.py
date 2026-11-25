@@ -96,7 +96,7 @@ _STR_LIST = Leaf(types=(list,), item_types=(str,))
 # ADR 173/186: what spends a special weapon; special_weapon.TRIGGERS is the same
 # tuple (tests/test_aimed_ability.py checks), kept here so the schema stays numpy-free.
 SPECIAL_WEAPON_TRIGGERS = ("incoming", "low_flares", "low_fuel", "gun_heat", "ready",
-                           "lead_aligned", "charged")
+                           "lead_aligned", "charged", "hold_to_empty")
 _NUM_LIST = Leaf(types=(list,), item_types=NUMBER)
 _HSV = Leaf(types=(list,), item_types=(int,), length=3)
 
@@ -360,6 +360,9 @@ SCHEMA = Section(
             "gun_heat_at": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.8),
             # The refuel's afterburner fuel percentage when its row sets none.
             "refuel_fuel_at": Leaf(types=NUMBER, minimum=0, maximum=100, default=50),
+            # ADR 203: the longest a hold_to_empty ability holds `q` when the fuel
+            # never reads empty (an unread or misread fuel gauge).
+            "hold_max_s": Leaf(types=NUMBER, minimum=1, default=30.0),
             # ADR 190: what a lit glyph with no row in `abilities` does ("other"):
             # a non-aimed trigger, or "none" to leave unknown abilities unpressed.
             "unknown_trigger": Leaf(types=(str,), default="ready",
@@ -525,6 +528,18 @@ SCHEMA = Section(
             # ADR 191 D7: the spawn guard spawns an acs life level instead of
             # pulsing nose-up (D4). Off: it raised terrain deaths.
             "spawn_watch_only": Leaf(types=(bool,), default=False),
+            # ADR 204: the share of rounds whose lives skip the start climb when the
+            # terrain service's level path is clear for start_level_horizon_s; the
+            # wait is how long past the watch a life flies level for a fix. 0: off.
+            "start_skip_share": Leaf(types=NUMBER, minimum=0, maximum=1, default=0.0),
+            "start_level_horizon_s": Leaf(types=NUMBER, minimum=1, maximum=30, default=8.0),
+            "start_terrain_wait_s": Leaf(types=NUMBER, minimum=0, maximum=10, default=2.0),
+            "start_fix_max_age_s": Leaf(types=NUMBER, minimum=0.1, maximum=10, default=2.0),
+            # ADR 204: a start climb a target cut short brings the nose into this
+            # band before the pursuit, for at most recover_nose_max_s. 0 s: off.
+            "recover_nose_min_deg": Leaf(types=NUMBER, minimum=-90, maximum=90, default=-15.0),
+            "recover_nose_max_deg": Leaf(types=NUMBER, minimum=-90, maximum=90, default=0.0),
+            "recover_nose_max_s": Leaf(types=NUMBER, minimum=0, maximum=30, default=0.0),
         }),
 
         # ADR 024 / 070 / 073 / 076 / 081 / 083
@@ -1303,6 +1318,10 @@ SCHEMA = Section(
             "enabled": BOOL,
             "output_path": STR,
             "interval_sec": SECONDS,
+            # Write live_hud.png to output_path every interval_sec (and open the
+            # feh window when tracking is on). False keeps the renderer, so the
+            # black box and the target-tracking archive still work.
+            "write_live_png": Leaf(types=(bool,), default=True),
             # Timestamped archive of the annotated frame while target
             # tracking runs during a secondary-missile encounter (ADR 136
             # heatdive loop) — live_hud.png itself is overwritten every
@@ -1506,6 +1525,12 @@ SCHEMA = Section(
         "finish_round_then_exit": Section(children={
             "close_game": BOOL,
             "game_term_grace_s": SECONDS,
+        }),
+        # ADR 202 — end the session after N rounds; make r relaunches on exit 75.
+        "session_cycle": Section(children={
+            "enabled": Leaf(types=(bool,), default=False),
+            "rounds": Leaf(types=(int,), minimum=1, default=2),
+            "wait_s": Leaf(types=NUMBER, minimum=0, default=120.0),
         }),
         # ADR 092 — leak gate thresholds.
         "leak_gate": Section(children={

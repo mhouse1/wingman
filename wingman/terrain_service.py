@@ -418,6 +418,49 @@ class TerrainService:
         flip = bool(hits and roll and better(other_roll, commanded))
         return SteerVerdict(pitch, roll, commanded, no_push, other_roll, hold, age, withhold, flip)
 
+    def level_clear(self, altitude: "float | None", now: float, horizon_s: float,
+                    max_fix_age_s: float = 2.0) -> "tuple[bool | None, str]":
+        """ADR 204: whether the path flown level from the last fix, carried forward to `now`,
+        stays clearance_margin_m above the ground for `horizon_s`, on the track and the
+        track_spread_deg either side. (True, why) clear; (False, why) it meets the ground;
+        (None, why) no evidence: no fix with a ground speed within `max_fix_age_s`, or no
+        altitude.
+
+        The ttc fields judge the path as flown, over horizon_s (3 s): a level-off decision
+        needs the level path over longer, since the climb it replaces is what would have
+        carried the aircraft over whatever lies ahead."""
+        if altitude is None:
+            return None, "no altitude"
+        state = self._steer_state
+        if state is None:
+            return None, "no fix with a ground speed"
+        map_name, t, x, z, vx, vz = state
+        age = now - t
+        if age < 0 or age > max_fix_age_s:
+            return None, f"fix {age:.1f}s old"
+        data = self._data(map_name)
+        if data is None:
+            return None, "no map data"
+        x, z = x + vx * age, z + vz * age
+        ground = data.ground(x, z)
+        over = float(altitude) - ground
+        height = float(altitude) - self._clearance
+        if height < ground:
+            return False, f"{over:.0f} m over the ground, under the {self._clearance:.0f} m margin"
+        speed = math.hypot(vx, vz)
+        track = math.atan2(vx, vz)
+        steps = int(round(horizon_s / 0.1))
+        for off in (-self._spread, 0.0, self._spread):
+            th = track + math.radians(off)
+            sx, sz = speed * math.sin(th), speed * math.cos(th)
+            for k in range(1, steps + 1):
+                s = k * 0.1
+                if data.ground(x + sx * s, z + sz * s) > height:
+                    return False, (f"level path within {self._clearance:.0f} m of the ground "
+                                   f"in {s:.1f}s ({off:+.0f} deg)")
+        return True, (f"level path clear for {horizon_s:.0f}s, {over:.0f} m over the ground "
+                      f"(fix {age:.1f}s old)")
+
     def action(self, reading: "TerrainReading | None") -> "str | None":
         """ADR 174 revised: what to fly this tick in the `map` arm — "climb", "left", "right", or None.
 

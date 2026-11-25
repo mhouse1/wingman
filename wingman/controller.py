@@ -36,6 +36,7 @@ from .rocket_lead import RocketLead
 from .aimed_ability import AimedAbility, AimView
 from .special_weapon import resolve_profile
 from .pursuit_hold import HOLD as _HOLD_ARM, PursuitHoldTrial
+from .start_climb import StartClimbTrial
 from .target_projection import TargetProjection
 from .closing_brake import ClosingBrake
 from .turn_brake import TurnBrake
@@ -772,6 +773,8 @@ class Controller:
         # on the queue, each as the event its burst sets after the last flare.
         self._flare_roll = HoldTactic("flare roll")
         self._flare_roll_bursts: "queue.SimpleQueue[threading.Event]" = queue.SimpleQueue()
+        # ADR 203: `q` held for a hold_to_empty ability until its fuel reads empty.
+        self._special_hold = HoldTactic("special hold")
         self._flare_roll_after_s = float(_me.get(
             "flare_roll_after_s",
             schema_default("behavior_tree.missile_evade.flare_roll_after_s")))
@@ -1486,6 +1489,22 @@ class Controller:
         self._start_watch_until = 0.0
         self._start_watch_armed_ts = 0.0
         self._start_watch_refused_log_ts = 0.0
+        # ADR 204: the start climb is skipped, in this round's `skip` arm, when the
+        # terrain service's level path is clear; and a start climb cut short by a
+        # target brings the nose into a band before the pursuit.
+        def _acs_num(key):
+            return float(_acs.get(key, schema_default("acs_mission." + key)))
+        self._start_climb_trial = StartClimbTrial(_acs_num("start_skip_share"))
+        self._acs_start_level_horizon_s = _acs_num("start_level_horizon_s")
+        self._acs_start_terrain_wait_s = _acs_num("start_terrain_wait_s")
+        self._acs_start_fix_max_age_s = _acs_num("start_fix_max_age_s")
+        self._acs_recover_min_deg = _acs_num("recover_nose_min_deg")
+        self._acs_recover_max_deg = _acs_num("recover_nose_max_deg")
+        self._acs_recover_max_s = _acs_num("recover_nose_max_s")
+        # While the nose is brought into the band, ordinary climbs are held off
+        # until this time (time.time()); a hard emergency is not.
+        self._nose_recover_until = 0.0
+        self._nose_recover_refused_log_ts = 0.0
         # ADR 147: the altitude doctrine mission_acs flies. The tree's hard
         # floor (behavior_tree.climb.alt_floor_m) sits above this mission's
         # level-off altitude, so the tree restarted the climb the script had
@@ -4025,6 +4044,90 @@ class Controller:
         self._execute_key_press(SPECIAL_ABILITY, hold_seconds=0.1, block=block,
                                 action_name='activate_special_weapon',
                                 ignore_cancel=ignore_cancel)
+
+    def hold_special_weapon(self, until, max_s: float, label: str = "special_weapon") -> bool:
+        """ADR 203: hold SPECIAL_ABILITY until `until()` names a reason to let go
+        (the fuel reads empty), or `max_s` passes. For an ability the game spends
+        only while `q` is held (the MiG-21's boost, operator 2026-11-24).
+
+        Let go too on manual takeover (SAF-001), on leaving battle, on exit, and on
+        the flight writers' stop. Returns True when the hold started; False when
+        one is already held or the aircraft is not wingman's to fly.
+
+        @relation(SAF-001, scope=function)
+        """
+        if self._special_hold.is_running():
+            return False
+        refusal = self._special_hold_refusal()
+        if refusal is not None:
+            logger.info("Controller: special weapon hold not started — %s", refusal)
+            return False
+
+        def _body():
+            self._run_special_hold(until, float(max_s), label)
+
+        return self._special_hold.start(_body, thread_name="SpecialHold")
+
+    def special_hold_active(self) -> bool:
+        """True while hold_special_weapon holds `q` (ADR 203)."""
+        return self._special_hold.is_running()
+
+    def _special_hold_refusal(self) -> "str | None":
+        if self._manual_takeover_active():
+            return "manual takeover"
+        if getattr(self._analyzer, "game_state", None) not in (
+                GameState.GAME_BATTLE, GameState.GAME_BATTLE_EJECT):
+            return "not in battle"
+        return None
+
+    def _run_special_hold(self, until, max_s: float, label: str) -> None:
+        """Thread body for hold_special_weapon: press, wait for a reason, release."""
+        key = SPECIAL_ABILITY
+        started = time.time()
+        reason = "cap"
+        self._inc_programmatic_key(key)
+        release_span = 0.0
+        try:
+            if self._simulate_os_input:
+                self._record_action_intent("key_press", key=key, action=label)
+            else:
+                _press_key(key, owner=label)
+            while time.time() - started < max_s:
+                try:
+                    why = until()
+                except Exception as exc:
+                    log_suppressed(logger, "special_hold_until", exc)
+                    why = None
+                if why:
+                    reason = why
+                    break
+                refusal = self._special_hold_refusal()
+                if refusal is not None:
+                    reason = refusal
+                    break
+                if self._exit_event is not None and self._exit_event.is_set():
+                    reason = "exit"
+                    break
+                if self._special_hold.stop_event.wait(timeout=0.05):
+                    reason = "stopped"
+                    break
+        except Exception:
+            logger.exception("Controller: special weapon hold failed")
+        finally:
+            release_started = time.time()
+            if self._simulate_os_input:
+                self._record_action_intent("key_release", key=key, action=label)
+            else:
+                try:
+                    _actuator.release(key, label)
+                except Exception:
+                    logger.error("Controller: release of %r failed ending the special "
+                                 "weapon hold — %s", key, _LATCH_NOTE)
+            release_span = time.time() - release_started
+            self._arm_release_grace(key, span_s=release_span)
+            self._dec_programmatic_key(key)
+        logger.info("\033[93m✨ Special weapon released (%s, %.1fs held)\033[0m",
+                    reason, time.time() - started)
 
     def _eject_key(self, press: bool, key: str, note: str = "eject_and_dive") -> None:
         """Press or release a key inside the eject sequence, honoring replay simulation.
@@ -7878,6 +7981,16 @@ class Controller:
                             "%.1fs more before climbing (ADR 191)",
                             self.start_watch_remaining_s())
             return
+        if not emergency and time.time() < self._nose_recover_until:
+            # ADR 204: the start climb's overshoot is being taken back; the 3000 m
+            # floor would restart the climb under the nose-down pulses.
+            now = time.time()
+            if now - self._nose_recover_refused_log_ts >= 5.0:
+                self._nose_recover_refused_log_ts = now
+                logger.info("Controller: climb held off — bringing the nose back to "
+                            "%+.0f to %+.0f deg first (ADR 204)",
+                            self._acs_recover_max_deg, self._acs_recover_min_deg)
+            return
         evading = self._missile_evading.is_set()
         if evading and not emergency:
             logger.info("Controller: climb suppressed — missile evade in progress")
@@ -9972,6 +10085,12 @@ class Controller:
         # level, and climb only if none showed: terrain ahead is what hides one.
         watch_start = time.time()
         reason = self._acs_watch_for_target() if self._acs_yield_to_target else None
+        # ADR 204: with no target, the terrain service's level path decides, in a
+        # `skip` round, whether the climb is needed at all. The watch stays armed
+        # through it, so the floor climb does not start while it waits for a fix.
+        level_clear = False
+        if not reason and self._acs_yield_to_target:
+            reason, level_clear = self._acs_start_terrain_verdict(watch_start)
         self.end_start_watch()
         if self._mission_cancel.is_set() or self._mission_exit_requested():
             return False
@@ -9979,6 +10098,8 @@ class Controller:
             logger.info("Controller: mission_acs - target in view (%s) at the start, "
                         "no climb: going straight to the pursuit (+%.1fs)",
                         reason, time.time() - watch_start)
+            return self._acs_activate_pursuit()
+        if level_clear:
             return self._acs_activate_pursuit()
         if self._acs_yield_to_target:
             logger.info("Controller: mission_acs - no target in %.1fs, terrain may "
@@ -10019,6 +10140,20 @@ class Controller:
         reached = self._acs_wait_for_altitude()
         if not reached:
             return False
+        if reached == "target" and self._acs_recover_max_s > 0.0:
+            # ADR 204: the climb a target cut short hands over nose-high (a median
+            # +43 deg, 2026-11-23 to 25), and the chase then overshot to -30 deg
+            # or below in 84 of 455. Ordinary climbs are held off before the
+            # stop, or the 3000 m floor restarts one in between.
+            self._nose_recover_until = time.time() + self._acs_recover_max_s + 2.5
+            try:
+                self._acs_stop_climb()
+                self._acs_recover_nose()
+            finally:
+                self._nose_recover_until = 0.0
+            if self._mission_cancel.is_set() or self._mission_exit_requested():
+                return False
+            return self._acs_activate_pursuit()
         self._acs_stop_climb()
         if reached != "target":
             logger.info("Controller: mission_acs - step 3/4: %.0f m reached, "
@@ -10062,6 +10197,104 @@ class Controller:
             pulse_s=self._acs_angle_pulse_s, max_s=self._acs_angle_max_s,
             tick_s=self._acs_tick_s,
             interrupt=self._target_in_view if self._acs_yield_to_target else None)
+
+    def start_climb_new_round(self) -> None:
+        """A round has started: draw ADR 204's arm for it, log it, and tag the
+        round for the summary."""
+        trial = getattr(self, "_start_climb_trial", None)
+        arm = trial.new_round() if trial is not None else None
+        if arm is None:
+            return
+        logger.info("START CLIMB TRIAL: round %d — %s arm (ADR 204, share %.2f)",
+                    trial.rounds, arm, trial.share)
+        if self._round_note is not None:
+            try:
+                self._round_note("start_arm_" + arm, time.time())
+            except Exception as exc:
+                log_suppressed(logger, "start_climb_note", exc)
+
+    def _start_level_verdict(self) -> "tuple[bool | None, str]":
+        """ADR 204: the terrain service's level-path verdict from here, now. Never
+        raises: a failed check is no evidence (None)."""
+        service = getattr(self, "_terrain_service", None)
+        if service is None or not hasattr(service, "level_clear"):
+            return None, "no terrain service"
+        try:
+            altitude = None
+            snap = self._analyzer.get_telemetry() if self._analyzer is not None else None
+            if snap is not None and snap.altitude_fresh():
+                altitude = snap.altitude.stable_value
+            return service.level_clear(altitude, time.time(), self._acs_start_level_horizon_s,
+                                       self._acs_start_fix_max_age_s)
+        except Exception:
+            logger.exception("Controller: level-path check failed")
+            return None, "check failed"
+
+    def _acs_start_terrain_verdict(self, watch_start: float) -> "tuple[str | None, bool]":
+        """ADR 204: after a watch with no target, whether the climb can be skipped.
+        Returns (target reason, level_clear): a target that appears while waiting for
+        a fix wins; level_clear True only in a `skip` round with a clear level path.
+
+        A `climb` round climbs as before, at once; its verdict is logged so the two
+        arms can be compared on the lives where the skip would have applied. A `skip`
+        round with no verdict yet flies level up to start_terrain_wait_s more, with
+        the watch kept armed (ordinary climbs held off) and the target still looked for."""
+        trial = self._start_climb_trial
+        verdict, why = self._start_level_verdict()
+        if not trial.skips():
+            if trial.arm is not None:
+                logger.info("Controller: mission_acs - START CLIMB: %s arm, climbing; the "
+                            "level path %s (%s)", trial.arm,
+                            {True: "is clear", False: "is not clear",
+                             None: "is unknown"}[verdict], why)
+            return None, False
+        deadline = watch_start + self._acs_target_watch_s + self._acs_start_terrain_wait_s
+        while verdict is None:
+            remaining = deadline - time.time()
+            if remaining <= 0.0:
+                break
+            self._start_watch_until = time.time() + remaining
+            if self._mission_cancel.wait(timeout=min(self._acs_tick_s, remaining)):
+                return None, False
+            if self._mission_exit_requested():
+                return None, False
+            reason = self._target_in_view()
+            if reason:
+                return reason, False
+            verdict, why = self._start_level_verdict()
+        if verdict:
+            logger.info("Controller: mission_acs - START CLIMB: skip arm, no climb: %s; "
+                        "going to the pursuit (+%.1fs, ADR 204)", why, time.time() - watch_start)
+            return None, True
+        logger.info("Controller: mission_acs - START CLIMB: skip arm, climbing: the level "
+                    "path %s (%s, +%.1fs)", "is not clear" if verdict is False else "is unknown",
+                    why, time.time() - watch_start)
+        return None, False
+
+    def _acs_recover_nose(self) -> "bool | str":
+        """ADR 204: bring the flight path into recover_nose_min_deg..max_deg before the
+        pursuit takes a start climb a target cut short. Pulses as the -10 deg step does,
+        on new samples only, for at most recover_nose_max_s; no target interrupt, since
+        a target in view is what ended the climb."""
+        lo, hi = self._acs_recover_min_deg, self._acs_recover_max_deg
+        angle = None
+        try:
+            snap = self._analyzer.get_telemetry() if self._analyzer is not None else None
+            if snap is not None and snap.altitude_fresh():
+                angle = snap.pitch_angle_deg()
+        except Exception:
+            angle = None
+        if angle is not None and lo <= angle <= hi:
+            logger.info("Controller: mission_acs - nose %+.0f deg already in %+.0f to %+.0f "
+                        "after the climb, no correction (ADR 204)", angle, hi, lo)
+            return True
+        logger.info("Controller: mission_acs - climb cut short by a target with the nose at "
+                    "%s: bringing it to %+.0f to %+.0f deg before the pursuit (ADR 204)",
+                    "n/a" if angle is None else f"{angle:+.0f} deg", hi, lo)
+        return self._scripted_set_nose_angle(
+            "mission_acs", target=(lo + hi) / 2.0, tolerance_deg=(hi - lo) / 2.0,
+            confirm_reads=1, pulse_s=self._acs_angle_pulse_s,
+            max_s=self._acs_recover_max_s, tick_s=self._acs_tick_s, interrupt=None)
 
     # What _target_in_view calls an objective's marker in view.
     _OBJECTIVE_IN_VIEW = {"priority_target": "crown", "air_superiority": "control point"}
@@ -10642,6 +10875,9 @@ class Controller:
                     lambda: (self._ab_evade.thread,), ("_start_afterburner_evade",)),
             _Writer("flare roll", self._flare_roll.stop,
                     lambda: (self._flare_roll.thread,), ("flare_roll",)),
+            # ADR 203: `q`, not a flight axis, but a held key all the same.
+            _Writer("special weapon hold", self._special_hold.stop,
+                    lambda: (self._special_hold.thread,), ("hold_special_weapon",)),
             # Missions, and the weapon loop they start, end on _mission_cancel.
             _Writer("missions and weapon loop", lambda _reason: self.cancel_mission(),
                     lambda: (),

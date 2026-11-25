@@ -210,3 +210,54 @@ def test_the_shipped_config_keeps_raw_pictures_with_a_budget_of_their_own():
     box = cfg["hud"]["black_box"]
     assert box["raw"] is True
     assert f"{box['dir']}/raw" in cfg["capture_budget"]["dirs"]
+
+
+# hud.write_live_png (operator, 2026-11-25): live_hud.png off, the black box kept.
+
+def test_with_the_png_off_no_live_hud_is_written_and_the_box_still_fills(tmp_path):
+    renderer = _box(tmp_path, write_live_png=False)
+    _render(renderer, 4)
+    assert not (tmp_path / "live_hud.png").exists()
+    assert len(renderer._bb_frames) == 4
+    renderer.dump_black_box("death").join(timeout=5)
+    assert len(list((tmp_path / "box").glob("*_death_*.jpg"))) == 4
+
+
+def test_with_the_png_and_the_box_off_nothing_is_rendered(tmp_path):
+    renderer = HudRenderer(str(tmp_path / "live_hud.png"), interval_sec=0.0,
+                           write_live_png=False)
+    assert renderer.maybe_render(_FRAME, None, "PURSUIT_MODE", 100, 2, 4) is None
+    assert not (tmp_path / "live_hud.png").exists()
+
+
+def test_with_the_png_off_the_archive_still_gets_its_renders(tmp_path):
+    renderer = HudRenderer(str(tmp_path / "live_hud.png"), interval_sec=0.0,
+                           write_live_png=False, archive_enabled=True)
+    thread = renderer.maybe_render(_FRAME, None, "PURSUIT_MODE", 100, 2, 4)
+    assert thread is not None
+    thread.join(timeout=5)
+    assert not (tmp_path / "live_hud.png").exists()
+
+
+def test_with_the_png_off_no_feh_window_opens(tmp_path, monkeypatch):
+    launched = []
+    monkeypatch.setattr(HudRenderer, "_launch_feh", lambda self, geometry: launched.append(geometry))
+    HudRenderer(str(tmp_path / "live_hud.png"), feh_geometry="960x600+0+0", write_live_png=False)
+    assert launched == []
+    HudRenderer(str(tmp_path / "live_hud.png"), feh_geometry="960x600+0+0")
+    assert launched == ["960x600+0+0"]
+
+
+@pytest.mark.parametrize("hud, expected", [({"write_live_png": False}, False), ({}, True)])
+def test_write_live_png_comes_from_the_config(tmp_path, hud, expected):
+    cfg = {"hud": {"enabled": True, "output_path": str(tmp_path / "live_hud.png"), **hud}}
+    assert HudRenderer.from_config(cfg, live=True)._write_live_png is expected
+
+
+def test_the_shipped_config_writes_no_live_hud_png_and_keeps_the_box():
+    import yaml
+    from constants import CONFIG_PATH
+    cfg = yaml.safe_load(CONFIG_PATH.read_text(encoding="utf-8"))
+    assert cfg["hud"]["enabled"] is True
+    assert cfg["hud"]["write_live_png"] is False
+    assert cfg["hud"]["black_box"]["enabled"] is True

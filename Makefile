@@ -538,10 +538,27 @@ endif
 # veda, score_dashboard.enabled is on and the stack is up; a failed ingest is
 # printed and ignored, and the recipe keeps wingman's exit status. r1 to r3 run
 # this recipe too.
+#
+# ADR 202: wingman exits 75 when session_cycle ended the session after its
+# rounds and has closed the game and waited. The loop then runs the game launch
+# steps again, for the same prefix, and starts wingman again. Any other exit
+# ends the loop: 'z' of the operator's own, Ctrl-C, SIGTERM, a crash.
+# CYCLE_MAKE, not $(MAKE): a recipe line naming $(MAKE) runs even under make -n,
+# and this recipe is one line, so `make -n r3` started wingman (2026-11-23).
+CYCLE_MAKE := $(MAKE)
 r: $(GAME_LAUNCH_DEPS)
-	$(WINGMAN_ACCOUNT_ENV) $(WINGMAN_ENV) $(WINGMAN_NESTED_ENV) $(WINGMAN_PREFIX_ENV) $(WINGMAN_NICE) $(PYTHON_RUN) -m wingman.main --log-file wingman.log $(RECORD_FLAG); \
-	status=$$?; \
-	$(PYTHON_RUN) scripts/round-scores.py after-session; \
+	status=75; first=1; \
+	while [ $$status -eq 75 ]; do \
+	  if [ $$first -eq 0 ]; then \
+	    echo "Session cycle (ADR 202): relaunching MetalStorm and wingman"; \
+	    $(if $(GAME_LAUNCH_DEPS),$(CYCLE_MAKE) --no-print-directory $(GAME_LAUNCH_DEPS) WINE_PREFIX="$(WINE_PREFIX)",true) \
+	      || { status=$$?; echo "Session cycle (ADR 202): relaunch failed ($$status)"; break; }; \
+	  fi; \
+	  first=0; \
+	  $(WINGMAN_ACCOUNT_ENV) $(WINGMAN_ENV) $(WINGMAN_NESTED_ENV) $(WINGMAN_PREFIX_ENV) $(WINGMAN_NICE) $(PYTHON_RUN) -m wingman.main --log-file wingman.log $(RECORD_FLAG); \
+	  status=$$?; \
+	  $(PYTHON_RUN) scripts/round-scores.py after-session; \
+	done; \
 	exit $$status
 
 invite:

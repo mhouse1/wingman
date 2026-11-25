@@ -40,7 +40,7 @@ _INSIDE_BAND = (0.55, 0.78)
 _OUTSIDE_BAND = (1.22, 1.45)
 
 TRIGGERS = ("incoming", "low_flares", "low_fuel", "gun_heat", "ready", "lead_aligned",
-            "charged")
+            "charged", "hold_to_empty")
 # Triggers the pursuit answers on its own pictures (aimed_ability.py), several
 # times a second, not the battle tick: the ability has to be aimed first (ADR 186).
 AIMED_TRIGGERS = ("lead_aligned",)
@@ -483,6 +483,28 @@ class SpecialWeaponReader:
             self._ready = False
             self._ready_streak = 0
             self._ts = 0.0
+
+
+class FuelEmptyWatch:
+    """ADR 203: when a `q` held for a hold_to_empty ability may be let go.
+
+    `observe(pct, ts)` with the afterburner fuel reading and its time: True once two
+    fresh readings in a row are at or under `at` (0, "until fuel reports 0%").
+    Counted per reading, not per call, as _low_fuel counts the refuel: the fuel OCR
+    misreads now and then, and one misread must not cut the hold short."""
+
+    def __init__(self, at: float = 0.0):
+        self._at = float(at)
+        self._last_ts = None
+        self._streak = 0
+
+    def observe(self, pct, ts) -> bool:
+        if pct is None:
+            return False
+        if ts != self._last_ts:
+            self._last_ts = ts
+            self._streak = self._streak + 1 if pct <= self._at else 0
+        return self._streak >= 2
 
 
 class SpecialWeaponPresser:

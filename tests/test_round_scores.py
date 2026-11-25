@@ -316,13 +316,18 @@ def test_no_squadron_panel_depends_on_the_account():
     assert sqls and not any("tags" in sql or "account" in sql for sql in sqls)
 
 
-def test_the_jet_ranges_then_the_squadron_charts_sit_right_under_score_per_round():
-    """Operator, 2026-11-03: the jet ranges go under Score per round."""
+def test_memory_then_the_jet_ranges_then_the_squadron_charts_sit_under_score_per_round():
+    """Operator, 2026-11-03: the jet ranges go under Score per round. Operator,
+    2026-11-25: Memory per sample goes between them, at the same width, so memory
+    growth and score line up on one time axis."""
     dashboard = json.loads(Path("grafana/dashboards/score-per-round.json").read_text(encoding="utf-8"))
     place = {p["title"].split(" (")[0]: p["gridPos"] for p in dashboard["panels"]}
     score = place["Score per round: wingman and manual takeover"]
+    memory = place["Memory per sample"]
+    assert memory["y"] == score["y"] + score["h"]
+    assert (memory["x"], memory["w"]) == (score["x"], score["w"])
     jets = place["Score range by jet"]
-    assert jets["y"] == score["y"] + score["h"]
+    assert jets["y"] == memory["y"] + memory["h"]
     below = jets["y"] + jets["h"]
     assert place["Squadron rank per reading"]["y"] == below
     assert place["Squadron trophies per reading"]["y"] == below
@@ -544,10 +549,11 @@ def test_the_resource_panels_sit_under_the_score_panels_and_ignore_the_tags_box(
     assert [p["title"] for p in panels] == ["Memory per sample (MB)",
                                             "Threads and open files per sample",
                                             "OCR time per sample", "Resources per session"]
+    rest = panels[1:]  # Memory per sample sits under Score per round (2026-11-25)
     others = [p for p in dashboard["panels"] if p not in panels
               and not any("run_timings" in t["rawSql"] for t in p["targets"])]
-    assert min(p["gridPos"]["y"] for p in panels) == max(
-        p["gridPos"]["y"] + p["gridPos"]["h"] for p in others)
+    assert min(p["gridPos"]["y"] for p in rest) == max(
+        p["gridPos"]["y"] + p["gridPos"]["h"] for p in others + panels[:1])
     assert not any("tags @>" in t["rawSql"] for p in panels for t in p["targets"])
 
 

@@ -583,7 +583,7 @@
       "description": "Wingman's own rounds by the jet on record (ADR 167 and 168), the jet with the most read rounds on the left. Each bar runs from the jet's lowest score to its highest, and the tick marks its mean. Hover a bar for its figures and its count of read rounds: a jet with few rounds can have a short bar for that reason alone. Rounds with no jet recorded and rounds with a manual takeover are left out. OCR's spellings of one jet, such as F-106 and F106 DELTA DART, count as one jet under its most common spelling (jet_names in grafana/schema.sql).",
       "gridPos": {
         "x": 0,
-        "y": 13,
+        "y": 22,
         "w": 24,
         "h": 9
       },
@@ -719,7 +719,7 @@
       "description": "Mobius Squadron's place on the game's squadron leaderboard at each reading. Wingman reads it in the lobby between rounds (ADR 166). A lower number is a better place. It is the squadron's own figure, so it does not depend on the account that read it, and the tags box does not apply. The axis runs from the worst place at the foot to the best at the top, so the line climbs as the squadron climbs and lines up with the trophies beside it. Grafana has no reversed axis, so the chart plots the rank negated: the axis labels carry a minus sign, and the tooltip shows the real place.",
       "gridPos": {
         "x": 0,
-        "y": 22,
+        "y": 31,
         "w": 12,
         "h": 9
       },
@@ -768,7 +768,7 @@
       "description": "Mobius Squadron's trophy count at each reading: the whole squadron's, every member included, not wingman's alone. It does not depend on the account that read it, and the tags box does not apply (ADR 166).",
       "gridPos": {
         "x": 12,
-        "y": 22,
+        "y": 31,
         "w": 12,
         "h": 9
       },
@@ -816,7 +816,7 @@
       "description": "Wingman's own read rounds for the accounts and jets picked in the Account and Jet boxes at the top, to follow one jet on one account over time. A dot is a round at the time it ended, in its account's colour; hover it for the account and jet. The legend lists only the line: with many accounts and jets it would crowd out the chart. The blue line is the mean of the last $window rounds of the whole selection, so pick one account and one jet to see that jet's own trend. Rounds with a manual takeover are left out. The tags box applies too. A jet with a few dozen rounds moves a lot on each new one: score per round has a standard deviation near 200.",
       "gridPos": {
         "x": 0,
-        "y": 31,
+        "y": 40,
         "w": 24,
         "h": 9
       },
@@ -1001,7 +1001,7 @@
       "description": "Wingman's own rounds by the jet on the lobby as PLAY was clicked (ADR 167), the best mean score first. Kills, deaths and assists are per round. \u00b1 95% is the margin on the mean: trust a gap between two jets only when their ranges do not overlap. A jet with under 10 read rounds comes after the rest, because so few prove little. A jet can fly on several accounts; narrow to one with the tags box. Rounds flown before 2026-10-31 have no jet recorded. OCR's spellings of one jet, such as F-106 and F106 DELTA DART, count as one jet under its most common spelling (jet_names in grafana/schema.sql).",
       "gridPos": {
         "x": 0,
-        "y": 40,
+        "y": 49,
         "w": 24,
         "h": 8
       },
@@ -1065,7 +1065,7 @@
       "description": "The chosen aggregate over every read round that ended in each period (America/New_York). An unread round adds nothing; Rounds per period counts it.",
       "gridPos": {
         "x": 0,
-        "y": 48,
+        "y": 57,
         "w": 12,
         "h": 9
       },
@@ -1106,7 +1106,7 @@
       "description": "Rounds read and not read in each period; together, the rounds flown.",
       "gridPos": {
         "x": 12,
-        "y": 48,
+        "y": 57,
         "w": 12,
         "h": 9
       },
@@ -1151,7 +1151,7 @@
       "description": "One row per $granularity: rounds flown and read, and the sum, mean, median, minimum and maximum of $metric over the read rounds.",
       "gridPos": {
         "x": 0,
-        "y": 57,
+        "y": 66,
         "w": 16,
         "h": 10
       },
@@ -1185,7 +1185,7 @@
       "description": "Each tag key and value among the rounds in range, with its count of rounds. Filter with the tags box, for example {\"account\": \"mobius0\"}.",
       "gridPos": {
         "x": 16,
-        "y": 57,
+        "y": 66,
         "w": 8,
         "h": 10
       },
@@ -1219,7 +1219,7 @@
       "description": "Wingman's resident memory, the game's (summed over its processes, so read it as a trend, not a footprint), and glibc's split of wingman's heap: malloc live is memory wingman is using, malloc retained is memory it freed that the allocator kept. Live climbing means something holds objects; retained climbing means fragmentation. From the RESOURCE line wingman logs every 5 minutes (wingman/resource_monitor.py, Performance 008), read from the session logs by the ingest. The figures are the machine's, not an account's, so the tags box does not apply.",
       "gridPos": {
         "x": 0,
-        "y": 67,
+        "y": 13,
         "w": 24,
         "h": 9
       },

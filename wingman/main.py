@@ -62,6 +62,7 @@ from .liveness_guard import LivenessGuard
 from .focus_guard import FocusGuard, config_for_display
 from .host_mode import log_host_mode
 from .keybindings import FINISH_ROUND_THEN_EXIT
+from . import session_cycle
 from .game_shutdown import (GamePresenceWatch, close_game,
                             close_nested_display, find_game_pids)
 from .tick_handlers import (
@@ -1865,7 +1866,15 @@ def main():
         )
     startup_time = time.time()
     battle_ever_reached = False
+    cycle_restart = False            # ADR 202: exit with session_cycle.EXIT_CODE
     finish_round_exit = False        # ADR 094: set when the operator's deferred stop fires
+    # ADR 202: the game's memory grows as long as it runs, so a live session
+    # ends after a few rounds and make r relaunches the game and wingman.
+    cycle = session_cycle.SessionCycle.from_config(
+        cfg.get("session_cycle"), live=not replay_mode and not capture_mode)
+    if cycle.enabled:
+        logger.info("SESSION CYCLE: stopping after %d rounds, then relaunching in "
+                    "%.0f s (ADR 202)", cycle.rounds, cycle.wait_s)
     game_gone_exit = False           # ADR 105: the game exited on its own
     game_watch = GamePresenceWatch(
         process_name=(cfg.get("resource_monitor", {}) or {}).get(
@@ -1941,6 +1950,11 @@ def main():
             _ending_round = analyzer.game_state == GameState.GAME_END_B
             _settling = (final_continue_ts[0] > 0.0
                          and time.time() - final_continue_ts[0] < FINISH_ROUND_SETTLE_S)
+            # ADR 202: a 'z' that cancelled the cycle's stop is the operator's
+            # decision for the rest of the session.
+            if cycle.note_stop_flag(ctrl.finish_round_requested()):
+                logger.info("\033[93m🔁 SESSION CYCLE: the operator cancelled the "
+                            "restart — no further cycle stop this session\033[0m")
             # ADR 166: nor while the squadron leaderboard is up; the navigation
             # sees the pending stop and comes straight back.
             if ctrl.finish_round_requested() and not (_in_round or _ending_round
@@ -2082,6 +2096,13 @@ def main():
                 if new_game_state != GameState.GAME_UNKNOWN:
                     startup_classification_complete = True
                 ctrl.note_round_state(new_game_state)
+                if cycle.note_state(new_game_state, ctrl.finish_round_requested()):
+                    ctrl.request_finish_round()
+                    logger.warning(
+                        "\033[93m🔁 SESSION CYCLE: round %d of %d finished — stopping at "
+                        "the lobby, closing MetalStorm, relaunching in %.0f s "
+                        "(ADR 202). Press '%s' to cancel.\033[0m", cycle.finished,
+                        cycle.rounds, cycle.wait_s, FINISH_ROUND_THEN_EXIT)
                 if new_game_state == GameState.GAME_END_B:
                     game_end_b_since = time.time()
                     # GAME_END_B is not a respawn flow; clear the respawn latch
@@ -2583,6 +2604,8 @@ def main():
         elif finish_round_exit:
             # 'z' means "I am done" — close immediately.
             _close_session()
+            if cycle.should_restart(finish_round_exit):
+                cycle_restart = _cycle_wait(cycle, exit_requested, logger)
         elif standby_armed:
             # Standby parks the process for as long as the operator flies, so
             # hand freed arenas back to the OS first. glibc keeps them by
@@ -2695,6 +2718,34 @@ def main():
                     logger.info("STANDBY: interrupted — leaving MetalStorm running")
             finally:
                 ctrl.release_hotkeys()
+    if cycle_restart:
+        sys.exit(session_cycle.EXIT_CODE)
+    return None
+
+
+def _cycle_wait(cycle, exit_requested, logger) -> bool:
+    """ADR 202: the wait between a cycle's close and its relaunch.
+
+    True when it ran out, so the session exits for the relaunch. A SIGTERM or
+    Ctrl-C during it means stop, and the make loop ends on exit 0. The shutdown
+    watchdog bounds a stalled cleanup and cannot tell this wait from one, so it
+    is stood down for the wait and armed again for the exit that follows.
+    """
+    _cancel_shutdown_watchdog()
+    logger.info("\033[93m🔁 SESSION CYCLE: MetalStorm closed after %d rounds — "
+                "relaunching in %.0f s (ADR 202). Ctrl-C or SIGTERM now ends the "
+                "loop.\033[0m", cycle.finished, cycle.wait_s)
+    try:
+        interrupted = exit_requested.wait(timeout=cycle.wait_s)
+    except KeyboardInterrupt:
+        interrupted = True
+    _arm_shutdown_watchdog()
+    if interrupted:
+        logger.info("SESSION CYCLE: stop requested during the wait — not relaunching")
+        return False
+    logger.info("SESSION CYCLE: exiting %d for make r to relaunch (ADR 202)",
+                session_cycle.EXIT_CODE)
+    return True
 
 
 if __name__ == "__main__":

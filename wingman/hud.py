@@ -122,9 +122,15 @@ class HudRenderer:
                  black_box_alarm_max: int = 0,
                  black_box_alarm_gap_s: float = 30.0,
                  black_box_alarm_seconds: float = 4.0,
-                 black_box_raw: bool = False) -> None:
+                 black_box_raw: bool = False,
+                 write_live_png: bool = True) -> None:
         self._output = Path(output_path)
         self._interval = float(interval_sec)
+        # Operator, 2026-11-25: live_hud.png off in unattended sessions. Off, the
+        # once-a-second render runs only for the target-tracking archive, nothing
+        # is written to output_path and no feh window opens. The black box is
+        # rendered on its own cadence and is not affected.
+        self._write_live_png = bool(write_live_png)
         self._last_ts: float = 0.0
         self._acq_pct = tuple(float(v) for v in acquisition_region_pct)
         self._render_lock = threading.Lock()
@@ -204,7 +210,7 @@ class HudRenderer:
         self._bb_alarm_seconds = max(0.5, float(black_box_alarm_seconds))
         self._bb_alarm_count = 0
         self._bb_alarm_last = -1e9
-        if feh_geometry:
+        if feh_geometry and self._write_live_png:
             self._launch_feh(feh_geometry)
 
     def _text(self, text: str, x: int, y: int, color=_WHITE,
@@ -711,6 +717,8 @@ class HudRenderer:
             black_box_alarm_seconds=float(
                 box_cfg.get("alarm_seconds", schema_default("hud.black_box.alarm_seconds"))),
             black_box_raw=bool(box_cfg.get("raw", schema_default("hud.black_box.raw"))),
+            write_live_png=bool(
+                hud_cfg.get("write_live_png", schema_default("hud.write_live_png"))),
         )
 
     def maybe_render(
@@ -739,7 +747,8 @@ class HudRenderer:
         tick's terrain overlays, which belong to other pictures.
         """
         now = time.time()
-        live_due = now - self._last_ts >= self._interval
+        live_due = ((self._write_live_png or self._archive_enabled)
+                    and now - self._last_ts >= self._interval)
         box_due = self._bb_enabled and now - self._bb_last_ts >= self._bb_interval
         if not live_due and not box_due:
             return None
@@ -959,7 +968,7 @@ class HudRenderer:
                 self._keep_for_black_box(
                     cv2.resize(frame, (w // 2, h // 2), interpolation=cv2.INTER_AREA),
                     ts, raw=True)
-        if not write_live:
+        if not write_live or not self._write_live_png:
             return
         self._output.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._output.with_suffix(".tmp.png")

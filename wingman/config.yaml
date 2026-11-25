@@ -528,6 +528,14 @@ crops:
 finish_round_then_exit:
   close_game: true            # false stops wingman only, leaving game + display
   game_term_grace_s: 5.0      # SIGTERM to SIGKILL, matching launch-game's settle
+# ADR 202: MetalStorm's memory grows +304 MB/h for as long as it runs (2026-11-22,
+# 513 -> 3,870 MB in 7.1 h). After `rounds` finished rounds wingman stops at the
+# lobby and closes the game as 'z' does, waits `wait_s`, and exits 75; make r
+# (r1 to r3) relaunches the game and wingman on that code. Live runs only.
+session_cycle:
+  enabled: true
+  rounds: 30                  # 2 for the 2026-11-23 trial; 30 is about 3.5 h
+  wait_s: 120
 # ADR 092: leak gate thresholds. `make leak-check` measures post-warm-up growth
 # from the archived RESOURCE lines. INSUFFICIENT is never a pass — short
 # sessions underread an accumulating defect roughly tenfold.
@@ -650,7 +658,7 @@ special_weapon: {enabled: true, sectors: 16, min_lit_sectors: 14, min_lit_when_c
   # A READY dropping to 8-14 of 16 saves the icon's crop here, up to capture_max a
   # session: the 2026-11-07 run had 8 one-read drops with no press (cause unseen).
   capture_dir: test_screenshots/special_weapon/live, capture_max: 40,
-  glyph_min_iou: 0.85, refuel_fuel_at: 50, gun_heat_at: 0.8,
+  glyph_min_iou: 0.85, refuel_fuel_at: 50, gun_heat_at: 0.8, hold_max_s: 30.0,
   # ADR 190 (operator, 2026-11-18): "anytime an undefined special weapon appears
   # activate it automatically". A lit ring round a glyph no row below knows reads
   # 'other' and gets this trigger: ready presses `q` whenever the icon is lit.
@@ -701,7 +709,15 @@ special_weapon: {enabled: true, sectors: 16, min_lit_sectors: 14, min_lit_when_c
     # countdown, 0.12 or less against every other glyph crop (ADR 190). The row
     # names it in the log; unknown_trigger would press it anyway.
     phantom_missiles: {glyph: test_screenshots/special_weapon/glyphs/phantom_missiles.png,
-      trigger: ready}},
+      trigger: ready},
+    # Operator, 2026-11-24 (the MiG-21 Fishbed, a double chevron pointing up): its
+    # "activation requires holding the 'q' button, it should be held until fuel
+    # reports 0%". Held from READY while the fuel reads above fuel_at, let go on two
+    # fuel readings at fuel_at, or after hold_max_s. Tapped twice under
+    # unknown_trigger, the icon stayed READY. The glyph scores 1.00 on the `v`
+    # screenshot of 17:55:10, 0.46 or less against every other glyph (ADR 203).
+    boost_hold: {glyph: test_screenshots/special_weapon/glyphs/boost_hold.png,
+      trigger: hold_to_empty, fuel_at: 0}},
   # ADR 186: an ability fired on its lead (trigger lead_aligned). The diamond is
   # searched within search_px of the crosshair (px at 1200 high), counts from
   # min_score (the four diamonds of 2026-11-17 scored 0.79-0.83, nothing else in
@@ -967,7 +983,29 @@ acs_mission: {climb_alt_m: 3000, alt_floor_m: 3000, climb_max_s: 90.0,
   # ADR 191 D7: true spawns an acs life level instead of the spawn guard's
   # nose-up pulses. Off: lives that went straight to the pursuit then died on
   # terrain 8 times in 34, against 5 in 106 with the pulses.
-  spawn_watch_only: false}
+  spawn_watch_only: false,
+  # ADR 204 (operator, 2026-11-25: "avoid nose up if possible"): in this share of
+  # rounds, drawn at the round start, a life with no target at the end of its watch
+  # skips the climb when the terrain service's level path stays 150 m (its
+  # clearance_margin_m) over the ground for start_level_horizon_s, on the track and
+  # 15 deg either side, from a fix no older than start_fix_max_age_s. With no fix
+  # yet it flies level up to start_terrain_wait_s more, still watching for a
+  # target; no verdict by then climbs. 0.5 so the skip is judged against climb
+  # rounds in the same session (ADR 191 D7: flying lives level raised terrain
+  # deaths). The horizon is a named guess. The wait: at battle entry the first fix
+  # came at a median 2.4 s from the watch's start (p75 4.1, p90 5.6, of 201 that
+  # fixed), and the level path needs a second fix with a ground speed, about 1.5 s
+  # later. 2 s ran out first: 2026-11-25 05:53, COUNTDOWN, the decision at +4.1 s,
+  # the first fix at +5.1, the first speed at +6.6. 5 s puts the deadline at 7 s.
+  start_skip_share: 0.5, start_level_horizon_s: 8.0, start_terrain_wait_s: 5.0,
+  start_fix_max_age_s: 2.0,
+  # ADR 204 (operator: "compensate to lower nose to 0 to -15 degrees to course
+  # correct for overshoot"): a climb a target in view cut short (459 of 491 climbs
+  # on 2026-11-23 to 25, at a median +43 deg) brings the flight path into this band
+  # before the pursuit, pulsing as the -10 deg step does, at most recover_nose_max_s.
+  # Ordinary climbs (the 3000 m floor) are held off meanwhile; a hard emergency is
+  # not. 6 s is a named guess: two or three new path samples.
+  recover_nose_min_deg: -15, recover_nose_max_deg: 0, recover_nose_max_s: 6.0}
 # yield_to_target (operator, 2026-09-26): a tracker lock or a ring icon during the
 # climb or the nose-angle step ends the script and starts the pursuit at once (after
 # the respawn the script climbed and held -10 deg past targets it had acquired).
@@ -2477,6 +2515,11 @@ hud:
   # off. Turn back off (hud.enabled: false is a hard override, regardless of
   # tracking.enabled) once the roll_right question is answered.
   enabled: true
+  # Off (operator, 2026-11-25): nobody watches live_hud.png in unattended
+  # sessions. The renderer stays on, so the black box below still records
+  # deaths and alarms. Set true to write live_hud.png (and open its feh
+  # window when tracking is on) again.
+  write_live_png: false
   output_path: tests/test-output/live_hud.png
   interval_sec: 1.0
   # Timestamped archive of the same annotated frame while target tracking is

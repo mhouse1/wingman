@@ -29,7 +29,12 @@ from . import capture_budget
 from .compass import fmt_heading
 from .crop_region import get_crop
 from .config_schema import schema_default
-from .special_weapon import AIMED_TRIGGERS, SpecialWeaponPresser, resolve_profile
+from .special_weapon import (
+    AIMED_TRIGGERS,
+    FuelEmptyWatch,
+    SpecialWeaponPresser,
+    resolve_profile,
+)
 from .state import GameState, BATTLE_STATES
 from .suppressed import log_suppressed
 from .terrain_loom import fmt_tau, fmt_taus
@@ -1024,6 +1029,11 @@ class AmmoEventsHandler:
                 self._ctrl.pursuit_hold_new_round()
             except Exception as exc:
                 log_suppressed(logger, "pursuit_hold_new_round", exc)
+            # ADR 204: and whether this round's lives may skip the start climb.
+            try:
+                self._ctrl.start_climb_new_round()
+            except Exception as exc:
+                log_suppressed(logger, "start_climb_new_round", exc)
         self._in_battle = in_battle
 
     def suppress_after_respawn(self, seconds: float = 10.0):
@@ -1343,6 +1353,42 @@ class AmmoEventsHandler:
             self._fuel_low_streak = self._fuel_low_streak + 1 if pct <= at else 0
         return self._fuel_low_streak >= 2
 
+    def _fuel_above(self, at: float) -> bool:
+        """ADR 203: a fresh afterburner fuel reading above `at`."""
+        try:
+            pct, _ts = self._analyzer.get_afterburner_fuel_reading()
+        except Exception as exc:
+            log_suppressed(logger, "afterburner_fuel_reading", exc)
+            return False
+        return pct is not None and pct > at
+
+    def _special_hold_active(self) -> bool:
+        try:
+            return bool(self._ctrl.special_hold_active())
+        except Exception as exc:
+            log_suppressed(logger, "special_hold_active", exc)
+            return False
+
+    def _hold_special_weapon(self, ability: str, at: float) -> bool:
+        """ADR 203: hold `q` until two fuel readings in a row are at or under `at`
+        (operator, 2026-11-24: "held until fuel reports 0%"), or hold_max_s."""
+        watch = FuelEmptyWatch(at)
+        analyzer = self._analyzer
+
+        def _until():
+            pct, ts = analyzer.get_afterburner_fuel_reading()
+            return f"fuel {pct}%" if watch.observe(pct, ts) else None
+
+        max_s = self._special_weapon_cfg.get("hold_max_s")
+        if max_s is None:
+            max_s = schema_default("special_weapon.hold_max_s")
+        try:
+            return bool(self._ctrl.hold_special_weapon(_until, float(max_s),
+                                                       label=f"special_weapon_{ability}"))
+        except Exception as exc:
+            log_suppressed(logger, "hold_special_weapon", exc)
+            return False
+
     def _special_weapon_charged(self, at) -> "bool | None":
         """ADR 199: True while the ring has `at` (default 1) or more lit sectors,
         False with fewer, None with no fresh read."""
@@ -1384,6 +1430,9 @@ class AmmoEventsHandler:
             # ADR 186: aimed on the pursuit's own pictures (Controller), not here.
             return False
         ability = sw.get("ability") or "special_weapon"
+        if trigger == "hold_to_empty" and self._special_hold_active():
+            # ADR 203: `q` is down already; the controller lets it go.
+            return False
         key = (ability, trigger)
         presser = self._special_pressers.get(key)
         if presser is None:
@@ -1412,6 +1461,9 @@ class AmmoEventsHandler:
                 at = self._special_weapon_cfg.get(
                     "refuel_fuel_at", schema_default("special_weapon.refuel_fuel_at"))
             fired = self._low_fuel(float(at))
+        elif trigger == "hold_to_empty":
+            # ADR 203: only with fuel to spend, read, so the release can see it run out.
+            fired = self._fuel_above(float(sw.get("fuel_at") or 0))
         else:
             fired = True
         if trigger == "charged":
@@ -1431,7 +1483,11 @@ class AmmoEventsHandler:
         logger.info("\033[93m✨ Special weapon %s: trigger %s, icon %s\033[0m",
                     ability, trigger,
                     "charged" if trigger == "charged" else "READY")
-        self._ctrl.activate_special_weapon()
+        if trigger == "hold_to_empty":
+            if not self._hold_special_weapon(ability, float(sw.get("fuel_at") or 0)):
+                return False
+        else:
+            self._ctrl.activate_special_weapon()
         try:
             self._analyzer.note_special_weapon_press()
         except Exception as exc:
