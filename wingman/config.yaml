@@ -2517,8 +2517,8 @@ hud:
   enabled: true
   # Off (operator, 2026-11-25): nobody watches live_hud.png in unattended
   # sessions. The renderer stays on, so the black box below still records
-  # deaths and alarms. Set true to write live_hud.png (and open its feh
-  # window when tracking is on) again.
+  # deaths and alarms. `make hud` toggles it per machine (config.local.yaml)
+  # and opens the feh window when tracking is on.
   write_live_png: false
   output_path: tests/test-output/live_hud.png
   interval_sec: 1.0
