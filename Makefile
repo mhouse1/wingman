@@ -357,7 +357,7 @@ grafana-check:
 grafana: require-veda grafana-check
 	$(GRAFANA_COMPOSE) up -d --wait
 	@$(PYTHON_RUN) scripts/round-scores.py ingest
-	@echo "Score dashboard: http://127.0.0.1:3000"
+	@echo "Score dashboard: http://127.0.0.1:3001"
 
 grafana-ingest: require-veda grafana-check
 	@$(PYTHON_RUN) scripts/round-scores.py ingest

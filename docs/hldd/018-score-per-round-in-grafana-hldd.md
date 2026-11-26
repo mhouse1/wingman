@@ -458,7 +458,7 @@ It runs:
 | Service | Image | Notes |
 |---------|-------|-------|
 | `postgres` | `postgres:16.14`, the version VEDA already has as `postgres:16` | Named volume; init script from `grafana/postgres/`; `pg_isready` healthcheck; no published port |
-| `grafana` | The official Grafana OSS image, `grafana/grafana:12.2.0` (pinned 2026-10-29) | Published on `127.0.0.1:3000` only; provisioning and dashboards mounted read-only; anonymous Viewer access |
+| `grafana` | The official Grafana OSS image, `grafana/grafana:12.2.0` (pinned 2026-10-29) | Published on `127.0.0.1:3001` only (host side; 3000 belongs to foundry's Redmine on VEDA); provisioning and dashboards mounted read-only; anonymous Viewer access |
 
 - **Passwords.** The Postgres superuser, the Grafana read-only role and the Grafana admin take
   their passwords from `grafana/.env`. That file is untracked and made from the tracked
@@ -470,7 +470,7 @@ It runs:
     turned off.
 - **Changing the dashboard.** The JSON file in the repository is the dashboard. To change it,
   edit it in Grafana, export the JSON, and replace the file.
-- **Home page.** The score dashboard is Grafana's home dashboard, so `http://127.0.0.1:3000` opens
+- **Home page.** The score dashboard is Grafana's home dashboard, so `http://127.0.0.1:3001` opens
   on it.
 - **On demand.** `make grafana` starts the stack and `make grafana-down` stops it. There is no
   restart policy, so nothing extra runs on VEDA unless someone asks for it.
@@ -706,7 +706,7 @@ dashboard, under the score panels.
 
 | Target | Does |
 |--------|------|
-| `make grafana` | Checks both gates, starts the stack (`docker compose up -d --wait`), runs the ingest, and prints `http://127.0.0.1:3000` |
+| `make grafana` | Checks both gates, starts the stack (`docker compose up -d --wait`), runs the ingest, and prints `http://127.0.0.1:3001` |
 | `make grafana-ingest` | Checks both gates and runs the ingest; the stack must be up |
 | `make grafana-down` | Stops the stack, without checking either gate; the volume stays |
 
@@ -770,7 +770,7 @@ Everything in this table is tracked, except `grafana/.env`. The switch is turned
   - Before the overlay switches it on, `make grafana` stops at the check, names the key, and
     starts no container.
   - With the switch on, `make grafana` brings both containers up healthy and prints the address.
-    The dashboard opens without a login at `http://127.0.0.1:3000` and does not answer on VEDA's
+    The dashboard opens without a login at `http://127.0.0.1:3001` and does not answer on VEDA's
     LAN address.
   - Record both containers' memory while a session runs.
 - **V3, the numbers.**

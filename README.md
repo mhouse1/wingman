@@ -266,7 +266,7 @@ wingman already writes into Postgres; both run in Docker beside Grafana, and the
 dashboard itself is provisioned from `grafana/dashboards/score-per-round.json`.
 
 ```bash
-make grafana         # start the stack, ingest, serve http://127.0.0.1:3000
+make grafana         # start the stack, ingest, serve http://127.0.0.1:3001
 make grafana-ingest  # load new rounds and samples into a running stack
 make grafana-down    # stop the stack (the rows stay in its volume)
 ```
