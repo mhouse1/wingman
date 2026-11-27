@@ -1,0 +1,548 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Wingman airspace view</title>
+<!-- Design 017: the jet in the arena's free-airspace record. Served by scripts/airspace-view.py. -->
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0f14; color: #e6edf3;
+               font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  canvas { display: block; }
+  .panel { position: absolute; background: rgba(10, 14, 20, 0.80); border: 1px solid #263040;
+           border-radius: 6px; padding: 8px 11px; }
+  #hud { top: 10px; left: 10px; min-width: 290px; max-width: 380px; }
+  #hud .title { font-weight: 600; font-size: 14px; }
+  #hud .muted { color: #8b98a8; }
+  #hud .row { display: flex; justify-content: space-between; gap: 14px; }
+  #hud .row span:last-child { font-variant-numeric: tabular-nums; text-align: right; }
+  .ok { color: #5ee08a; } .stale { color: #f2c94c; } .lost { color: #9aa4b1; } .bad { color: #ff6b6b; }
+  #layers { top: 10px; right: 10px; min-width: 190px; }
+  #layers label { display: block; cursor: pointer; white-space: nowrap; }
+  #legend { margin-top: 6px; border-top: 1px solid #263040; padding-top: 6px; }
+  .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  #keys { bottom: 10px; left: 10px; color: #8b98a8; }
+  #msg { top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 15px; display: none; }
+  #pick { bottom: 10px; right: 10px; max-width: 420px; display: none; }
+  #pick .title { font-weight: 600; }
+  #pick code { font-size: 11px; color: #c9d4e0; word-break: break-all; }
+  #pick button { margin: 6px 6px 0 0; background: #2a3646; color: #e6edf3; border: 1px solid #3a4658;
+                 border-radius: 4px; padding: 4px 10px; cursor: pointer; }
+  #pick button.go { background: #6b5a12; border-color: #a08a1e; }
+  kbd { border: 1px solid #3a4658; border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; font-size: 11px; color: #c9d4e0; }
+</style>
+<script type="importmap">
+  { "imports": { "three": "/three/three.module.js", "three/addons/": "/three/addons/" } }
+</script>
+</head>
+<body>
+<div id="hud" class="panel"><div class="title">Connecting…</div></div>
+<div id="layers" class="panel"><div class="muted">Layers</div><div id="layer-list"></div>
+  <div id="legend" class="muted">Flown floor over the highest ground in its cell<br>
+    <span class="sw" style="background:#d926d9"></span>below it (rock in the cell)<br>
+    <span class="sw" style="background:#e6261a"></span>0–100 m
+    <span class="sw" style="background:#f28c1a;margin-left:8px"></span>100–300 m<br>
+    <span class="sw" style="background:#e6d933"></span>300–1,000 m
+    <span class="sw" style="background:#4080f2;margin-left:8px"></span>1,000 m +<br>
+    <span class="sw" style="background:#3dff7a"></span>re-armed this round (live)
+    <span class="sw" style="background:#1ae6e6;margin-left:8px"></span>ring sites (record)</div>
+</div>
+<div id="keys" class="panel"><kbd>F</kbd> follow the jet &nbsp; <kbd>O</kbd> overview &nbsp; <kbd>C</kbd> chase view &nbsp; drag to turn, scroll to zoom, right-drag to pan · click a golden candidate to look it over</div>
+<div id="msg" class="panel"></div>
+<div id="pick" class="panel"></div>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// Layers on by default; the operator's own choices persist in localStorage.
+const DEFAULT_ON = { collision: false, ground: true, water: true, arena_edge: true, flown_floor: true,
+                     flown_floor_one_pass: false, crash_samples: false, rearm_points: false, ring_sites: true,
+                     golden_candidates: false, golden_paths: true, golden_entry_gates: true };
+const saved = JSON.parse(localStorage.getItem('airspace-layers') || '{}');
+const layerOn = (name) => (name in saved ? saved[name] : (DEFAULT_ON[name] ?? true));
+
+// The arena frame is Unity's: x east, y up, z north. glTF and three.js put north at -z.
+const toScene = (x, y, z) => new THREE.Vector3(x, y, -z);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x8fb8de);
+scene.fog = new THREE.Fog(0x8fb8de, 35000, 80000);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x3a4450, 1.5));
+const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+sun.position.set(-6000, 12000, 5000);
+scene.add(sun);
+
+const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 5, 100000);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.maxDistance = 60000;
+controls.enableDamping = true;
+function overview(keepFollow = false) {
+  if (!keepFollow) follow = false;
+  controls.target.set(0, 400, 0);
+  camera.position.set(0, 17000, 15000);
+  controls.update();
+}
+
+const hud = document.getElementById('hud');
+const layerList = document.getElementById('layer-list');
+const msgEl = document.getElementById('msg');
+const msg = (text) => { msgEl.textContent = text; msgEl.style.display = text ? 'block' : 'none'; };
+
+// ---- the arena scene -----------------------------------------------------------------
+const loader = new GLTFLoader();
+let arenaKey, arenaRoot = null, scenes = {};
+function dispose(obj) {
+  obj.traverse((o) => {
+    if (o.geometry) o.geometry.dispose();
+    if (o.material) {
+      for (const m of [].concat(o.material)) { if (m.map) m.map.dispose(); m.dispose(); }
+    }
+  });
+}
+function buildLayerToggles(root) {
+  layerList.innerHTML = '';
+  for (const child of root.children) {
+    const name = child.name;
+    child.visible = layerOn(name);
+    const label = document.createElement('label');
+    const box = document.createElement('input');
+    box.type = 'checkbox';
+    box.checked = child.visible;
+    box.onchange = () => {
+      child.visible = box.checked;
+      saved[name] = box.checked;
+      localStorage.setItem('airspace-layers', JSON.stringify(saved));
+    };
+    label.append(box, ' ' + name.replaceAll('_', ' '));
+    layerList.append(label);
+  }
+}
+function loadArena(key) {
+  if (key === arenaKey) return;
+  arenaKey = key;
+  if (arenaRoot) { scene.remove(arenaRoot); dispose(arenaRoot); arenaRoot = null; }
+  layerList.innerHTML = '';
+  clearTrails();
+  clearRearms();
+  candidates = new Map();
+  closePick();
+  if (!key) { msg('No terrain data for this map'); return; }
+  if (scenes[key] === false) { msg(`No 3D scene for ${key} yet: run export_scene.py on its record`); return; }
+  msg(`Loading ${key}…`);
+  loader.load(`/arena/${key}.glb`, (gltf) => {
+    if (arenaKey !== key) { dispose(gltf.scene); return; }
+    arenaRoot = gltf.scene;
+    arenaRoot.traverse((o) => {
+      if (o.isMesh && o.material.transparent) { o.material.depthWrite = false; o.renderOrder = 1; }
+    });
+    scene.add(arenaRoot);
+    buildLayerToggles(arenaRoot);
+    msg('');
+    loadCandidates(key);
+  }, undefined, (err) => msg(`Could not load ${key}: ${err.message || err}`));
+}
+
+// ---- the jet, its trail and its drop line ------------------------------------------------
+const jetMat = new THREE.MeshStandardMaterial({ color: 0x22dd66, emissive: 0x0d3a1c, roughness: 0.5 });
+const jet = new THREE.Mesh(new THREE.ConeGeometry(45, 230, 16).rotateX(Math.PI / 2), jetMat);
+jet.visible = false;
+scene.add(jet);
+const COLOURS = { ok: 0x22dd66, stale: 0xf2c94c, lost: 0x9aa4b1, warn: 0xff4d4d };
+
+const dropGeom = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+const drop = new THREE.Line(dropGeom, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.75 }));
+drop.visible = false;
+scene.add(drop);
+const foot = new THREE.Mesh(new THREE.RingGeometry(60, 90, 32).rotateX(-Math.PI / 2),
+                            new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide }));
+foot.visible = false;
+scene.add(foot);
+
+const trailMat = new THREE.MeshBasicMaterial({ color: 0x00e5ff });
+const pastMat = new THREE.MeshBasicMaterial({ color: 0x6f7c8c, transparent: true, opacity: 0.55 });
+const deathMat = new THREE.MeshBasicMaterial({ color: 0xff3030 });
+// Re-arms this round, as they happen: a green ring flat at the height the jet had, 150 m across.
+const rearmMat = new THREE.MeshBasicMaterial({ color: 0x3dff7a });
+const rearmGeom = new THREE.TorusGeometry(150, 14, 8, 48).rotateX(Math.PI / 2);
+const rearmMarks = [];
+function addRearm(x, z, alt) {
+  if (alt === null || alt === undefined) return;
+  const m = new THREE.Mesh(rearmGeom, rearmMat);
+  m.position.copy(toScene(x, alt, z));
+  scene.add(m);
+  rearmMarks.push(m);
+}
+function clearRearms() {
+  for (const m of rearmMarks) scene.remove(m);
+  rearmMarks.length = 0;
+}
+let trail = [];            // scene points of the current stretch of this life
+let trailMesh = null;
+const segments = [];       // this life's earlier stretches, split where the position was lost
+const past = [];           // earlier lives' tubes and death markers this round
+let lastFixT = null;
+const GAP_S = 3, MAX_MPS = 700;   // a gap, or a step no aircraft flies, starts a new stretch
+function tubeOf(points, material) {
+  if (points.length < 2) return null;
+  const curve = new THREE.CatmullRomCurve3(points, false, 'centripetal');
+  return new THREE.Mesh(new THREE.TubeGeometry(curve, Math.min(points.length * 4, 2400), 14, 6, false), material);
+}
+function rebuildTrail() {
+  if (trailMesh) { scene.remove(trailMesh); trailMesh.geometry.dispose(); }
+  trailMesh = tubeOf(trail, trailMat);
+  if (trailMesh) scene.add(trailMesh);
+}
+function breakTrail() {
+  // The stretch so far becomes a tube of its own, whether or not it was drawn yet.
+  if (trailMesh) { scene.remove(trailMesh); trailMesh.geometry.dispose(); trailMesh = null; }
+  const m = tubeOf(trail, trailMat);
+  if (m) { scene.add(m); segments.push(m); }
+  trail = [];
+}
+function clearTrails() {
+  for (const o of past.concat(segments)) { scene.remove(o); o.geometry.dispose(); }
+  past.length = 0;
+  segments.length = 0;
+  trail = [];
+  lastFixT = null;
+  rebuildTrail();
+  jet.visible = drop.visible = foot.visible = false;
+}
+function endLife(where) {
+  breakTrail();
+  for (const m of segments) { m.material = pastMat; past.push(m); }
+  segments.length = 0;
+  lastFixT = null;
+  if (where) {
+    const m = new THREE.Mesh(new THREE.OctahedronGeometry(70), deathMat);
+    m.position.copy(where);
+    scene.add(m);
+    past.push(m);
+  }
+}
+
+// Adds a fix to the trail; returns the point before it in the same stretch, or null.
+function addTrailPoint(p, t) {
+  let prev = trail.length ? trail[trail.length - 1] : null;
+  if (prev && lastFixT !== null) {
+    const dt = t - lastFixT;
+    const flat = Math.hypot(p.x - prev.x, p.z - prev.z);
+    if (dt > GAP_S || flat > MAX_MPS * Math.max(dt, 0.1) + 200) {
+      breakTrail();
+      prev = null;
+    }
+  }
+  lastFixT = t;
+  trail.push(p);
+  if (trail.length > 600) trail.shift();
+  return prev;
+}
+
+// ---- motion between ticks ----------------------------------------------------------------
+const from = new THREE.Vector3(), to = new THREE.Vector3(), heading = new THREE.Vector3(0, 0, -1);
+let glideStart = 0, glideMs = 1000, lastArrival = 0;
+let follow = true;
+function placeJet(p, dir) {
+  const now = performance.now();
+  from.copy(jet.visible ? jet.position : p);
+  to.copy(p);
+  glideMs = Math.min(Math.max(lastArrival ? now - lastArrival : 1000, 100), 2000);
+  glideStart = now;
+  lastArrival = now;
+  if (dir && dir.lengthSq() > 1) heading.copy(dir).normalize();
+  if (!jet.visible) {
+    jet.visible = true;
+    if (follow) chase();
+  }
+}
+function chase() {
+  follow = true;
+  const back = heading.clone().setY(0).normalize().multiplyScalar(-2600);
+  controls.target.copy(to);
+  camera.position.copy(to).add(back).add(new THREE.Vector3(0, 1100, 0));
+  controls.update();
+}
+
+// ---- golden-path candidates: pick one, look it over, accept it -------------------------------
+// The scene draws each candidate as its own node, cand-<id>, under golden_candidates; the server
+// serves the list they come from (scripts/airspace-golden.py), each marked when already accepted.
+const pickEl = document.getElementById('pick');
+const goldMat = new THREE.MeshBasicMaterial({ color: 0xffd700 });
+const pickMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+let candidates = new Map(), picked = null;
+function candidateMesh(id) {
+  let found = null;
+  if (arenaRoot) arenaRoot.traverse((o) => { if (o.isMesh && o.name === `cand-${id}`) found = o; });
+  return found;
+}
+function paint(id) {
+  const mesh = candidateMesh(id), row = candidates.get(id);
+  if (!mesh || !row) return;
+  if (!mesh.userData.own) mesh.userData.own = mesh.material;
+  mesh.material = picked === id ? pickMat : (row.accepted ? goldMat : mesh.userData.own);
+}
+async function loadCandidates(key) {
+  try {
+    const data = await (await fetch(`/arena/${key}/candidates.json`)).json();
+    if (arenaKey !== key) return;
+    candidates = new Map(data.paths.map((r) => [r.id, r]));
+    for (const id of candidates.keys()) paint(id);
+  } catch (e) { candidates = new Map(); }
+}
+function closePick() {
+  const was = picked;
+  picked = null;
+  if (was !== null) paint(was);
+  pickEl.style.display = 'none';
+}
+// The log's own clock (r.when, written on the host), a minute early: not the browser's time zone.
+function startOf(when) {
+  const [h, m] = when.slice(11, 16).split(':').map(Number);
+  const mins = (h * 60 + m + 1439) % 1440;
+  return `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
+}
+function showPick(id, status = '') {
+  const r = candidates.get(id);
+  if (!r) return;
+  const was = picked;
+  picked = id;
+  if (was !== null && was !== id) paint(was);
+  paint(id);
+  const site = r.site !== undefined ? `ring site ${r.site} (${r.site_m} m off)` : 'no ring site';
+  const log = r.log === 'wingman.log' ? 'wingman.log' : `logs/${r.log}`;
+  pickEl.innerHTML = `
+    <div class="title">${arenaKey}:${r.id} <span class="${r.accepted ? 'ok' : 'stale'}">${r.accepted ? 'accepted golden path' : 'candidate'}</span></div>
+    <div>${r.when} · ${site}</div>
+    <div>${r.waypoints.length} waypoints · lowest ${fmt(r.lowest_alt_m)}, ${fmt(r.lowest_over_ground_m)} over the ground
+      · flown ${r.manual ? 'by hand' : 'by wingman'}</div>
+    ${r.unconfirmed ? '<div class="stale">Unconfirmed: found from the missile count away from any ring site wingman confirmed. A rack switch looks the same, so replay it first.</div>' : ''}
+    <div class="muted">Replay it: <code>make airspace-view LOG=${log} START=${startOf(r.when)} SPEED=4</code></div>
+    <div>${r.accepted ? '' : '<button class="go" id="accept">Accept as golden path</button>'}<button id="close">Close</button></div>
+    <div class="muted" id="pick-status">${status}</div>`;
+  pickEl.style.display = 'block';
+  document.getElementById('close').onclick = closePick;
+  const btn = document.getElementById('accept');
+  if (btn) btn.onclick = () => acceptPick(id);
+}
+async function acceptPick(id) {
+  const r = candidates.get(id);
+  const res = await fetch('/accept', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Airspace': '1' },
+                                       body: JSON.stringify({ arena: arenaKey, id: r.id, log: r.log, t: r.t }) });
+  const out = await res.json();
+  if (out.ok) r.accepted = true;
+  showPick(id, (out.said || []).join('; ') + (out.ok ? '. The gold layer is being rebuilt: reload the page in about a minute.' : ''));
+}
+// A click picks the candidate whose waypoints pass closest to it on screen: the tubes are 20 m
+// thick, too thin to hit from the overview.
+const down = { x: 0, y: 0 };
+renderer.domElement.addEventListener('pointerdown', (e) => { down.x = e.clientX; down.y = e.clientY; });
+renderer.domElement.addEventListener('pointerup', (e) => {
+  if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5 || !arenaRoot) return;
+  const group = arenaRoot.getObjectByName('golden_candidates');
+  if (!group || !group.visible || !candidates.size) return;
+  const rect = renderer.domElement.getBoundingClientRect();
+  const v = new THREE.Vector3();
+  let best = null, bestD = 14;
+  for (const [id, r] of candidates) {
+    for (const w of r.waypoints) {
+      v.set(w[1], w[3], -w[2]).project(camera);
+      if (v.z > 1) continue;
+      const d = Math.hypot((v.x + 1) / 2 * rect.width + rect.left - e.clientX, (1 - v.y) / 2 * rect.height + rect.top - e.clientY);
+      if (d < bestD) { bestD = d; best = id; }
+    }
+  }
+  if (best !== null) showPick(best); else closePick();
+});
+window.__airspace = { pick: showPick, candidates: () => candidates };
+
+// ---- the readout --------------------------------------------------------------------------
+const fmt = (v, unit = ' m', digits = 0) => (v === null || v === undefined || Number.isNaN(v)) ? '–'
+  : Number(v).toLocaleString('en-GB', { maximumFractionDigits: digits }) + unit;
+const clock = (t) => t ? new Date(t * 1000).toLocaleTimeString('en-GB') : '–';
+let view = { mode: '', map: null, modeName: null, state: null, last: null, lastFix: null, deaths: 0, crashes: 0,
+             ended: false, resupply: false, resupplySince: null, rearms: 0, unplaced: 0 };
+
+function recordLine(t) {
+  if (!t || !t.fix || t.alt === null) return ['not known here', 'lost'];
+  if (t.floor === undefined) return ['no record for this arena', 'lost'];
+  if (t.floor === null) return ['not flown', 'lost'];
+  const floor = t.floor2 ?? t.floor;
+  const trusted = t.floor2 !== null && t.floor2 !== undefined;
+  const above = t.alt - floor;
+  const note = `${trusted ? 'trusted' : 'one pass'} floor ${fmt(floor)}, ${t.passes} pass${t.passes === 1 ? '' : 'es'}`;
+  return above >= 0 ? [`${fmt(above)} above the flown floor (${note})`, trusted ? 'ok' : 'stale']
+                    : [`${fmt(-above)} below the flown floor (${note})`, 'bad'];
+}
+
+function renderHud() {
+  const t = view.last;
+  const fix = view.lastFix;
+  let fixText = 'no position yet', fixCls = 'lost';
+  if (t && t.fix) { fixText = 'fix'; fixCls = 'ok'; }
+  else if (t && fix) {
+    const age = t.t - fix.t;
+    fixText = `lost (${t.reason}), last fix ${age.toFixed(1)} s ago`;
+    fixCls = age <= 2 ? 'stale' : 'lost';
+  } else if (t) { fixText = `none (${t.reason})`; }
+  const p = (t && t.fix) ? t : fix;
+  const over = p && p.alt !== null && p.ground !== null ? p.alt - p.ground : null;
+  const [rec, recCls] = recordLine(t);
+  const warn = t && t.warn ? `<div class="bad">MAP WARNING: ground in ${t.ttc_y}</div>` : '';
+  hud.innerHTML = `
+    <div class="title">${view.map ?? 'No map yet'}</div>
+    <div class="muted">${[view.modeName, view.state, view.mode].filter(Boolean).join(' · ')} · ${clock(t && t.t)}</div>
+    <div class="row"><span>Altitude</span><span>${fmt(p && p.alt)}</span></div>
+    <div class="row"><span>Ground under it</span><span>${fmt(p && p.ground)}</span></div>
+    <div class="row"><span>Height over the ground</span><span class="${over !== null && over < 150 ? 'bad' : ''}">${fmt(over)}</span></div>
+    <div class="row"><span>Speed</span><span>${fmt(t && t.kph, ' kph')}</span></div>
+    <div class="row"><span>Heading</span><span>${fmt(t && t.hdg, '°')}</span></div>
+    <div class="row"><span>Position</span><span class="${fixCls}">${fixText}</span></div>
+    <div class="row"><span>Record</span><span class="${recCls}">${rec}</span></div>
+    <div class="row"><span>Resupply</span><span class="${view.resupply ? 'stale' : ''}">${
+      view.resupply ? 'run under way' + (view.resupplySince && t ? ` (${Math.max(0, t.t - view.resupplySince).toFixed(0)} s)` : '') : 'no run'
+    } · re-armed ${view.rearms}${view.unplaced ? ` (${view.unplaced} without a position)` : ''}</span></div>
+    ${warn}
+    <div class="muted">Deaths this round: ${view.deaths} (${view.crashes} with no kill card)${view.ended ? ' · replay ended' : ''}</div>`;
+}
+
+// ---- events from the server -------------------------------------------------------------
+function onTick(t) {
+  view.last = t;
+  if (t.resupply !== undefined) {
+    if (t.resupply && !view.resupply) view.resupplySince = t.t;
+    view.resupply = t.resupply;
+  }
+  if (t.arena !== arenaKey) loadArena(t.arena);
+  if (t.map) view.map = t.map;
+  if (t.state) view.state = t.state;
+  let colour = COLOURS.lost;
+  if (t.fix && t.alt !== null) {
+    const p = toScene(t.x, t.alt, t.z);
+    const prev = addTrailPoint(p, t.t);
+    let dir = null;
+    if (prev && prev.distanceTo(p) > 20) dir = p.clone().sub(prev);
+    else if (t.hdg !== null) dir = new THREE.Vector3(Math.sin(t.hdg * Math.PI / 180), 0, -Math.cos(t.hdg * Math.PI / 180));
+    rebuildTrail();
+    placeJet(p, dir);
+    view.lastFix = t;
+    drop.userData.ground = t.ground;
+    colour = COLOURS.ok;
+  } else if (view.lastFix && t.t - view.lastFix.t <= 2) {
+    colour = COLOURS.stale;
+  }
+  if (t.warn) colour = COLOURS.warn;
+  jetMat.color.setHex(colour);
+  renderHud();
+}
+
+const handlers = {
+  snapshot(s) {
+    scenes = s.scenes || {};
+    view.mode = s.mode === 'replay' ? `replay of ${s.source.split('/').pop()}` : 'live';
+    view.map = s.map; view.modeName = s.mode_name; view.state = s.state; view.ended = s.ended;
+    arenaKey = undefined;
+    loadArena(s.arena);
+    for (const d of s.deaths) if (d[2] !== null) endLife(toScene(d[0], d[2], d[1]));
+    for (const r of s.rearms || []) addRearm(r[0], r[1], r[2]);
+    view.rearms = (s.rearms || []).length;
+    for (const q of s.trail) {
+      if (q[2] !== null) addTrailPoint(toScene(q[0], q[2], q[1]), q[3]);
+    }
+    rebuildTrail();
+    if (s.last) onTick(s.last); else renderHud();
+  },
+  match(e) {
+    view.map = e.map; view.modeName = e.mode || view.modeName;
+    view.deaths = view.crashes = view.rearms = view.unplaced = 0; view.last = view.lastFix = null;
+    view.resupply = false;
+    loadArena(e.arena);
+    clearTrails();
+    clearRearms();
+    renderHud();
+  },
+  tick: onTick,
+  state(e) { view.state = e.state; renderHud(); },
+  death() {
+    view.deaths += 1;
+    view.resupply = false;
+    endLife(jet.visible ? jet.position.clone() : null);
+    jet.visible = drop.visible = foot.visible = false;
+    view.lastFix = null;
+    renderHud();
+  },
+  card(e) { if (e.crash) { view.crashes += 1; renderHud(); } },
+  rearm(e) {
+    view.rearms += 1;
+    view.resupply = false;
+    if (e.x !== undefined) addRearm(e.x, e.z, e.alt); else view.unplaced += 1;
+    renderHud();
+  },
+  resupply(e) { view.resupply = e.on; view.resupplySince = e.t; renderHud(); },
+  session() { view.last = view.lastFix = null; renderHud(); },
+  end() { view.ended = true; renderHud(); },
+};
+
+function connect() {
+  const es = new EventSource('/events');
+  es.onmessage = (m) => { const e = JSON.parse(m.data); (handlers[e.type] || (() => {}))(e); };
+  es.onerror = () => { hud.querySelector('.title').textContent = 'Reconnecting to the server…'; };
+}
+
+// ---- keys, resize and the frame loop ------------------------------------------------------
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'f' || e.key === 'F') { follow = !follow; if (follow && jet.visible) controls.target.copy(jet.position); }
+  if (e.key === 'o' || e.key === 'O') overview();
+  if (e.key === 'c' || e.key === 'C') { if (jet.visible) chase(); }
+});
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+const tmp = new THREE.Vector3();
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (jet.visible) {
+    const k = Math.min(Math.max((now - glideStart) / glideMs, 0), 1);
+    jet.position.lerpVectors(from, to, k);
+    jet.lookAt(tmp.copy(jet.position).add(heading));
+    jet.scale.setScalar(Math.min(Math.max(camera.position.distanceTo(jet.position) / 2600, 0.6), 14));
+    const g = drop.userData.ground;
+    if (g !== null && g !== undefined) {
+      const pos = dropGeom.attributes.position;
+      pos.setXYZ(0, jet.position.x, jet.position.y, jet.position.z);
+      pos.setXYZ(1, jet.position.x, g, jet.position.z);
+      pos.needsUpdate = true;
+      dropGeom.computeBoundingSphere();
+      foot.position.set(jet.position.x, g + 4, jet.position.z);
+      foot.scale.setScalar(jet.scale.x);
+      drop.visible = foot.visible = true;
+    }
+    if (follow) {
+      const moved = jet.position.clone().sub(controls.target);
+      controls.target.add(moved);
+      camera.position.add(moved);
+    }
+  }
+  // Re-arm rings grow with distance, as the jet does, so they can be found from the overview.
+  for (const m of rearmMarks) {
+    m.scale.setScalar(Math.min(Math.max(camera.position.distanceTo(m.position) / 3000, 1), 12));
+  }
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+overview(true);           // the whole arena until the first fix, then the chase view
+renderHud();
+connect();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

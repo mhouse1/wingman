@@ -2677,9 +2677,11 @@ terrain_service:
     STORMBREAK:
       minimap: test_screenshots/terrain/content-2026-10-28_08-50/seastacks-day/seastacks-minimap.png
       height: test_screenshots/terrain/content-2026-10-28_08-50/seastacks-day/seastacks-height-16m.npz
+      mpp_at_320px: 24     # zoomed in: Design 017, 2026-11-26: 1% of 222 black-box crops fixed at 34, 67% at 24
     STORMBREAK NIGHT:
       minimap: test_screenshots/terrain/content-2026-10-28_08-50/seastacks-day/seastacks-minimap.png
       height: test_screenshots/terrain/content-2026-10-28_08-50/seastacks-day/seastacks-height-16m.npz
+      mpp_at_320px: 24     # zoomed in: Design 017, 2026-11-26: 1% of 222 black-box crops fixed at 34, 67% at 24
     CRUCIBLE:
       minimap: test_screenshots/terrain/content-2026-10-28_08-50/crucible-day/crucible-minimap.png
       height: test_screenshots/terrain/content-2026-10-28_08-50/crucible-day/crucible-height-16m.npz
@@ -2691,12 +2693,15 @@ terrain_service:
     ICEBOUND:
       minimap: test_screenshots/terrain/content-2026-10-28_08-50/arctic-3-day/arctic-3-minimap.png
       height: test_screenshots/terrain/content-2026-10-28_08-50/arctic-3-day/arctic-3-height-16m.npz
+      mpp_at_320px: 24     # zoomed in: Design 017, 2026-11-26: 1% of 398 snow crops fixed at 34, 57% at 24
     ICEBOUND NIGHT:
       minimap: test_screenshots/terrain/content-2026-10-28_08-50/arctic-3-day/arctic-3-minimap.png
       height: test_screenshots/terrain/content-2026-10-28_08-50/arctic-3-day/arctic-3-height-16m.npz
+      mpp_at_320px: 24     # zoomed in: Design 017, 2026-11-26: 1% of 398 snow crops fixed at 34, 57% at 24
     ICEBOUND SNOW:
       minimap: test_screenshots/terrain/content-2026-10-28_08-50/arctic-3-day/arctic-3-minimap.png
       height: test_screenshots/terrain/content-2026-10-28_08-50/arctic-3-day/arctic-3-snow-height-16m.npz
+      mpp_at_320px: 24     # zoomed in: Design 017, 2026-11-26: 1% of 398 snow crops fixed at 34, 57% at 24
 # ADR 090 — bound the unfixed Performance 008 leak. Soft limit stops at the
 # next lobby (no mission in flight); hard limit stops immediately, because an
 # OOM kill can take the whole desktop session down with it.

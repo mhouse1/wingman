@@ -45,7 +45,7 @@
 #   make p1          -> capture screenshots for PATH1 using live Wingman play
 #   make p2          -> capture screenshots for PATH2 using live Wingman play
 
-.PHONY: hooks upgrade-linux fsm session-report sr grafana-check grafana grafana-ingest grafana-down leak-check leak-check-gate test test1 test2 docker-build docker-test docker-shell require-veda tp tp-full runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q nb g updater r invite hud clip launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops screenshot ti preflight tree v frame
+.PHONY: hooks upgrade-linux fsm session-report sr airspace airspace-view grafana-check grafana grafana-ingest grafana-down leak-check leak-check-gate test test1 test2 docker-build docker-test docker-shell require-veda tp tp-full runtime-perf-csv-release runtime-perf-csv-preview runtime-perf-release runtime-perf-preview clean wrelease s d c t f n p squash q nb g updater r invite hud clip launch-game wait-game setup-capture capture-frame find-game move-game-window undecorate-game-window debug-crops y newpaths p1 p2 p3 rr-path1 rr-validate-path1 rr-path1-gate rr-live-path1 rr-live-validate-path1 rr-live-path1-gate calibrate recalibrate calibrate-crop add-crops screenshot ti preflight tree v frame
 
 PYTHON ?= python
 HAS_UV := $(shell if command -v uv >/dev/null 2>&1; then echo 1; else echo 0; fi)
@@ -343,6 +343,22 @@ session-report:
 
 sr: session-report
 
+# Design 017: the free-airspace record and its 3D scenes. `make airspace` rebuilds every
+# arena's record from logs/*.log, its golden-path candidates (accept one with
+# scripts/airspace-golden.py --accept ARENA:ID), then its .glb scene (test_screenshots/terrain/).
+# `make airspace-view` serves the jet flying through the scene at http://127.0.0.1:8765/,
+# following wingman.log; `LOG=logs/wingman_<stamp>.log` replays a session (SPEED=8, START=HH:MM).
+# Both only read logs and terrain data, so they are safe beside a running session.
+airspace:
+	@$(PYTHON_RUN) scripts/airspace-record.py --with-live
+	@$(PYTHON_RUN) scripts/airspace-golden.py --show 0
+	@for r in test_screenshots/terrain/content-*/*/*-airspace.npz; do \
+	  $(PYTHON_RUN) test_screenshots/terrain/tools/export_scene.py $$r --html | grep -E "^wrote .*glb"; \
+	done
+
+airspace-view:
+	@$(PYTHON_RUN) scripts/airspace-view.py $(if $(LOG),--replay $(LOG) --speed $(or $(SPEED),8) $(if $(START),--start $(START)))
+
 # Design 018: the score dashboard, Grafana and Postgres in Docker, fed from the
 # session stats files (scripts/round-scores.py). Both gates must pass before an
 # image is pulled, a container started or a row written: the host is veda, and
@@ -540,6 +556,10 @@ endif
 # printed and ignored, and the recipe keeps wingman's exit status. r1 to r3 run
 # this recipe too.
 #
+# Design 017: after every session the free-airspace records and their 3D scenes are
+# rebuilt (`make airspace`), detached at low priority so the relaunch does not wait;
+# the output goes to test_screenshots/terrain/airspace-after-session.txt.
+#
 # ADR 202: wingman exits 75 when session_cycle ended the session after its
 # rounds and has closed the game and waited. The loop then runs the game launch
 # steps again, for the same prefix, and starts wingman again. Any other exit
@@ -559,6 +579,8 @@ r: $(GAME_LAUNCH_DEPS)
 	  $(WINGMAN_ACCOUNT_ENV) $(WINGMAN_ENV) $(WINGMAN_NESTED_ENV) $(WINGMAN_PREFIX_ENV) $(WINGMAN_NICE) $(PYTHON_RUN) -m wingman.main --log-file wingman.log $(RECORD_FLAG); \
 	  status=$$?; \
 	  $(PYTHON_RUN) scripts/round-scores.py after-session; \
+	  if [ -d test_screenshots/terrain ]; then ( nice -n 15 $(CYCLE_MAKE) --no-print-directory airspace \
+	    > test_screenshots/terrain/airspace-after-session.txt 2>&1 & ); fi; \
 	done; \
 	exit $$status
 

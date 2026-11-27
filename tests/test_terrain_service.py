@@ -512,6 +512,23 @@ def test_a_map_zoomed_differently_fixes_at_its_own_scale(tmp_path, texture):
     assert fx is not None and abs(fx.x - 1500) < 100 and abs(fx.z + 2500) < 100
 
 
+def test_shipped_maps_carry_their_measured_minimap_scales():
+    """Design 017, 2026-11-26: Icebound and Stormbreak fixed on 1% of ticks at the shared 34 m/px
+    (no re-arm placed, so no ring sites); black-box crops fixed 57% and 67% at 24. A lighting
+    variant draws the same minimap as its base map, so it carries the same scale."""
+    import yaml
+    with open("wingman/config.yaml") as fh:
+        maps = yaml.safe_load(fh)["terrain_service"]["maps"]
+    want = {"CRUCIBLE": 21, "ICEBOUND": 24, "STORMBREAK": 24}
+    for name, entry in maps.items():
+        base = next((b for b in want if name == b or name.startswith(b + " ")), None)
+        scale = entry.get("mpp_at_320px")
+        if base is None:
+            assert scale is None, f"{name} has a scale nobody measured"
+        else:
+            assert scale == want[base], f"{name}: {scale}, measured {want[base]}"
+
+
 # --- Design 020 Phase 7 (ADR 176): the chase's steer guard, shadow ------------------------
 
 def _guard_service(tmp_path, texture, top, **steer):

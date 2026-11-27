@@ -831,6 +831,34 @@ a track in the 8 s before, 14,544 ordinary ticks):
       scale is right.
     - `terrain_service.maps.<name>.mpp_at_320px` now overrides the shared value per map, and
       Crucible's entries carry 21.
+  - **Icebound and Stormbreak are zoomed in too (2026-11-26, measured; Design 017 found it).**
+    - At the shared 34 they fixed on 1% of `TERRAIN:` lines, 0.8% (184 of 22,003) on Icebound and
+      5.2% on Stormbreak over 11-18 to 11-26. None of their 79 re-arms was placed, so neither had
+      a ring site.
+    - A sweep of the real `TerrainService.fix` over that day's death black-box frames, north from
+      the logged heading, fixed these shares:
+
+      | Scale, m/px at 320 | Icebound Snow (398 crops) | Stormbreak (222 crops) | Crimson Canyon, control (366 crops) |
+      |---|---|---|---|
+      | 21 | 25% | 55% | 0% |
+      | 23 to 25 | 56 to 57% | 64 to 67% | |
+      | 24 | 57% | 67% | |
+      | 34 | 1% | 1% | 59% |
+
+    - At 24, 99% of successive fixes in a sequence moved at under 700 m/s (medians 204 and 153 m/s),
+      against 97% for Crimson Canyon at 34.
+    - All Icebound and Stormbreak entries now carry 24. Icebound's day and night entries, and
+      Stormbreak's night one, are inferred to match: no frames of them were sampled.
+    - **Live check, Icebound (day), session of 2026-11-26 20:19 (measured).**
+      - Before that session, 12 read-only grabs of the live screen fixed 12 at 24 and none at 34
+        (scores 0.83 to 0.94, runners-up near 0.37).
+      - In the session's first two minutes on Icebound, 57 of 73 `TERRAIN:` lines held a fix.
+        There was no `weak-match`; the other 16 were `no-compass`, with the minimap off screen.
+      - One map climb was flown, for land 2.4 s ahead at 283 m/s. There was no map warning.
+    - **Live check, Stormbreak (day), 21:07 the same evening (measured).** In the round's first
+      100 s, 46 of 58 `TERRAIN:` lines held a fix (scores 0.94 to 0.95). There was no `weak-match`;
+      the other 12 were `no-compass`. One map warning was logged in the `control` arm, and no map
+      action was flown.
 - **Getting the ring, then the canyon floor (2026-11-08 21:30, measured).**
   - The tool counted a run that re-armed and crashed seconds later as a re-arm.
   - Over 11-01 to 11-08, 6 of 116 Crimson re-arms had a crash card within 15 s. Elsewhere it was 1

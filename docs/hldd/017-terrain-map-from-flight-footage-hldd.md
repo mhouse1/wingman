@@ -44,12 +44,13 @@ terrain from flight footage, with a survey mission to fly each arena in passes. 
 | Part | State |
 |---|---|
 | Map layout per arena | On hand for all six arenas: the game's own minimap texture (Design 020, 2026-11-07). Stitching from minimap windows was measured on 2026-10-03. The full-map reader is built and dormant |
-| Position on each tick | Live in shadow since 2026-11-07 (Design 020): a fix on 92% of minimap crops where the compass reads, logged on the `TERRAIN:` line |
-| Free-airspace record | Not built. The data is on hand: 77 session logs from 2026-11-07 to 2026-11-15 carry fixes, over all six arenas |
-| Planner query | Not built |
-| Golden paths | None recorded. Ring sites are known on Crimson Canyon only (four sites, Design 020) |
+| Position on each tick | Live in shadow since 2026-11-07 (Design 020): a fix on 92% of minimap crops where the compass reads, logged on the `TERRAIN:` line. Logged in manual flight too (2026-11-26, "Phase 1 results"). Icebound and Stormbreak fix on 1% and 5% of their lines |
+| Free-airspace record | Built offline, 2026-11-26: `wingman/airspace.py` and `scripts/airspace-record.py`, from 88 logs (2026-11-18 to 11-26). 25 to 31% of the canyon arenas trusted, 1% or less of the island arenas |
+| Planner query | Built and scored offline, 2026-11-26 (`AirspaceQuery`, `scripts/airspace-score.py`): it cannot gate paths yet. "Not known" is coverage, not terrain; the mesh's "ground" is the signal ("Phase 2 results") |
+| Golden paths | Candidates built, 2026-11-26 (`scripts/airspace-golden.py`, "Phase 4 results"): 113 from wingman's own clean re-arms on four arenas, none accepted yet. Ring sites on the same four; Icebound and Stormbreak have positions since the scale fix and will follow |
 | Path follower | Not built |
-| 3D scene export | Not built. The collision triangles and the height map for all six arenas are on hand. No 3D viewer is installed on VEDA |
+| 3D scene export | Built, 2026-11-26: `export_scene.py` writes the `.glb`, a top-down picture and a plotly page for each arena. No desktop 3D viewer is installed on VEDA |
+| Live view of the jet | Built, 2026-11-26: `make airspace-view` shows the jet flying through the scene in a browser, live from `wingman.log` or replayed from an archived log ("Seeing it in 3D") |
 
 ## Why
 
@@ -328,6 +329,25 @@ the measure tool reads a clearance between a path and a wall.
   reads a point's position and altitude. It is slower than Blender on the full collision geometry, so it
   carries the `ground` layer in place of `collision`.
 
+**The jet in the scene, live (added 2026-11-26).** `make airspace-view` serves a page at
+`http://127.0.0.1:8765/` that draws the arena's `.glb` with three.js, a browser 3D library. Nothing
+is installed.
+
+- It shows the jet as wingman logs it: an arrow along its track, its trail since the last spawn, and
+  a line down to the ground.
+- A readout gives altitude, the ground under the jet, height over the ground, speed, heading, whether
+  the position is fixed, and how far the jet is above or below the record's flown floor.
+- It follows `wingman.log` and switches arenas with the match. `LOG=<archived log>` replays a session
+  instead, `SPEED=8` times real time by default, from `START=HH:MM` if given.
+- It only reads the log, the records and the scenes, so it is safe beside a running session. It is
+  also the by-eye check of phase 1, and the place to watch phase 5's follower.
+- The server is `scripts/airspace-view.py` (standard library). The page is `scripts/airspace-view/`.
+- three.js 0.162 is kept untracked in `test_screenshots/terrain/tools/web/three/`. It is the last
+  release that also runs on WebGL 1, the only WebGL a headless software browser could give on VEDA, so
+  the page can be checked without a GPU.
+- A reading the plausibility filter rejected is kept off the jet. Four of them, at 13,877 to 23,824 m,
+  drew the trail into the sky in the first replay.
+
 **Where it lives.** The tool is `export_scene.py`, beside the other terrain tools in the untracked
 `test_screenshots/terrain/tools/`. It writes `<arena>-airspace.glb` into the arena's data folder. The
 `.glb` is written with numpy alone (the format is a short JSON header and one block of numbers), so it
@@ -347,8 +367,288 @@ Each phase has a check that can fail. Nothing flies before phase 5.
 | 5 | The follower in shadow, then flown | Shadow: errors against the golden path on ordinary resupply runs. Flown: a per-round trial, arms drawn per round, on re-arms and crashes per run against the baseline above |
 | 6 | The planner uses the query for other paths | The chase's dives and control-point approaches |
 
-Phase 1 can start now. It needs no flight and no new logging. The `collision` and `ground` layers of the
-scene can be exported before the record exists, from Design 020's data alone.
+Phase 0's open item and phase 1 were done offline on 2026-11-26 ("Phase 1 results" below). Phase 2 is next.
+
+## Phase 1 results (2026-11-26)
+
+Built from the 88 session logs on hand (2026-11-18 07:55 to 2026-11-26 14:29, wingman 1.9.4 to 1.9.5,
+game content build 2026-10-28_08-50). The logs of 2026-11-07 to 11-15 named in "Status" have been
+rotated away. All figures are measured on these logs.
+
+```bash
+uv run --active python scripts/airspace-record.py                 # all logs/*.log; writes <arena>-airspace.npz
+uv run --active python test_screenshots/terrain/tools/export_scene.py \
+    test_screenshots/terrain/content-2026-10-28_08-50/crimson-canyon-day/crimson-canyon-airspace.npz --html
+```
+
+The build takes 14 s. The record lives in the arena's data folder, beside its height map.
+
+**The logs do not keep, so each log's samples are cached.**
+
+- Wingman deletes its oldest rotated logs at each start (`capture_budget.rotated_logs`, 2,048 MB). That
+  keeps about eight days of looped sessions.
+- So a record rebuilt from `logs/*.log` alone forgets every older flight. The 2026-11-07 to 11-15 logs
+  were already gone. At 18:26 on 2026-11-26 the 11-18 07:55 log was deleted in the middle of a
+  rebuild: the build crashed, and Countdown lost 153 samples.
+- Each rotated log's extraction is now kept in the untracked
+  `test_screenshots/terrain/airspace-samples/` (1.9 MB for 119 logs), keyed by the log's name, size and
+  mtime. A deleted log keeps counting, and a log that disappears mid-build is skipped.
+
+**How the rules were applied.**
+
+- A sample's altitude is the higher of the two clean HUD readings logged either side of its fix, each
+  within 2 s. A climb read late then never lowers the floor. A reading the plausibility filter rejected
+  is not clean.
+- A death is the `RespawnLatency` edge minus its `no_digits_for`. The 8 s before it, and the death camera
+  up to the edge, are left out.
+- `GAME_BATTLE_EJECT` is "missiles empty", not a death. The resupply run is flown in it, so it counts.
+  (Leaving it out dropped 88% of one session's fixes on the first build.)
+- A pass is one life's visit to a cell. A cell's trusted floor is the second-lowest pass's lowest
+  altitude: two lives agree that the ground is below it.
+- Two rules not in the design, each counted: a fix that both its neighbours reach only above 700 m/s
+  is dropped (none were), and the line between two fixes is not filled when the step is that fast (16
+  steps).
+
+**Phase 0: the fix is logged while the operator flies.** In `GAME_BATTLE_MANUAL`, 7,713 of 12,376
+`TERRAIN:` lines held a fix (62%), and 6,096 became samples.
+
+**Fixes to samples.** 121,092 fixes. 78.1% were accepted, 12.3% fell in the 8 s before a death, 7.0%
+had an unclean reading beside them and 2.5% had no reading within 2 s.
+
+| Arena | Samples (manual) | Flown, sq km | Trusted, sq km | Inside the ground | Ring sites |
+|---|---|---|---|---|---|
+| Crimson Canyon | 22,620 (2,134) | 118 (38%) | 85 (27%) | 0.66% | 4 |
+| Stone Forest | 27,007 (2,449) | 133 (42%) | 98 (31%) | 0.39% | 5 |
+| Countdown | 17,806 (914) | 121 (39%) | 77 (25%) | 0.26% | 3 |
+| Crucible | 25,578 (571) | 60 (19%) | 45 (14%) | 3.4% | 3 |
+| Stormbreak | 1,335 (22) | 10 (3%) | 3 (1%) | 0.15% | 0 |
+| Icebound, with snow | 285 (6) | 2 (1%) | 0 | 0 | 0 |
+
+The percentages are of the 314 sq km inside the 10 km ring. "Inside the ground" is the share of samples
+more than 30 m under the mesh's top surface and outside any overhang gap. Such samples are dropped: a
+fault in the fix, the altitude or the mesh.
+
+**Icebound and Stormbreak barely fix.** 0.8% of Icebound's `TERRAIN:` lines (184 of 22,003) held a fix,
+1.0% on its snow variant and 5.2% on Stormbreak (1,741 of 33,590). Nearly all the rest were
+`weak-match`. The other four arenas fixed on 77% to 84%.
+
+- So none of their 79 re-arms was placed, and neither arena had a ring site.
+- **Cause found the same day (measured): both minimaps are zoomed in**, about 24 m/px at 320 against
+  the shared 34, as Crucible's is. On that day's black-box frames, 57% and 67% fixed at 24, against 1%
+  at 34 (Design 020, Phase 6, under "Crucible is blind").
+- Their entries now carry `mpp_at_320px: 24`. The next session's live fix rate is the check.
+
+**Coverage follows the fighting, as the risks said.** Most trusted cells are high. On Crimson Canyon,
+11,111 trusted cells have their floor 1,000 m or more over the highest ground in the cell, and 7,161
+between 300 and 1,000 m. Only 1,853 are under 300 m (7.6 sq km).
+
+**Check: no flown floor under the mesh ground. Passes, with a finding about the cell size.**
+
+- No cell's floor lies under all of the ground in its cell. Each sample, and each point filled between
+  two fixes, is tested against the 16 m height map before it counts.
+- A filled point fell inside the rock for 0.2% to 0.7% of the fill on the canyon arenas, and 3.2% on
+  Crucible.
+- **A 64 m cell is coarser than the ground.** On Crimson Canyon, 224 trusted cells hold rock higher than
+  the trusted floor somewhere inside them. Over all flown cells, the rock rises a median of 353 m above
+  the floor (p90 927 m). The other arenas have 72 to 301 such trusted cells.
+- So the claim "air above the floor is free" holds where the aircraft flew, not across the whole cell.
+  The phase 2 query must test each point against the 16 m mesh too, or use smaller cells (open
+  question 1).
+
+**Check: crash samples on the ground. Fails.**
+
+- Crash samples come from deaths with no kill card, placed at the last fix within 4 s, carried to the
+  death.
+- Few lie near the ground: 14% within 100 m on Crimson Canyon (33 of 241), 18% on Stone Forest, 22% on
+  Countdown and 3% on Crucible.
+- A fix under 1 s old does not fix it. On Crimson Canyon those 54 crashes sit a median of 367 m above the
+  ground under them.
+- Inferred: "no kill card" holds deaths that were not terrain crashes (ADR 143 says the label
+  over-counts), and a carried last fix can be the wrong side of a wall.
+- Until a crash is placed better, the query's **Ground** answer comes from the mesh alone, not from
+  crash samples.
+
+**Ring sites.** The last fix 3 to 6 s before `RESUPPLY: confirmed ammo`, clustered within 1,200 m, with
+at least two re-arms per site. On Crimson Canyon two sites agree with Design 020's measurement:
+
+| Site | Here | Design 020 |
+|---|---|---|
+| Plateau | (533, -1096) at 1,600 m, 29 re-arms | (324, -1252) at 1,598 m |
+| River | (-3190, 3136) at 392 m, 4 re-arms | (-3082, 3087) at 395 m |
+
+The other sites found:
+
+- **Crimson Canyon:** (-51, -5304) at 1,431 m and (-727, -3624) at 1,792 m. Design 020's (3227, -3154)
+  river site had no re-arms in these logs.
+- **Countdown:** (2797, -3290) at 1,114 m; (-2885, 3357) at 1,106 m; (19, 566) at 871 m.
+- **Crucible:** (2638, 94) at 643 m; (-156, 45) at 1,695 m; (-3756, 53) at 886 m.
+- **Stone Forest:** (3024, -3107) at 848 m; (-4126, -132) at 1,653 m; (3000, 4142) at 2,005 m;
+  (-472, 107) at 1,885 m; (-1760, 332) at 2,087 m.
+
+This answers open question 4 for those four arenas. Whether the sites move with the game mode is still
+open.
+
+**The 3D scene.** One `<arena>-airspace.glb` per arena (34 to 68 MB) with these layers:
+
+- `collision`, `ground` (with the minimap draped on it), `water` and `arena_edge`;
+- `flown_floor` (trusted, drawn at the trusted floor) and `flown_floor_one_pass`;
+- `crash_samples`, `rearm_points` and `ring_sites`.
+
+An independent glTF reader (trimesh) loads all the layers. Crimson Canyon has 562,242 collision
+triangles, the count in Design 020. The by-eye check against rock is still owed: no viewer is installed
+(open question 9). Until one is, `<arena>-airspace.html` (plotly, any browser) and
+`<arena>-airspace-top.png` show the record. There is no `golden_paths` layer yet (phase 4).
+
+## Phase 2 results (2026-11-26)
+
+**Verdict: the record cannot gate a planner's paths yet.**
+
+- Its "not known" answer separates crashes from enemy kills no better than chance.
+- It proves only about a quarter of ordinary paths free.
+- The terrain signal is the mesh's: "ground" came before 44% of crash approaches, 9% of killed
+  approaches and 4% of ordinary ticks.
+- So for now the record's use is the flown corridors, the golden paths. It is not a general gate.
+- The settings stay at **64 m cells, no side margin, 50 m up and two passes**.
+
+**How it was scored.** `scripts/airspace-score.py` holds out each of the 9 days of logs on hand
+(2026-11-18 to 11-26, 88 logs) in turn. The record for that day is built from all the other days,
+so a flight never vouches for its own path.
+
+- Each battle tick with a fix and a clean altitude asks the query (`AirspaceQuery`) about the
+  straight 3 s path ahead, on the track and climb of the step before it.
+- A *crash approach* is the last 8 s before a death with no kill card. A *killed approach* is the
+  same before an enemy's kill: the control.
+- *Ordinary* ticks have no death in the next 10 s.
+- The sample: 795 crash approaches, 2,203 killed approaches and 82,228 ordinary ticks. All figures
+  are measured.
+
+| Cell / side / up, m | Crash approaches not free | Killed approaches not free | Ordinary ticks not free |
+|---|---|---|---|
+| Mesh "ground" alone | 44% | 9% | 4% |
+| 64 / 0 / 50 | 94% | 89% | 76% |
+| 64 / 100 / 50 (the design's starting values) | 98% | 95% | 90% |
+| 128 / 0 / 50 | 83% | 64% | 52% |
+| 64 / 0 / 50, one pass trusted | 88% | 75% | 60% |
+| 128 / 0 / 50, one pass trusted | 74% | 50% | 37% |
+
+**"Not known" is coverage, not terrain.** With the mesh's share taken out, "not known" alone came
+before about as many killed approaches as crash approaches at every setting. A 3 s path is about
+600 m. The flown tracks are stripes, so most paths cross a cell nobody has flown twice.
+
+**The settings.**
+
+- **Side margin 0.** 100 m cost 14 points of ordinary flight at 64 m and separated nothing.
+- **Cells of 64 m, not 128 m.** 128 m proves twice as much, but none of the gain separates crashes,
+  and it blurs canyon floors that are already coarse at 64 m (phase 1).
+- **Two passes kept.** Trusting one pass freed 16 points of ordinary flight and bought no
+  separation, so the guard against a misplaced sample stays.
+
+**Coverage grows with data, and has not levelled off.** The share of ordinary paths proved free,
+with the last two days held out and the record built from only the days before them:
+
+| Days of record | 64 m cells | 128 m cells |
+|---|---|---|
+| 1 | 3% | 8% |
+| 2 | 6% | 16% |
+| 4 | 13% | 33% |
+| 7 | 22% | 44% |
+
+**The record is empty where it matters most.** Ordinary ticks not free at 64 / 0 / 50, by what was
+being flown:
+
+| Flying | Not free | Ticks |
+|---|---|---|
+| The chase (`GAME_BATTLE`) | 44% | 6,847 |
+| Missiles empty (`GAME_BATTLE_EJECT`) | 77% | 57,878 |
+| Resupply runs | 82% | 12,072 |
+| The operator's own flying | 95% | 5,431 |
+
+Resupply runs go low, into the canyons, and the record is mostly high air. The operator flies where
+wingman does not. That is the risk "Coverage follows the fighting", now measured.
+
+**What this changes.**
+
+- Phase 3, a live `AIRSPACE:` line, would mostly print "not known". It waits until the record is
+  denser.
+- Phase 6, the planner using the query for other paths, waits on the same.
+- Phase 4 goes next. A golden path is flown air by construction, so it needs no coverage around it.
+  The record then checks only each waypoint's way out.
+- The cache keeps every log, so the record keeps growing. Re-score as it does:
+  `uv run --active python scripts/airspace-score.py`.
+
+## Phase 4 results (2026-11-26, candidates only)
+
+**113 candidates, none accepted yet.** `scripts/airspace-golden.py` cuts every re-arm on record from
+30 s before the re-arm point to 15 s after: 318 re-arms, pruned logs included. It applies the
+design's rules to wingman's own re-arms, as "How one is recorded" allows.
+
+| Arena | Re-arms | Candidates | Rejected: no way out | Gap | Crash within 30 s | No life |
+|---|---|---|---|---|---|---|
+| Stone Forest | 127 | 54 | 17 | 55 | 6 | 7 |
+| Countdown | 66 | 30 | 11 | 18 | 6 | 7 |
+| Crimson Canyon | 42 | 15 | 13 | 13 | 6 | 2 |
+| Crucible | 83 | 14 | 47 | 37 | 15 | 9 |
+
+A re-arm can be rejected for more than one reason, so a row's counts can add up to more than its
+rejected re-arms.
+
+- **Way out.** From every waypoint, Design 020's climb (22 deg/s to 50 deg, `fly_candidate`) must reach
+  the transit altitude without meeting the mesh.
+- **Transit altitude.** The arena's highest mesh ground inside the 10 km ring, plus 50 m. The design's
+  "and above the highest flown floor" is left out: one cell flown only at 5,000 m would set it.
+- **Gap.** More than 4.5 s between waypoints, which is two missed ticks.
+- **No life.** No accepted sample within 2 s of the re-arm point.
+- **Not yet applied:** "no terrain warning within 30 s". The record's cache holds no warnings.
+- Crucible fails the way out most: climbs from beside its islands meet the islands.
+
+**Re-arms flown by hand were never recorded (found and fixed offline the same day).**
+
+- Wingman logs `RESUPPLY: confirmed ammo` only from its own pursuit, so 1 of 318 re-arms on record had
+  been flown by hand.
+- The record builder now also finds them from the tick line's missile count, which is read in manual
+  flight too: a stable count rising to a stable higher one, at most 12 (`manual_rearms`). That found
+  151.
+- A rack switch moves the count as well, so a hand-flown re-arm counts only within 1,200 m of a ring
+  site that wingman's own confirmed re-arms mark (78 are), and ring sites come from confirmed re-arms
+  only.
+- 9 of the 78 became candidates. Most failed the way-out rule.
+
+**The way-out rule stays the climb, and it binds because of how wingman flies (measured, all cuts with
+8 or more waypoints).**
+
+- Design 020's full way-out set (climb, a turn either way, a turn with a climb, clear for 5 s) added 0
+  to 2 candidates per arena.
+- Neither rule separated cuts that ended in a crash from clean ones, on 5 to 10 crashes per arena.
+- The failing waypoints are not near the mesh: the median is 467 m over the top surface on Crimson
+  Canyon and 471 m on Stone Forest.
+- Nor is it the noise in the climb rate: flying every waypoint level freed only 1 to 13 more clean cuts
+  per arena.
+- From those points, no manoeuvre at wingman's measured rates (turns about 10 to 12 deg/s, the climb
+  to 50 deg) clears the terrain in time. The aircraft got through by flying harder than wingman can.
+  The operator's low passes do that most.
+- Such a path is safe for wingman only if it never aborts, so the rule keeps rejecting it. The full set
+  stays available as `candidates_for(..., rule="any")`.
+
+**Reviewing and accepting.**
+
+- `make airspace` (also run after every session) writes `<arena>-golden-candidates.json` and draws the
+  candidates as the scene's `golden_candidates` layer: amber tubes, off by default in the viewer.
+- `scripts/airspace-golden.py --accept ARENA:ID` copies one into `<arena>-golden.json`. It is drawn as
+  `golden_paths` (gold tubes) with `golden_entry_gates` at the first waypoint.
+- In the live view (`make airspace-view`), clicking an amber tube opens its details: the time, the ring
+  site, the waypoints, the lowest point, who flew it, and the command that replays it.
+- The panel's "Accept as golden path" button does what `--accept` does. It matches the log and the
+  re-arm time as well as the number, because the list renumbers as logs are added. The tube turns
+  gold, and the arena's scene is re-exported in the background.
+- That button is the only thing the viewer writes.
+- The operator accepts. Nothing is accepted by the tool.
+
+## Runs
+
+| Started | Run | Code state | Game | What it is for | Result |
+|---|---|---|---|---|---|
+| 2026-11-26 20:19 | operator `make r` loop | 1.9.5, working tree with the Icebound and Stormbreak scale of 24 | content 2026-10-28_08-50 | Live check of the scale | Icebound 81% of 219 lines fixed, Stormbreak 78% of 89; no `weak-match` (measured). 8 missions; stopped with `z` at 21:10 |
+| 2026-11-26 21:15 | `make r1` (/iterate) | the same, plus the loop rebuilding the record after each session, manual re-arms and the candidates' accept | the same | The first loop that rebuilds by itself; the first placed re-arms on Icebound and Stormbreak | Running. At start: `XKey listener thread died` (`BadLength`, opcode 145/5; in 6 of 119 logs since 2026-09-06), reconnected after 3 s |
 
 ## The full map
 
@@ -402,18 +702,27 @@ That table is why a position is carried for 2 s and no longer.
 ## Open questions
 
 1. **Cell size and margins.** 64 m cells, 100 m sideways and 50 m up are starting values. Phase 2 sets them.
+   Phase 1 found rock above a trusted floor inside 72 to 301 cells per arena at 64 m, so the query also
+   needs the 16 m mesh. Phase 2 set 64 m cells, no side margin, 50 m up and two passes. No setting
+   made "not known" separate crashes from kills; revisit as the record grows.
 2. **Altitudes near and below zero.** The HUD altitude is the mesh height, with a sign. Crimson Canyon's
    river is at -232 m. The minus sign has been read since 2026-11-08; how often it is still dropped decides
    whether river-level samples can be trusted.
-3. **Is the fix logged while the operator flies?** The record and the golden paths both need it. Checked
-   first in phase 1.
-4. **Ring sites on the other five arenas**, and whether they move with the game mode.
+3. **Is the fix logged while the operator flies?** Answered 2026-11-26: yes. 62% of the `TERRAIN:` lines
+   in manual flight held a fix, and 6,096 samples came from them.
+4. **Ring sites on the other five arenas**, and whether they move with the game mode. Found on Countdown,
+   Crucible and Stone Forest on 2026-11-26. None yet on Icebound or Stormbreak: their 79 re-arms had no
+   fix, because their minimap scale was wrong (set to 24 the same day). Whether the sites move with the
+   game mode is still open.
 5. **One golden path for every jet?** Free air is the same for all. Speed and turn radius are not: a path
    flown in an F-100 may be too tight for a J-20. Paths may need a jet class.
 6. **How well can the chase follow a point on the map?** It has only ever steered at things on screen. The
    survey mission's own altitude hold swung by about 350 m. Phase 5's shadow measures this before anything
    flies.
 7. **The island arenas.** Position is lost more often over open water, so their records fill more slowly.
+   Measured 2026-11-26: Icebound fixed on 1% of its lines and Stormbreak on 5%, against 77% to 84%
+   elsewhere. The cause was a minimap scale, not the water: at 24 m/px they fixed 57% and 67% of
+   black-box crops. The live rate after the change is still to be measured.
 8. **What `m` does on the game's other screens.** Still not known, and not needed while it is not pressed.
 9. **Which viewer to install.** Blender is the recommendation, F3D the lighter one. Until one is chosen the
    web page is the only view.
